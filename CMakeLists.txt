@@ -49,6 +49,8 @@ endif()
 # ── Target ────────────────────────────────────────────────────────────────────
 add_executable(ProjectOptimizedRenderer
     src/main.cpp
+    src/core/VulkanContext.cpp
+    src/core/Device.cpp
 )
 
 target_include_directories(ProjectOptimizedRenderer PRIVATE
