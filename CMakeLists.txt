@@ -51,6 +51,11 @@ add_executable(ProjectOptimizedRenderer
     src/main.cpp
     src/core/VulkanContext.cpp
     src/core/Device.cpp
+    src/core/Window.cpp
+    src/core/Swapchain.cpp
+    src/core/CommandBuffer.cpp
+    src/core/FrameSync.cpp
+    src/core/Renderer.cpp
 )
 
 target_include_directories(ProjectOptimizedRenderer PRIVATE
@@ -69,6 +74,20 @@ target_compile_definitions(ProjectOptimizedRenderer PRIVATE
     VK_ENABLE_BETA_EXTENSIONS
     VK_USE_PLATFORM_MACOS_MVK
     $<$<CONFIG:Debug>:VK_DEBUG_MARKERS>
+    # Absolute path to compiled SPIR-V shaders; allows running the binary from any directory
+    SHADER_DIR="${CMAKE_BINARY_DIR}/shaders"
+)
+
+# ── Shader compilation ────────────────────────────────────────────────────────
+shader_compile_glsl(
+    TARGET ProjectOptimizedRenderer
+    SOURCE "${CMAKE_SOURCE_DIR}/shaders/triangle.vert"
+    OUTPUT "triangle.vert.spv"
+)
+shader_compile_glsl(
+    TARGET ProjectOptimizedRenderer
+    SOURCE "${CMAKE_SOURCE_DIR}/shaders/triangle.frag"
+    OUTPUT "triangle.frag.spv"
 )
 
 target_link_libraries(ProjectOptimizedRenderer PRIVATE
