@@ -44,6 +44,10 @@ void VulkanContext::init()
 
 void VulkanContext::shutdown()
 {
+    if (m_allocator != nullptr) {
+        vmaDestroyAllocator(m_allocator);
+        m_allocator = nullptr;
+    }
     if (m_device != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(m_device);
         vkDestroyDevice(m_device, nullptr);
@@ -347,7 +351,24 @@ void VulkanContext::createLogicalDevice()
     vkGetDeviceQueue(m_device, m_computeQueueFamily,  0, &m_computeQueue);
     vkGetDeviceQueue(m_device, m_transferQueueFamily, 0, &m_transferQueue);
 
-    spdlog::info("Logical device created successfully");
+    // VMA needs vkGetInstanceProcAddr/vkGetDeviceProcAddr to resolve all other
+    // function pointers at runtime, since we use volk (VMA_DYNAMIC_VULKAN_FUNCTIONS=1).
+    VmaVulkanFunctions vmaFunctions{};
+    vmaFunctions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
+    vmaFunctions.vkGetDeviceProcAddr   = vkGetDeviceProcAddr;
+
+    const VmaAllocatorCreateInfo allocCI{
+        // Matches the bufferDeviceAddress feature we enabled in Vk12Features
+        .flags            = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT,
+        .physicalDevice   = m_physicalDevice,
+        .device           = m_device,
+        .pVulkanFunctions = &vmaFunctions,
+        .instance         = m_instance,
+        .vulkanApiVersion = VK_API_VERSION_1_4,
+    };
+    VK_CHECK(vmaCreateAllocator(&allocCI, &m_allocator));
+
+    spdlog::info("Logical device + VMA allocator created successfully");
 }
 
 // ── Feature queries ───────────────────────────────────────────────────────────
