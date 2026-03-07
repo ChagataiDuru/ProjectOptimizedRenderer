@@ -2,6 +2,7 @@
 #include "core/Device.h"
 #include "core/Window.h"
 #include "core/Swapchain.h"
+#include "core/Renderer.h"
 
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
@@ -23,20 +24,26 @@ int main()
         VulkanContext vulkanContext;
         vulkanContext.init();
 
-        Device device(vulkanContext);
-
         uint32_t w, h;
         window.getExtent(w, h);
 
         Swapchain swapchain(vulkanContext);
         swapchain.init(window.getHandle(), w, h);
 
-        spdlog::info("ProjectOptimizedRenderer initialized successfully");
-        spdlog::info("Swapchain: {}x{}, {} images",
-            swapchain.getExtent().width,
-            swapchain.getExtent().height,
-            swapchain.getImageCount());
+        Device device(vulkanContext);
 
+        Renderer renderer(vulkanContext, swapchain);
+        renderer.init();
+
+        spdlog::info("Entering render loop");
+
+        while (!window.shouldClose()) {
+            window.pollEvents();
+            renderer.beginFrame();
+            renderer.endFrame();
+        }
+
+        renderer.shutdown();
         swapchain.shutdown();
         vulkanContext.shutdown();
         window.shutdown();
