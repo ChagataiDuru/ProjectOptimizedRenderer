@@ -78,6 +78,9 @@ void VulkanContext::createInstance()
         VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME,
         VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
         VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
+        VK_KHR_SURFACE_EXTENSION_NAME,
+        // MoltenVK 1.4 exposes VkSurface via the Metal surface extension
+        "VK_EXT_metal_surface",
     };
 
     // Build layer list: enumerate what's actually available to avoid VK_ERROR_LAYER_NOT_PRESENT.
@@ -319,9 +322,12 @@ void VulkanContext::createLogicalDevice()
         .pNext = &m_vulkan14Features,
     };
 
-    // Device extensions: only portability_subset is needed on MoltenVK
-    // (dynamic_rendering, push_descriptors, sync2 are all core in Vulkan 1.4)
-    std::vector<const char*> deviceExtensions;
+    // VK_KHR_swapchain is not core — always required for presentation.
+    // VK_KHR_portability_subset is mandatory on MoltenVK.
+    // All other extensions (dynamic_rendering, push_descriptors, sync2) are core in 1.4.
+    std::vector<const char*> deviceExtensions = {
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+    };
     if (checkRequiredExtensions(m_physicalDevice))
         deviceExtensions.push_back("VK_KHR_portability_subset");
 
