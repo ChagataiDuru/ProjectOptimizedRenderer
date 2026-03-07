@@ -11,6 +11,7 @@ dist/
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
+CMakeUserPresets.json
 
 # IDE
 .vscode/
@@ -50,4 +51,5 @@ __pycache__/
 Thumbs.db
 
 # VMA
-VulkanMemoryAllocator/
+VulkanMemoryAllocator/.claude/
+CLAUDE.md
