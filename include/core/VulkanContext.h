@@ -1,6 +1,7 @@
 #pragma once
 
 #include <volk.h>
+#include <vk_mem_alloc.h>
 #include <cstdint>
 #include <vector>
 
@@ -33,6 +34,7 @@ public:
     VkPhysicalDevice getPhysicalDevice()      const { return m_physicalDevice; }
     VkQueue          getGraphicsQueue()       const { return m_graphicsQueue; }
     uint32_t         getGraphicsQueueFamily() const { return m_graphicsQueueFamily; }
+    VmaAllocator     getAllocator()           const { return m_allocator; }
 
     bool hasFeature_DynamicRenderingLocalRead() const;
     bool hasFeature_PushDescriptor()            const;
@@ -51,6 +53,7 @@ private:
     VkPhysicalDevice         m_physicalDevice = VK_NULL_HANDLE;
     VkDevice                 m_device         = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT m_debugMessenger = VK_NULL_HANDLE;
+    VmaAllocator             m_allocator      = nullptr;
 
     VkQueue  m_graphicsQueue = VK_NULL_HANDLE;
     VkQueue  m_computeQueue  = VK_NULL_HANDLE;

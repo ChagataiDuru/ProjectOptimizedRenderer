@@ -56,6 +56,13 @@ add_executable(ProjectOptimizedRenderer
     src/core/CommandBuffer.cpp
     src/core/FrameSync.cpp
     src/core/Renderer.cpp
+    src/resource/VmaImpl.cpp
+    src/resource/Buffer.cpp
+    src/resource/Image.cpp
+    src/resource/Descriptor.cpp
+    src/resource/PipelineLayout.cpp
+    src/resource/Shader.cpp
+    src/resource/ResourceSet.cpp
 )
 
 target_include_directories(ProjectOptimizedRenderer PRIVATE
@@ -74,8 +81,11 @@ target_compile_definitions(ProjectOptimizedRenderer PRIVATE
     VK_ENABLE_BETA_EXTENSIONS
     VK_USE_PLATFORM_MACOS_MVK
     $<$<CONFIG:Debug>:VK_DEBUG_MARKERS>
-    # Absolute path to compiled SPIR-V shaders; allows running the binary from any directory
     SHADER_DIR="${CMAKE_BINARY_DIR}/shaders"
+    # VMA: use dynamic Vulkan function loading via volk (VMA_STATIC_VULKAN_FUNCTIONS=0
+    # means VMA won't reference Vulkan symbols directly; they're loaded via volk).
+    VMA_STATIC_VULKAN_FUNCTIONS=0
+    VMA_DYNAMIC_VULKAN_FUNCTIONS=1
 )
 
 # ── Shader compilation ────────────────────────────────────────────────────────
@@ -97,4 +107,7 @@ target_link_libraries(ProjectOptimizedRenderer PRIVATE
     spdlog::spdlog
     glm::glm
     Threads::Threads
+    glslang::glslang
+    glslang::SPIRV
+    glslang::glslang-default-resource-limits
 )
