@@ -15,7 +15,7 @@ struct Vertex {
     glm::vec3 normal;    // location 1
     glm::vec2 uv;        // location 2
     glm::vec3 tangent;   // location 3
-    float     _pad[5];   // pad to 64 bytes
+    float     _pad[5]{};  // pad to 64 bytes (zero-initialized; not read by shaders)
 
     // Describes how the vertex buffer is laid out: one interleaved binding,
     // advancing one vertex worth of data per vertex (not per instance).
