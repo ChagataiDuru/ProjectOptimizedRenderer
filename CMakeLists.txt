@@ -99,6 +99,16 @@ shader_compile_glsl(
     SOURCE "${CMAKE_SOURCE_DIR}/shaders/triangle.frag"
     OUTPUT "triangle.frag.spv"
 )
+shader_compile_glsl(
+    TARGET ProjectOptimizedRenderer
+    SOURCE "${CMAKE_SOURCE_DIR}/shaders/pbr.vert"
+    OUTPUT "pbr.vert.spv"
+)
+shader_compile_glsl(
+    TARGET ProjectOptimizedRenderer
+    SOURCE "${CMAKE_SOURCE_DIR}/shaders/pbr.frag"
+    OUTPUT "pbr.frag.spv"
+)
 
 target_link_libraries(ProjectOptimizedRenderer PRIVATE
     Vulkan::Vulkan

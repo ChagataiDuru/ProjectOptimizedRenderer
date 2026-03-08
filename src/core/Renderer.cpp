@@ -1,6 +1,9 @@
 #include "core/Renderer.h"
+#include "resource/GeometryFactory.h"
+#include "resource/Vertex.h"
 
 #include <spdlog/spdlog.h>
+#include <glm/glm.hpp>
 #include <array>
 #include <fstream>
 #include <stdexcept>
@@ -78,6 +81,8 @@ Renderer::Renderer(VulkanContext& ctx, Swapchain& swapchain)
     , m_swapchain(swapchain)
     , m_commandBuffer(ctx)
     , m_frameSync(ctx)
+    , m_vertexBuffer(ctx)
+    , m_indexBuffer(ctx)
 {
 }
 
@@ -90,8 +95,9 @@ void Renderer::init()
 {
     m_frameSync.init(3);
     m_commandBuffer.init(m_ctx.getGraphicsQueueFamily(), 3);
-    createTrianglePipeline();
-    spdlog::info("Renderer initialized");
+    createGeometry();
+    createPbrPipeline();
+    spdlog::info("Renderer initialized (Phase 1.1: vertex pipeline + cube geometry)");
 }
 
 void Renderer::shutdown()
@@ -103,13 +109,79 @@ void Renderer::shutdown()
     m_frameSync.shutdown();
 }
 
+// ── Geometry ──────────────────────────────────────────────────────────────────
+
+void Renderer::createGeometry()
+{
+    const auto cube = GeometryFactory::createCube();
+    m_indexCount = static_cast<uint32_t>(cube.indices.size());
+
+    const VkDeviceSize vertSize = cube.vertices.size() * sizeof(Vertex);
+    const VkDeviceSize idxSize  = cube.indices.size()  * sizeof(uint32_t);
+
+    m_vertexBuffer.createDeviceLocal(vertSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+    m_indexBuffer.createDeviceLocal(idxSize,   VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+
+    // Staged upload requires recording a copy command.
+    // Use a dedicated transient pool so frame command buffers are not disturbed.
+    const VkCommandPoolCreateInfo poolCI{
+        .sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+        .queueFamilyIndex = m_ctx.getGraphicsQueueFamily(),
+    };
+    VkCommandPool transferPool;
+    VK_CHECK(vkCreateCommandPool(m_ctx.getDevice(), &poolCI, nullptr, &transferPool));
+
+    const VkCommandBufferAllocateInfo allocInfo{
+        .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool        = transferPool,
+        .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+    VkCommandBuffer transferCmd;
+    VK_CHECK(vkAllocateCommandBuffers(m_ctx.getDevice(), &allocInfo, &transferCmd));
+
+    const VkCommandBufferBeginInfo beginInfo{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+    VK_CHECK(vkBeginCommandBuffer(transferCmd, &beginInfo));
+
+    m_vertexBuffer.uploadStaged(cube.vertices.data(), vertSize, transferCmd);
+    m_indexBuffer.uploadStaged(cube.indices.data(),   idxSize,  transferCmd);
+
+    VK_CHECK(vkEndCommandBuffer(transferCmd));
+
+    // Submit and block until the GPU copy is complete before releasing staging memory.
+    VkFence fence;
+    const VkFenceCreateInfo fenceCI{ .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    VK_CHECK(vkCreateFence(m_ctx.getDevice(), &fenceCI, nullptr, &fence));
+
+    const VkSubmitInfo submitInfo{
+        .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers    = &transferCmd,
+    };
+    VK_CHECK(vkQueueSubmit(m_ctx.getGraphicsQueue(), 1, &submitInfo, fence));
+    VK_CHECK(vkWaitForFences(m_ctx.getDevice(), 1, &fence, VK_TRUE, UINT64_MAX));
+
+    m_vertexBuffer.releaseStaging();
+    m_indexBuffer.releaseStaging();
+
+    vkDestroyFence(m_ctx.getDevice(), fence, nullptr);
+    vkDestroyCommandPool(m_ctx.getDevice(), transferPool, nullptr);
+
+    spdlog::info("Geometry created: {} vertices, {} indices",
+                 cube.vertices.size(), m_indexCount);
+}
+
 // ── Pipeline ──────────────────────────────────────────────────────────────────
 
-void Renderer::createTrianglePipeline()
+void Renderer::createPbrPipeline()
 {
     const std::string dir = SHADER_DIR;
-    m_vertModule = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/triangle.vert.spv"));
-    m_fragModule = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/triangle.frag.spv"));
+    m_vertModule = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/pbr.vert.spv"));
+    m_fragModule = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/pbr.frag.spv"));
 
     const std::array<VkPipelineShaderStageCreateInfo, 2> stages{{
         {
@@ -126,9 +198,15 @@ void Renderer::createTrianglePipeline()
         },
     }};
 
-    // No vertex buffers — positions/colors are hardcoded in the shader via gl_VertexIndex
+    // Vertex buffer layout from Vertex struct (position, normal, uv, tangent)
+    const auto bindingDesc  = Vertex::getBindingDescription();
+    const auto attribDescs  = Vertex::getAttributeDescriptions();
     const VkPipelineVertexInputStateCreateInfo vertexInput{
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount   = 1,
+        .pVertexBindingDescriptions      = &bindingDesc,
+        .vertexAttributeDescriptionCount = static_cast<uint32_t>(attribDescs.size()),
+        .pVertexAttributeDescriptions    = attribDescs.data(),
     };
 
     const VkPipelineInputAssemblyStateCreateInfo inputAssembly{
@@ -146,8 +224,9 @@ void Renderer::createTrianglePipeline()
     const VkPipelineRasterizationStateCreateInfo rasterization{
         .sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
         .polygonMode = VK_POLYGON_MODE_FILL,
-        .cullMode    = VK_CULL_MODE_NONE,
-        .frontFace   = VK_FRONT_FACE_CLOCKWISE,
+        // Back-face culling enabled: cube normals are outward-facing CCW, so back faces are CW.
+        .cullMode    = VK_CULL_MODE_BACK_BIT,
+        .frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE,
         .lineWidth   = 1.0f,
     };
 
@@ -156,7 +235,7 @@ void Renderer::createTrianglePipeline()
         .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
     };
 
-    // No depth buffer in Phase 0.4 — disabled explicitly
+    // No depth buffer yet — Phase 1.2 will add a depth attachment
     const VkPipelineDepthStencilStateCreateInfo depthStencil{
         .sType            = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
         .depthTestEnable  = VK_FALSE,
@@ -185,8 +264,34 @@ void Renderer::createTrianglePipeline()
         .pDynamicStates    = dynamicStates.data(),
     };
 
+    // Camera UBO descriptor set layout (set = 0, binding = 0).
+    // Phase 1.2 will allocate + bind the actual descriptor set each frame.
+    const VkDescriptorSetLayoutBinding cameraBinding{
+        .binding         = 0,
+        .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .descriptorCount = 1,
+        .stageFlags      = VK_SHADER_STAGE_VERTEX_BIT,
+    };
+    const VkDescriptorSetLayoutCreateInfo setLayoutInfo{
+        .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 1,
+        .pBindings    = &cameraBinding,
+    };
+    VK_CHECK(vkCreateDescriptorSetLayout(m_ctx.getDevice(), &setLayoutInfo, nullptr, &m_cameraSetLayout));
+
+    // Push constant: per-object model matrix (64 bytes, vertex stage only)
+    const VkPushConstantRange pushConstant{
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+        .offset     = 0,
+        .size       = sizeof(glm::mat4),
+    };
+
     const VkPipelineLayoutCreateInfo layoutInfo{
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount         = 1,
+        .pSetLayouts            = &m_cameraSetLayout,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges    = &pushConstant,
     };
     VK_CHECK(vkCreatePipelineLayout(m_ctx.getDevice(), &layoutInfo, nullptr, &m_pipelineLayout));
 
@@ -218,22 +323,23 @@ void Renderer::createTrianglePipeline()
     };
 
     VK_CHECK(vkCreateGraphicsPipelines(
-        m_ctx.getDevice(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_trianglePipeline));
+        m_ctx.getDevice(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_pipeline));
 
     // Shader modules are only needed during pipeline compilation — free them immediately
     vkDestroyShaderModule(m_ctx.getDevice(), m_vertModule, nullptr); m_vertModule = VK_NULL_HANDLE;
     vkDestroyShaderModule(m_ctx.getDevice(), m_fragModule, nullptr); m_fragModule = VK_NULL_HANDLE;
 
-    spdlog::info("Triangle pipeline created");
+    spdlog::info("PBR pipeline created (pbr.vert + pbr.frag)");
 }
 
 void Renderer::destroyPipeline()
 {
     const VkDevice dev = m_ctx.getDevice();
-    if (m_vertModule       != VK_NULL_HANDLE) { vkDestroyShaderModule(dev, m_vertModule, nullptr);       m_vertModule       = VK_NULL_HANDLE; }
-    if (m_fragModule       != VK_NULL_HANDLE) { vkDestroyShaderModule(dev, m_fragModule, nullptr);       m_fragModule       = VK_NULL_HANDLE; }
-    if (m_trianglePipeline != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_trianglePipeline, nullptr);     m_trianglePipeline = VK_NULL_HANDLE; }
-    if (m_pipelineLayout   != VK_NULL_HANDLE) { vkDestroyPipelineLayout(dev, m_pipelineLayout, nullptr); m_pipelineLayout   = VK_NULL_HANDLE; }
+    if (m_vertModule      != VK_NULL_HANDLE) { vkDestroyShaderModule(dev, m_vertModule, nullptr);          m_vertModule      = VK_NULL_HANDLE; }
+    if (m_fragModule      != VK_NULL_HANDLE) { vkDestroyShaderModule(dev, m_fragModule, nullptr);          m_fragModule      = VK_NULL_HANDLE; }
+    if (m_pipeline        != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_pipeline, nullptr);                m_pipeline        = VK_NULL_HANDLE; }
+    if (m_pipelineLayout  != VK_NULL_HANDLE) { vkDestroyPipelineLayout(dev, m_pipelineLayout, nullptr);   m_pipelineLayout  = VK_NULL_HANDLE; }
+    if (m_cameraSetLayout != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(dev, m_cameraSetLayout, nullptr); m_cameraSetLayout = VK_NULL_HANDLE; }
 }
 
 // ── Frame loop ────────────────────────────────────────────────────────────────
@@ -285,7 +391,7 @@ void Renderer::render()
 
     vkCmdBeginRendering(cmd, &renderingInfo);
 
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_trianglePipeline);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
 
     const VkExtent2D ext = m_swapchain.getExtent();
     const VkViewport viewport{
@@ -301,8 +407,23 @@ void Renderer::render()
     const VkRect2D scissor{ .offset = { 0, 0 }, .extent = ext };
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-    // 3 vertices, 1 instance — triangle positions/colors come from gl_VertexIndex in shader
-    vkCmdDraw(cmd, 3, 1, 0, 0);
+    // Bind vertex and index buffers
+    const VkDeviceSize vertexOffset = 0;
+    const VkBuffer vertexBuf = m_vertexBuffer.getBuffer();
+    vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuf, &vertexOffset);
+    vkCmdBindIndexBuffer(cmd, m_indexBuffer.getBuffer(), 0, VK_INDEX_TYPE_UINT32);
+
+    // Push model matrix (identity for now — Phase 1.3 will animate this)
+    const glm::mat4 modelMatrix(1.0f);
+    vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
+                       0, sizeof(glm::mat4), &modelMatrix);
+
+    // NOTE: descriptor set 0 (camera UBO) is not bound yet — Phase 1.2 will add UBO handling.
+    // The vertex shader will read undefined camera data, so the cube won't project correctly.
+    // This is expected at Phase 1.1 — the render target will show fragment output from rasterized
+    // geometry once the camera matrices are provided.
+
+    vkCmdDrawIndexed(cmd, m_indexCount, 1, 0, 0, 0);
 
     vkCmdEndRendering(cmd);
 
@@ -314,6 +435,12 @@ void Renderer::render()
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,          VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
 
     VK_CHECK(vkEndCommandBuffer(cmd));
+}
+
+void Renderer::setCameraMatrices(const glm::mat4& /*view*/, const glm::mat4& /*projection*/)
+{
+    // Phase 1.2: allocate per-frame UBO, upload view/projection, bind descriptor set.
+    spdlog::debug("setCameraMatrices: UBO upload deferred to Phase 1.2");
 }
 
 void Renderer::endFrame()
