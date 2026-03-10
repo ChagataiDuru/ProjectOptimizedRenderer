@@ -1,5 +1,6 @@
 #include "core/VulkanContext.h"
 
+#include <SDL3/SDL_vulkan.h>
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <cstring>
@@ -78,18 +79,29 @@ void VulkanContext::createInstance()
         .apiVersion         = VK_API_VERSION_1_4,
     };
 
-    const std::vector<const char*> extensions = {
-        VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME,
-        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
+    // ── Build instance extensions list (platform-dependent) ──────────────────
+    // SDL3 can tell us which surface extensions it needs, but we also add
+    // debug utils and any portability extensions explicitly.
+    std::vector<const char*> extensions = {
         VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
         VK_KHR_SURFACE_EXTENSION_NAME,
-        // MoltenVK 1.4 exposes VkSurface via the Metal surface extension
-        "VK_EXT_metal_surface",
     };
 
+#if defined(__APPLE__)
+    // MoltenVK requires portability enumeration and the Metal surface extension
+    extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+    extensions.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+    extensions.push_back("VK_EXT_metal_surface");
+#elif defined(_WIN32)
+    // Native Vulkan on Windows — Win32 surface extension
+    extensions.push_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
+#else
+    // Linux / other — SDL will pick wayland or xcb at runtime,
+    // but we still need the surface extension which is already added above.
+    // SDL_Vulkan_GetInstanceExtensions can be used for dynamic query.
+#endif
+
     // Build layer list: enumerate what's actually available to avoid VK_ERROR_LAYER_NOT_PRESENT.
-    // Validation layers are only present when the LunarG Vulkan SDK is installed separately
-    // from MoltenVK — they are not bundled with the MoltenVK Homebrew formula.
     std::vector<const char*> validationLayers;
 #ifndef NDEBUG
     {
@@ -126,12 +138,17 @@ void VulkanContext::createInstance()
         .pfnUserCallback = debugCallback,
     };
 
+    VkInstanceCreateFlags instanceFlags = 0;
+#if defined(__APPLE__)
+    // Required for MoltenVK portability enumeration
+    instanceFlags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+#endif
+
     const VkInstanceCreateInfo createInfo{
         .sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         // Chain debug messenger so validation covers instance creation/destruction too
         .pNext                   = &debugInfo,
-        // Required for MoltenVK portability enumeration
-        .flags                   = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR,
+        .flags                   = instanceFlags,
         .pApplicationInfo        = &appInfo,
         .enabledLayerCount       = static_cast<uint32_t>(validationLayers.size()),
         .ppEnabledLayerNames     = validationLayers.data(),
@@ -156,9 +173,10 @@ std::vector<VkExtensionProperties> VulkanContext::getDeviceExtensions(VkPhysical
     return exts;
 }
 
-bool VulkanContext::checkRequiredExtensions(VkPhysicalDevice device)
+bool VulkanContext::checkPortabilitySubset(VkPhysicalDevice device)
 {
-    // VK_KHR_portability_subset is mandatory on MoltenVK
+    // VK_KHR_portability_subset is mandatory on MoltenVK but doesn't exist
+    // on native Vulkan drivers (NVIDIA, AMD, Intel on Windows/Linux).
     auto exts = getDeviceExtensions(device);
     return std::any_of(exts.begin(), exts.end(), [](const VkExtensionProperties& e) {
         return strcmp(e.extensionName, "VK_KHR_portability_subset") == 0;
@@ -208,10 +226,10 @@ void VulkanContext::selectPhysicalDevice()
         vkGetPhysicalDeviceProperties(dev, &props);
 
         int score = 0;
+        // Discrete GPUs (NVIDIA, AMD) score highest
         if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU)
             score += 1000;
         else if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU)
-            // Apple Silicon UMA: integrated is the right classification
             score += 500;
 
         VkPhysicalDeviceVulkan14Features vk14{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES};
@@ -262,12 +280,14 @@ void VulkanContext::createLogicalDevice()
         if (m_graphicsQueueFamily == UINT32_MAX && (flags & VK_QUEUE_GRAPHICS_BIT))
             m_graphicsQueueFamily = i;
 
-        // Prefer a queue family that is compute-only (no graphics)
+        // Prefer a queue family that is compute-only (no graphics).
+        // NVIDIA GPUs typically expose dedicated async compute families.
         if (m_computeQueueFamily == UINT32_MAX &&
             (flags & VK_QUEUE_COMPUTE_BIT) && !(flags & VK_QUEUE_GRAPHICS_BIT))
             m_computeQueueFamily = i;
 
-        // Prefer a queue family that is transfer-only
+        // Prefer a queue family that is transfer-only.
+        // NVIDIA GPUs expose a dedicated transfer/copy engine family.
         if (m_transferQueueFamily == UINT32_MAX &&
             (flags & VK_QUEUE_TRANSFER_BIT) &&
             !(flags & VK_QUEUE_GRAPHICS_BIT) &&
@@ -275,7 +295,8 @@ void VulkanContext::createLogicalDevice()
             m_transferQueueFamily = i;
     }
 
-    // MoltenVK on Apple Silicon exposes one unified family — fall back gracefully
+    // Fall back to graphics family if dedicated queues aren't available
+    // (e.g. MoltenVK on Apple Silicon exposes one unified family)
     if (m_computeQueueFamily  == UINT32_MAX) m_computeQueueFamily  = m_graphicsQueueFamily;
     if (m_transferQueueFamily == UINT32_MAX) m_transferQueueFamily = m_graphicsQueueFamily;
 
@@ -327,12 +348,13 @@ void VulkanContext::createLogicalDevice()
     };
 
     // VK_KHR_swapchain is not core — always required for presentation.
-    // VK_KHR_portability_subset is mandatory on MoltenVK.
     // All other extensions (dynamic_rendering, push_descriptors, sync2) are core in 1.4.
     std::vector<const char*> deviceExtensions = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
     };
-    if (checkRequiredExtensions(m_physicalDevice))
+
+    // VK_KHR_portability_subset is mandatory on MoltenVK; doesn't exist on native drivers.
+    if (checkPortabilitySubset(m_physicalDevice))
         deviceExtensions.push_back("VK_KHR_portability_subset");
 
     const VkDeviceCreateInfo deviceInfo{
@@ -392,7 +414,7 @@ void VulkanContext::logDeviceInfo() const
     const char* deviceTypeName = [&] {
         switch (props.deviceType) {
             case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:   return "Discrete GPU";
-            case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return "Integrated GPU (Apple Silicon UMA)";
+            case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return "Integrated GPU";
             case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:    return "Virtual GPU";
             case VK_PHYSICAL_DEVICE_TYPE_CPU:            return "CPU";
             default:                                     return "Unknown";
@@ -409,9 +431,24 @@ void VulkanContext::logDeviceInfo() const
     spdlog::info("  Type:         {}", deviceTypeName);
     spdlog::info("  Vendor ID:    0x{:04X}", props.vendorID);
     spdlog::info("  API version:  {}.{}.{}", apiMaj, apiMin, apiPat);
+#ifdef _WIN32
+    // NVIDIA encodes driver version as (major << 22) | (minor << 14) | (subminor << 6) | patch
+    if (props.vendorID == 0x10DE) {
+        spdlog::info("  Driver ver:   {}.{}.{}.{} (NVIDIA encoding)",
+            (drv >> 22) & 0x3FF,
+            (drv >> 14) & 0xFF,
+            (drv >> 6)  & 0xFF,
+            drv & 0x3F);
+    } else {
+        spdlog::info("  Driver ver:   {}.{}.{}", VK_API_VERSION_MAJOR(drv),
+                                                 VK_API_VERSION_MINOR(drv),
+                                                 VK_API_VERSION_PATCH(drv));
+    }
+#else
     spdlog::info("  Driver ver:   {}.{}.{}", VK_API_VERSION_MAJOR(drv),
                                              VK_API_VERSION_MINOR(drv),
                                              VK_API_VERSION_PATCH(drv));
+#endif
     spdlog::info("  Features:");
     spdlog::info("    dynamicRenderingLocalRead : {}",
         hasFeature_DynamicRenderingLocalRead() ? "YES" : "NO");

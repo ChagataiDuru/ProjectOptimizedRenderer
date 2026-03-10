@@ -101,8 +101,10 @@ void Swapchain::createSurface(void* platformWindow)
 {
     auto* sdlWindow = static_cast<SDL_Window*>(platformWindow);
 
-    // SDL3 dispatches to vkCreateMetalSurfaceEXT internally on macOS/MoltenVK.
-    // The instance must have been created with VK_KHR_surface + VK_EXT_metal_surface.
+    // SDL3 dispatches to the correct platform surface creation internally:
+    //   macOS/MoltenVK → vkCreateMetalSurfaceEXT
+    //   Windows        → vkCreateWin32SurfaceKHR
+    //   Linux          → vkCreateXcbSurfaceKHR / vkCreateWaylandSurfaceKHR
     if (!SDL_Vulkan_CreateSurface(sdlWindow, m_ctx.getInstance(), nullptr, &m_surface))
         throw std::runtime_error(std::string("SDL_Vulkan_CreateSurface failed: ") + SDL_GetError());
 }
@@ -117,7 +119,7 @@ void Swapchain::selectFormat()
     std::vector<VkSurfaceFormatKHR> formats(count);
     vkGetPhysicalDeviceSurfaceFormatsKHR(m_ctx.getPhysicalDevice(), m_surface, &count, formats.data());
 
-    // BGRA8_SRGB is the native MoltenVK/Metal format on macOS; avoids a blit on present.
+    // BGRA8_SRGB is the native format on most platforms (Metal on macOS, DXGI on Windows).
     // RGBA8_SRGB is the fallback for any system that doesn't expose BGRA.
     const VkFormat preferred[]  = { VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_R8G8B8A8_SRGB };
     const VkColorSpaceKHR space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
@@ -148,8 +150,8 @@ void Swapchain::createSwapchain()
     VkSurfaceCapabilitiesKHR cap{};
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(m_ctx.getPhysicalDevice(), m_surface, &cap);
 
-    // On MoltenVK, currentExtent is always the exact Metal drawable size.
-    // UINT32_MAX signals that the surface lets us choose (uncommon on macOS).
+    // When currentExtent is UINT32_MAX, the surface allows us to choose our own extent.
+    // Otherwise, use the exact extent reported (MoltenVK: Metal drawable size; Win32: window client area).
     if (cap.currentExtent.width != UINT32_MAX) {
         m_extent = cap.currentExtent;
     } else {
@@ -171,12 +173,15 @@ void Swapchain::createSwapchain()
         .imageExtent      = m_extent,
         .imageArrayLayers = 1,
         .imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-        // Apple Silicon has a single queue family — EXCLUSIVE avoids unnecessary sync overhead
+        // EXCLUSIVE avoids unnecessary sync overhead when a single queue family handles
+        // both graphics and presentation (true for both Apple Silicon UMA and most
+        // NVIDIA configurations where graphics queue also supports present).
         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .preTransform     = cap.currentTransform,
         // Opaque compositing — no window transparency
         .compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-        // FIFO (vsync) is guaranteed to be supported; avoids tearing without frame timing
+        // FIFO (vsync) is guaranteed to be supported; avoids tearing without frame timing.
+        // On NVIDIA, consider VK_PRESENT_MODE_MAILBOX_KHR for uncapped fps (future option).
         .presentMode      = VK_PRESENT_MODE_FIFO_KHR,
         .clipped          = VK_TRUE,
     };
