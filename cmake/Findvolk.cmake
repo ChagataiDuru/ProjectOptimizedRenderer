@@ -1,7 +1,7 @@
 # Findvolk.cmake
 # Finds the volk Vulkan meta-loader.
 #
-# Tries Conan-generated config first, then falls back to manual search.
+# Tries Conan/CMake config-mode package first, then falls back to manual search.
 #
 # Imported targets:
 #   volk::volk
@@ -17,21 +17,37 @@ if(volk_FOUND)
     return()
 endif()
 
+# Build platform-specific search paths
+set(_volk_search_paths)
+if(APPLE)
+    list(APPEND _volk_search_paths
+        "${HOMEBREW_PREFIX}/include"
+        "${HOMEBREW_PREFIX}/lib"
+    )
+elseif(WIN32)
+    if(DEFINED ENV{VULKAN_SDK})
+        list(APPEND _volk_search_paths
+            "$ENV{VULKAN_SDK}/Include"
+            "$ENV{VULKAN_SDK}/Lib"
+        )
+    endif()
+endif()
+list(APPEND _volk_search_paths
+    /usr/local/include
+    /usr/include
+    /usr/local/lib
+    /usr/lib
+)
+
 find_path(volk_INCLUDE_DIR
     NAMES volk.h
-    PATHS
-        "${HOMEBREW_PREFIX}/include"
-        /usr/local/include
-        /usr/include
+    PATHS ${_volk_search_paths}
     PATH_SUFFIXES volk
 )
 
 find_library(volk_LIBRARY
     NAMES volk
-    PATHS
-        "${HOMEBREW_PREFIX}/lib"
-        /usr/local/lib
-        /usr/lib
+    PATHS ${_volk_search_paths}
 )
 
 include(FindPackageHandleStandardArgs)
@@ -52,6 +68,11 @@ if(volk_FOUND AND NOT TARGET volk::volk)
             INTERFACE_COMPILE_DEFINITIONS
                 VK_USE_PLATFORM_MACOS_MVK
                 VK_ENABLE_BETA_EXTENSIONS
+        )
+    elseif(WIN32)
+        set_property(TARGET volk::volk APPEND PROPERTY
+            INTERFACE_COMPILE_DEFINITIONS
+                VK_USE_PLATFORM_WIN32_KHR
         )
     endif()
 endif()

@@ -7,7 +7,7 @@
   },
   "configurePresets": [
     {
-      "name": "base",
+      "name": "base-macos",
       "hidden": true,
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
@@ -25,9 +25,24 @@
       }
     },
     {
+      "name": "base-windows",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_CXX_STANDARD": "20",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
       "name": "debug",
       "displayName": "Debug (Apple Silicon)",
-      "inherits": "base",
+      "inherits": "base-macos",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_CXX_FLAGS_DEBUG": "-g -O0 -fno-omit-frame-pointer"
@@ -36,7 +51,7 @@
     {
       "name": "relwithdebinfo",
       "displayName": "RelWithDebInfo (Apple Silicon)",
-      "inherits": "base",
+      "inherits": "base-macos",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O2 -g -DNDEBUG"
@@ -45,10 +60,34 @@
     {
       "name": "release",
       "displayName": "Release (Apple Silicon)",
-      "inherits": "base",
+      "inherits": "base-macos",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_CXX_FLAGS_RELEASE": "-O3 -DNDEBUG"
+      }
+    },
+    {
+      "name": "win-debug",
+      "displayName": "Debug (Windows NVIDIA)",
+      "inherits": "base-windows",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "win-relwithdebinfo",
+      "displayName": "RelWithDebInfo (Windows NVIDIA)",
+      "inherits": "base-windows",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    },
+    {
+      "name": "win-release",
+      "displayName": "Release (Windows NVIDIA)",
+      "inherits": "base-windows",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
       }
     }
   ],
@@ -66,6 +105,21 @@
     {
       "name": "release",
       "configurePreset": "release",
+      "jobs": 0
+    },
+    {
+      "name": "win-debug",
+      "configurePreset": "win-debug",
+      "jobs": 0
+    },
+    {
+      "name": "win-relwithdebinfo",
+      "configurePreset": "win-relwithdebinfo",
+      "jobs": 0
+    },
+    {
+      "name": "win-release",
+      "configurePreset": "win-release",
       "jobs": 0
     }
   ]

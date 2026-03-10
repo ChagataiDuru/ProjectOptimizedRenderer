@@ -6,6 +6,11 @@ dist/
 *.a
 *.so
 *.dylib
+*.lib
+*.dll
+*.pdb
+*.ilk
+*.exp
 
 # CMake
 CMakeCache.txt
@@ -20,6 +25,11 @@ CMakeUserPresets.json
 *.swo
 *~
 .DS_Store
+*.suo
+*.user
+*.filters
+*.vcxproj
+*.sln
 
 # Dependencies
 conan.lock
@@ -49,6 +59,7 @@ __pycache__/
 
 # Windows
 Thumbs.db
+Desktop.ini
 
 # VMA
 VulkanMemoryAllocator/.claude/

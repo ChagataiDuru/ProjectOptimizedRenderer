@@ -29,7 +29,8 @@ void Window::init()
     if (!m_window)
         throw std::runtime_error(std::string("SDL_CreateWindow failed: ") + SDL_GetError());
 
-    // Sync stored dimensions to actual pixel size immediately after creation
+    // Sync stored dimensions to actual pixel size immediately after creation.
+    // On macOS HiDPI and Windows with DPI scaling, pixel size may differ from logical size.
     int pw, ph;
     SDL_GetWindowSizeInPixels(m_window, &pw, &ph);
     m_width  = static_cast<uint32_t>(pw);
@@ -49,8 +50,9 @@ void Window::shutdown()
 
 void Window::getExtent(uint32_t& width, uint32_t& height) const
 {
-    // SDL_GetWindowSizeInPixels returns Metal drawable dimensions on macOS,
-    // which differ from logical (point) dimensions on HiDPI displays.
+    // SDL_GetWindowSizeInPixels returns the correct drawable dimensions on all platforms:
+    //   macOS — Metal drawable size (differs from logical points on HiDPI)
+    //   Windows — client area pixels (accounts for DPI scaling)
     int pw, ph;
     SDL_GetWindowSizeInPixels(m_window, &pw, &ph);
     width  = static_cast<uint32_t>(pw);
@@ -67,7 +69,7 @@ void Window::pollEvents()
                 m_shouldClose = true;
                 break;
             case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
-                // Use pixel size changed (not RESIZED) to track HiDPI-correct dimensions
+                // Use pixel size changed (not RESIZED) to track DPI-correct dimensions
                 m_width  = static_cast<uint32_t>(event.window.data1);
                 m_height = static_cast<uint32_t>(event.window.data2);
                 break;

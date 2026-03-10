@@ -107,8 +107,8 @@ void Image::create(uint32_t width, uint32_t height, uint32_t depth,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
     };
     const VmaAllocationCreateInfo allocCI{
-        .usage = VMA_MEMORY_USAGE_AUTO,
         .flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT,
+        .usage = VMA_MEMORY_USAGE_AUTO,
     };
     VK_CHECK(vmaCreateImage(m_ctx.getAllocator(), &imageCI, &allocCI,
                             &m_image, &m_allocation, nullptr));
