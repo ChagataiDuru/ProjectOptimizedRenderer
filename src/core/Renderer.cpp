@@ -83,6 +83,7 @@ Renderer::Renderer(VulkanContext& ctx, Swapchain& swapchain)
     , m_frameSync(ctx)
     , m_vertexBuffer(ctx)
     , m_indexBuffer(ctx)
+    , m_cameraUBOBuffer(ctx)
 {
 }
 
@@ -96,8 +97,11 @@ void Renderer::init()
     m_frameSync.init(3);
     m_commandBuffer.init(m_ctx.getGraphicsQueueFamily(), 3);
     createGeometry();
-    createPbrPipeline();
-    spdlog::info("Renderer initialized (Phase 1.1: vertex pipeline + cube geometry)");
+    createPbrPipeline();       // also creates m_cameraSetLayout
+    createCameraUBO();
+    createDescriptorPool();
+    createDescriptorSet();     // allocates from pool, binds UBO to set 0 binding 0
+    spdlog::info("Renderer initialized (Phase 1.2: camera UBO + descriptor set)");
 }
 
 void Renderer::shutdown()
@@ -335,11 +339,74 @@ void Renderer::createPbrPipeline()
 void Renderer::destroyPipeline()
 {
     const VkDevice dev = m_ctx.getDevice();
-    if (m_vertModule      != VK_NULL_HANDLE) { vkDestroyShaderModule(dev, m_vertModule, nullptr);          m_vertModule      = VK_NULL_HANDLE; }
-    if (m_fragModule      != VK_NULL_HANDLE) { vkDestroyShaderModule(dev, m_fragModule, nullptr);          m_fragModule      = VK_NULL_HANDLE; }
-    if (m_pipeline        != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_pipeline, nullptr);                m_pipeline        = VK_NULL_HANDLE; }
-    if (m_pipelineLayout  != VK_NULL_HANDLE) { vkDestroyPipelineLayout(dev, m_pipelineLayout, nullptr);   m_pipelineLayout  = VK_NULL_HANDLE; }
+    // Descriptor pool destruction implicitly frees all sets allocated from it.
+    if (m_descriptorPool  != VK_NULL_HANDLE) { vkDestroyDescriptorPool(dev, m_descriptorPool, nullptr);      m_descriptorPool  = VK_NULL_HANDLE; m_descriptorSet = VK_NULL_HANDLE; }
+    if (m_vertModule      != VK_NULL_HANDLE) { vkDestroyShaderModule(dev, m_vertModule, nullptr);             m_vertModule      = VK_NULL_HANDLE; }
+    if (m_fragModule      != VK_NULL_HANDLE) { vkDestroyShaderModule(dev, m_fragModule, nullptr);             m_fragModule      = VK_NULL_HANDLE; }
+    if (m_pipeline        != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_pipeline, nullptr);                   m_pipeline        = VK_NULL_HANDLE; }
+    if (m_pipelineLayout  != VK_NULL_HANDLE) { vkDestroyPipelineLayout(dev, m_pipelineLayout, nullptr);      m_pipelineLayout  = VK_NULL_HANDLE; }
     if (m_cameraSetLayout != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(dev, m_cameraSetLayout, nullptr); m_cameraSetLayout = VK_NULL_HANDLE; }
+}
+
+// ── Camera UBO ────────────────────────────────────────────────────────────────
+
+void Renderer::createCameraUBO()
+{
+    // Host-visible + persistently mapped: upload is a memcpy, no staging needed.
+    // UBOs change every frame so device-local + staging would be needlessly expensive.
+    m_cameraUBOBuffer.createHostVisible(sizeof(CameraUBO), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+
+    const CameraUBO initial{ glm::mat4(1.0f), glm::mat4(1.0f) };
+    m_cameraUBOBuffer.upload(&initial, sizeof(CameraUBO));
+
+    spdlog::info("Camera UBO created ({} bytes, host-visible)", sizeof(CameraUBO));
+}
+
+void Renderer::createDescriptorPool()
+{
+    const VkDescriptorPoolSize poolSize{
+        .type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .descriptorCount = 1,
+    };
+    const VkDescriptorPoolCreateInfo poolCI{
+        .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets       = 1,
+        .poolSizeCount = 1,
+        .pPoolSizes    = &poolSize,
+    };
+    VK_CHECK(vkCreateDescriptorPool(m_ctx.getDevice(), &poolCI, nullptr, &m_descriptorPool));
+    spdlog::info("Descriptor pool created (1 uniform buffer)");
+}
+
+void Renderer::createDescriptorSet()
+{
+    // m_cameraSetLayout was already created in createPbrPipeline() and
+    // baked into the pipeline layout — reuse it directly.
+    const VkDescriptorSetAllocateInfo allocInfo{
+        .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool     = m_descriptorPool,
+        .descriptorSetCount = 1,
+        .pSetLayouts        = &m_cameraSetLayout,
+    };
+    VK_CHECK(vkAllocateDescriptorSets(m_ctx.getDevice(), &allocInfo, &m_descriptorSet));
+
+    const VkDescriptorBufferInfo bufferInfo{
+        .buffer = m_cameraUBOBuffer.getBuffer(),
+        .offset = 0,
+        .range  = sizeof(CameraUBO),
+    };
+    const VkWriteDescriptorSet write{
+        .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet          = m_descriptorSet,
+        .dstBinding      = 0,
+        .dstArrayElement = 0,
+        .descriptorCount = 1,
+        .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .pBufferInfo     = &bufferInfo,
+    };
+    vkUpdateDescriptorSets(m_ctx.getDevice(), 1, &write, 0, nullptr);
+
+    spdlog::info("Descriptor set allocated and bound to camera UBO (set=0, binding=0)");
 }
 
 // ── Frame loop ────────────────────────────────────────────────────────────────
@@ -407,6 +474,10 @@ void Renderer::render()
     const VkRect2D scissor{ .offset = { 0, 0 }, .extent = ext };
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
+    // Bind camera UBO descriptor set (set=0, binding=0 — view/projection matrices)
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout,
+                            0, 1, &m_descriptorSet, 0, nullptr);
+
     // Bind vertex and index buffers
     const VkDeviceSize vertexOffset = 0;
     const VkBuffer vertexBuf = m_vertexBuffer.getBuffer();
@@ -417,11 +488,6 @@ void Renderer::render()
     const glm::mat4 modelMatrix(1.0f);
     vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
                        0, sizeof(glm::mat4), &modelMatrix);
-
-    // NOTE: descriptor set 0 (camera UBO) is not bound yet — Phase 1.2 will add UBO handling.
-    // The vertex shader will read undefined camera data, so the cube won't project correctly.
-    // This is expected at Phase 1.1 — the render target will show fragment output from rasterized
-    // geometry once the camera matrices are provided.
 
     vkCmdDrawIndexed(cmd, m_indexCount, 1, 0, 0, 0);
 
@@ -437,10 +503,10 @@ void Renderer::render()
     VK_CHECK(vkEndCommandBuffer(cmd));
 }
 
-void Renderer::setCameraMatrices(const glm::mat4& /*view*/, const glm::mat4& /*projection*/)
+void Renderer::setCameraMatrices(const glm::mat4& view, const glm::mat4& projection)
 {
-    // Phase 1.2: allocate per-frame UBO, upload view/projection, bind descriptor set.
-    spdlog::debug("setCameraMatrices: UBO upload deferred to Phase 1.2");
+    const CameraUBO ubo{ view, projection };
+    m_cameraUBOBuffer.upload(&ubo, sizeof(CameraUBO));
 }
 
 void Renderer::endFrame()

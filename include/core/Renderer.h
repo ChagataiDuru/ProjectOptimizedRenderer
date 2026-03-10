@@ -54,4 +54,18 @@ private:
     // Shader modules are destroyed after pipeline creation; kept as VK_NULL_HANDLE thereafter.
     VkShaderModule        m_vertModule      = VK_NULL_HANDLE;
     VkShaderModule        m_fragModule      = VK_NULL_HANDLE;
+
+    // Phase 1.2: camera UBO — host-visible so we can memcpy each frame without staging
+    struct CameraUBO {
+        glm::mat4 view;
+        glm::mat4 projection;
+    };
+
+    Buffer           m_cameraUBOBuffer;
+    VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
+    VkDescriptorSet  m_descriptorSet  = VK_NULL_HANDLE;
+
+    void createCameraUBO();
+    void createDescriptorPool();
+    void createDescriptorSet();
 };
