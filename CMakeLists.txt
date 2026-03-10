@@ -56,6 +56,7 @@ add_executable(ProjectOptimizedRenderer
     src/core/CommandBuffer.cpp
     src/core/FrameSync.cpp
     src/core/Renderer.cpp
+    src/core/Camera.cpp
     src/resource/VmaImpl.cpp
     src/resource/Buffer.cpp
     src/resource/Image.cpp
