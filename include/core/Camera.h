@@ -7,7 +7,7 @@ public:
     Camera();
 
     // Input processing
-    void processKeyboard(const uint8_t* keys);  // SDL3 keyboard state
+    void processKeyboard(const bool* keys);  // SDL3 keyboard state
     void processMouseMovement(float xoffset, float yoffset);
 
     // Configuration

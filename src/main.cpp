@@ -68,7 +68,7 @@ int main()
 
             // ── SDL event processing ──────────────────────────────────────────
             // Keyboard state for smooth per-frame movement (held keys).
-            const uint8_t* keys = SDL_GetKeyboardState(nullptr);
+            const bool* keys = SDL_GetKeyboardState(nullptr);
 
             if (keys[SDL_SCANCODE_ESCAPE]) {
                 running = false;

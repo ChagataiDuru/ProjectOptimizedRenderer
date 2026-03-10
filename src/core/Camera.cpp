@@ -59,7 +59,7 @@ glm::mat4 Camera::perspectiveReverseZ(float fovY_, float aspect, float n, float 
     return result;
 }
 
-void Camera::processKeyboard(const uint8_t* keys) {
+void Camera::processKeyboard(const bool* keys) {
     velocity = glm::vec3(0);
 
     if (keys[SDL_SCANCODE_W])     velocity.z -= 1.0f;  // forward  (-Z)
