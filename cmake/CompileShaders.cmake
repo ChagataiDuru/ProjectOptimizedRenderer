@@ -8,22 +8,46 @@ if(TARGET glslang::glslang)
     set(_conan_hints "${_glslang_root}/bin")
 endif()
 
-find_program(GLSLC_EXECUTABLE NAMES glslc
-    HINTS
+# Build platform-specific search hints
+set(_shader_compiler_hints ${_conan_hints})
+if(APPLE)
+    list(APPEND _shader_compiler_hints
         "${HOMEBREW_PREFIX}/bin"
         "$ENV{VULKAN_SDK}/bin"
+    )
+elseif(WIN32)
+    if(DEFINED ENV{VULKAN_SDK})
+        list(APPEND _shader_compiler_hints "$ENV{VULKAN_SDK}/Bin")
+    endif()
+    # Common Vulkan SDK default install location on Windows
+    file(GLOB _vk_sdk_bin_dirs "C:/VulkanSDK/*/Bin")
+    list(APPEND _shader_compiler_hints ${_vk_sdk_bin_dirs})
+else()
+    list(APPEND _shader_compiler_hints
+        "$ENV{VULKAN_SDK}/bin"
+        "/usr/local/bin"
+    )
+endif()
+
+find_program(GLSLC_EXECUTABLE NAMES glslc
+    HINTS ${_shader_compiler_hints}
 )
 
 find_program(GLSLANG_VALIDATOR_EXECUTABLE NAMES glslangValidator
-    HINTS
-        "${HOMEBREW_PREFIX}/bin"
-        "$ENV{VULKAN_SDK}/bin"
+    HINTS ${_shader_compiler_hints}
 )
 
 if(NOT GLSLC_EXECUTABLE AND NOT GLSLANG_VALIDATOR_EXECUTABLE)
-    message(WARNING "No GLSL compiler found (glslc or glslangValidator). "
-        "Shader compilation will be unavailable. "
-        "Install via: brew install glslang  OR  set VULKAN_SDK env var.")
+    if(WIN32)
+        message(WARNING "No GLSL compiler found (glslc or glslangValidator). "
+            "Shader compilation will be unavailable. "
+            "Install the LunarG Vulkan SDK from https://vulkan.lunarg.com "
+            "or ensure VULKAN_SDK env var is set.")
+    else()
+        message(WARNING "No GLSL compiler found (glslc or glslangValidator). "
+            "Shader compilation will be unavailable. "
+            "Install via: brew install glslang  OR  set VULKAN_SDK env var.")
+    endif()
 endif()
 
 set(SHADER_OUTPUT_DIR "${CMAKE_BINARY_DIR}/shaders")

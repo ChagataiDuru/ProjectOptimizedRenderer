@@ -46,7 +46,7 @@ private:
     void createLogicalDevice();
 
     bool                               isDeviceSuitable(VkPhysicalDevice device);
-    bool                               checkRequiredExtensions(VkPhysicalDevice device);
+    bool                               checkPortabilitySubset(VkPhysicalDevice device);
     std::vector<VkExtensionProperties> getDeviceExtensions(VkPhysicalDevice device);
 
     VkInstance               m_instance      = VK_NULL_HANDLE;

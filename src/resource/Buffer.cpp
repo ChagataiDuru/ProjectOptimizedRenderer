@@ -60,9 +60,9 @@ void Buffer::createDeviceLocal(VkDeviceSize size, VkBufferUsageFlags usage)
         .usage = usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
     };
     const VmaAllocationCreateInfo allocCI{
-        .usage = VMA_MEMORY_USAGE_AUTO,
         // DEDICATED_MEMORY for large GPU-only resources (vertex/index buffers)
         .flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT,
+        .usage = VMA_MEMORY_USAGE_AUTO,
     };
     VK_CHECK(vmaCreateBuffer(m_ctx.getAllocator(), &bufCI, &allocCI,
                              &m_buffer, &m_allocation, nullptr));

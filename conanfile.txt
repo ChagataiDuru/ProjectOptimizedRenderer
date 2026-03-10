@@ -17,6 +17,3 @@ glslang/*:build_executables=False
 [generators]
 CMakeDeps
 CMakeToolchain
-
-[layout]
-cmake_layout
