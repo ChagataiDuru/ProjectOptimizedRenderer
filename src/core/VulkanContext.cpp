@@ -45,12 +45,14 @@ void VulkanContext::init()
 
 void VulkanContext::shutdown()
 {
+    if (m_device != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(m_device);
+    }
     if (m_allocator != nullptr) {
         vmaDestroyAllocator(m_allocator);
         m_allocator = nullptr;
     }
     if (m_device != VK_NULL_HANDLE) {
-        vkDeviceWaitIdle(m_device);
         vkDestroyDevice(m_device, nullptr);
         m_device = VK_NULL_HANDLE;
     }
@@ -83,9 +85,12 @@ void VulkanContext::createInstance()
     // SDL3 can tell us which surface extensions it needs, but we also add
     // debug utils and any portability extensions explicitly.
     std::vector<const char*> extensions = {
-        VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
         VK_KHR_SURFACE_EXTENSION_NAME,
     };
+
+#ifndef NDEBUG
+    extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+#endif
 
 #if defined(__APPLE__)
     // MoltenVK requires portability enumeration and the Metal surface extension
@@ -126,6 +131,7 @@ void VulkanContext::createInstance()
     }
 #endif
 
+#ifndef NDEBUG
     const VkDebugUtilsMessengerCreateInfoEXT debugInfo{
         .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
         .messageSeverity =
@@ -137,6 +143,7 @@ void VulkanContext::createInstance()
             VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
         .pfnUserCallback = debugCallback,
     };
+#endif
 
     VkInstanceCreateFlags instanceFlags = 0;
 #if defined(__APPLE__)
@@ -146,8 +153,12 @@ void VulkanContext::createInstance()
 
     const VkInstanceCreateInfo createInfo{
         .sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+#ifndef NDEBUG
         // Chain debug messenger so validation covers instance creation/destruction too
         .pNext                   = &debugInfo,
+#else
+        .pNext                   = nullptr,
+#endif
         .flags                   = instanceFlags,
         .pApplicationInfo        = &appInfo,
         .enabledLayerCount       = static_cast<uint32_t>(validationLayers.size()),
@@ -159,7 +170,9 @@ void VulkanContext::createInstance()
     VK_CHECK(vkCreateInstance(&createInfo, nullptr, &m_instance));
     volkLoadInstance(m_instance);
 
+#ifndef NDEBUG
     VK_CHECK(vkCreateDebugUtilsMessengerEXT(m_instance, &debugInfo, nullptr, &m_debugMessenger));
+#endif
 }
 
 // ── Physical device selection ─────────────────────────────────────────────────
