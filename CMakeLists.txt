@@ -94,14 +94,6 @@ target_include_directories(ProjectOptimizedRenderer PRIVATE
     "${VMA_INCLUDE_DIR}"
 )
 
-# Suppress warnings that fire excessively in Vulkan/VMA headers
-target_compile_options(ProjectOptimizedRenderer PRIVATE
-    /wd4324                # structure was padded due to alignment specifier
-    /wd4127                # conditional expression is constant (VMA macros)
-    /wd4100                # unreferenced formal parameter
-    /wd4189                # local variable is initialized but not referenced
-)
-
 # ── Compiler flags (platform-specific) ────────────────────────────────────────
 if(MSVC)
     target_compile_options(ProjectOptimizedRenderer PRIVATE
@@ -111,11 +103,11 @@ if(MSVC)
         /Zc:preprocessor       # Use conformant preprocessor
         /utf-8                 # Source and execution character set
         /EHsc                  # Standard C++ exception handling
-    )
-    # Suppress warnings that fire excessively in Vulkan/VMA headers
-    target_compile_options(ProjectOptimizedRenderer PRIVATE
+        # Suppress warnings that fire excessively in Vulkan/VMA headers
         /wd4324                # structure was padded due to alignment specifier
         /wd4127                # conditional expression is constant (VMA macros)
+        /wd4100                # unreferenced formal parameter
+        /wd4189                # local variable is initialized but not referenced
     )
 else()
     target_compile_options(ProjectOptimizedRenderer PRIVATE
