@@ -5,6 +5,7 @@
 #include "core/CommandBuffer.h"
 #include "core/FrameSync.h"
 #include "resource/Buffer.h"
+#include "resource/Model.h"
 #include <glm/glm.hpp>
 #include <vector>
 #include <string>
@@ -32,7 +33,7 @@ public:
 private:
     void render();
     void createPbrPipeline();
-    void createGeometry();
+    void loadModel(const std::string& modelPath);
     void destroyPipeline();
 
     static std::vector<uint32_t> loadSpv(const std::string& path);
@@ -42,10 +43,17 @@ private:
     CommandBuffer  m_commandBuffer;
     FrameSync      m_frameSync;
 
-    // Phase 1.1: geometry buffers (initialized in constructor list — Buffer has no default ctor)
-    Buffer   m_vertexBuffer;
-    Buffer   m_indexBuffer;
-    uint32_t m_indexCount = 0;
+    // Phase 1.1/1.3: geometry buffers (initialized in constructor list — Buffer has no default ctor)
+    Buffer m_vertexBuffer;
+    Buffer m_indexBuffer;
+
+    // Phase 1.3: model and per-mesh draw data
+    struct MeshRenderData {
+        uint32_t firstIndex;   // starting element in the index buffer
+        uint32_t indexCount;   // number of indices for this mesh
+    };
+    Model                     m_model;
+    std::vector<MeshRenderData> m_meshRenderData;
 
     // Phase 1.1: pipeline resources
     VkPipeline            m_pipeline        = VK_NULL_HANDLE;

@@ -64,3 +64,4 @@ Desktop.ini
 # VMA
 VulkanMemoryAllocator/.claude/
 CLAUDE.md
+assets/models/*.glb

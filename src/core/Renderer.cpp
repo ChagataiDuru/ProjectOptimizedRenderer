@@ -1,5 +1,5 @@
 #include "core/Renderer.h"
-#include "resource/GeometryFactory.h"
+#include "resource/GLTFLoader.h"
 #include "resource/Vertex.h"
 
 #include <spdlog/spdlog.h>
@@ -9,10 +9,12 @@
 #include <stdexcept>
 #include <string>
 
-// SHADER_DIR is an absolute path injected at compile time via CMake.
-// Falls back to a relative "shaders" directory if not defined (e.g. during IDE indexing).
 #ifndef SHADER_DIR
 #define SHADER_DIR "shaders"
+#endif
+
+#ifndef ASSET_DIR
+#define ASSET_DIR "assets"
 #endif
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -96,7 +98,7 @@ void Renderer::init()
 {
     m_frameSync.init(3);
     m_commandBuffer.init(m_ctx.getGraphicsQueueFamily(), 3);
-    createGeometry();
+    loadModel(std::string(ASSET_DIR) + "/models/sponza.glb");
     createPbrPipeline();       // also creates m_cameraSetLayout
     createCameraUBO();
     createDescriptorPool();
@@ -115,19 +117,40 @@ void Renderer::shutdown()
 
 // ── Geometry ──────────────────────────────────────────────────────────────────
 
-void Renderer::createGeometry()
+void Renderer::loadModel(const std::string& modelPath)
 {
-    const auto cube = GeometryFactory::createCube();
-    m_indexCount = static_cast<uint32_t>(cube.indices.size());
+    m_model = GLTFLoader::loadGLTF(modelPath);
 
-    const VkDeviceSize vertSize = cube.vertices.size() * sizeof(Vertex);
-    const VkDeviceSize idxSize  = cube.indices.size()  * sizeof(uint32_t);
+    // Flatten all mesh vertex/index data into single contiguous arrays.
+    // Each mesh's indices are already absolute (offset applied in GLTFLoader)
+    // relative to that mesh's own vertex array — here we make them absolute
+    // into the combined vertex array by adding the running vertexBase.
+    std::vector<Vertex>   allVertices;
+    std::vector<uint32_t> allIndices;
+    uint32_t vertexBase = 0;
+
+    for (const auto& mesh : m_model.meshes) {
+        MeshRenderData data{};
+        data.firstIndex = static_cast<uint32_t>(allIndices.size());
+        data.indexCount = static_cast<uint32_t>(mesh.indices.size());
+        m_meshRenderData.push_back(data);
+
+        allVertices.insert(allVertices.end(), mesh.vertices.begin(), mesh.vertices.end());
+
+        // Re-base indices so they point into the combined vertex buffer.
+        for (uint32_t idx : mesh.indices)
+            allIndices.push_back(idx + vertexBase);
+
+        vertexBase += static_cast<uint32_t>(mesh.vertices.size());
+    }
+
+    const VkDeviceSize vertSize = allVertices.size() * sizeof(Vertex);
+    const VkDeviceSize idxSize  = allIndices.size()  * sizeof(uint32_t);
 
     m_vertexBuffer.createDeviceLocal(vertSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
     m_indexBuffer.createDeviceLocal(idxSize,   VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
 
-    // Staged upload requires recording a copy command.
-    // Use a dedicated transient pool so frame command buffers are not disturbed.
+    // Staged upload: use a dedicated transient pool so frame command buffers are not disturbed.
     const VkCommandPoolCreateInfo poolCI{
         .sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
         .flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
@@ -151,12 +174,11 @@ void Renderer::createGeometry()
     };
     VK_CHECK(vkBeginCommandBuffer(transferCmd, &beginInfo));
 
-    m_vertexBuffer.uploadStaged(cube.vertices.data(), vertSize, transferCmd);
-    m_indexBuffer.uploadStaged(cube.indices.data(),   idxSize,  transferCmd);
+    m_vertexBuffer.uploadStaged(allVertices.data(), vertSize, transferCmd);
+    m_indexBuffer.uploadStaged(allIndices.data(),   idxSize,  transferCmd);
 
     VK_CHECK(vkEndCommandBuffer(transferCmd));
 
-    // Submit and block until the GPU copy is complete before releasing staging memory.
     VkFence fence;
     const VkFenceCreateInfo fenceCI{ .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
     VK_CHECK(vkCreateFence(m_ctx.getDevice(), &fenceCI, nullptr, &fence));
@@ -175,8 +197,8 @@ void Renderer::createGeometry()
     vkDestroyFence(m_ctx.getDevice(), fence, nullptr);
     vkDestroyCommandPool(m_ctx.getDevice(), transferPool, nullptr);
 
-    spdlog::info("Geometry created: {} vertices, {} indices",
-                 cube.vertices.size(), m_indexCount);
+    spdlog::info("Model uploaded: {} meshes, {} vertices, {} indices",
+                 m_model.meshes.size(), allVertices.size(), allIndices.size());
 }
 
 // ── Pipeline ──────────────────────────────────────────────────────────────────
@@ -484,12 +506,14 @@ void Renderer::render()
     vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuf, &vertexOffset);
     vkCmdBindIndexBuffer(cmd, m_indexBuffer.getBuffer(), 0, VK_INDEX_TYPE_UINT32);
 
-    // Push model matrix (identity for now — Phase 1.3 will animate this)
+    // Push model matrix — one identity matrix for the whole scene (Phase 1.3).
     const glm::mat4 modelMatrix(1.0f);
     vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
                        0, sizeof(glm::mat4), &modelMatrix);
 
-    vkCmdDrawIndexed(cmd, m_indexCount, 1, 0, 0, 0);
+    for (const auto& mesh : m_meshRenderData) {
+        vkCmdDrawIndexed(cmd, mesh.indexCount, 1, mesh.firstIndex, 0, 0);
+    }
 
     vkCmdEndRendering(cmd);
 

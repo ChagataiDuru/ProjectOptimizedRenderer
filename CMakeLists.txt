@@ -10,6 +10,13 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
     set(APPLE_SILICON TRUE)
     set(HOMEBREW_PREFIX "/opt/homebrew")
+
+    set(CMAKE_INSTALL_RPATH_USE_LINK_PATH ON)
+    set(CMAKE_BUILD_RPATH_USE_ORIGIN ON)
+    # Embed all linked library directories into the binary's RPATH at build time
+    set(CMAKE_BUILD_WITH_INSTALL_RPATH OFF)
+    set(CMAKE_SKIP_BUILD_RPATH OFF)
+
 elseif(APPLE)
     set(APPLE_SILICON FALSE)
     set(HOMEBREW_PREFIX "/usr/local")
@@ -88,11 +95,13 @@ add_executable(ProjectOptimizedRenderer
     src/resource/PipelineLayout.cpp
     src/resource/Shader.cpp
     src/resource/ResourceSet.cpp
+    src/resource/GLTFLoader.cpp
 )
 
 target_include_directories(ProjectOptimizedRenderer PRIVATE
     "${CMAKE_SOURCE_DIR}/include"
     "${VMA_INCLUDE_DIR}"
+    "${CMAKE_SOURCE_DIR}/external/cgltf"
 )
 
 # ── Compiler flags (platform-specific) ────────────────────────────────────────
@@ -124,6 +133,7 @@ target_compile_definitions(ProjectOptimizedRenderer PRIVATE
     VK_ENABLE_BETA_EXTENSIONS
     $<$<CONFIG:Debug>:VK_DEBUG_MARKERS>
     SHADER_DIR="${CMAKE_BINARY_DIR}/shaders"
+    ASSET_DIR="${CMAKE_SOURCE_DIR}/assets"
     # VMA: use dynamic Vulkan function loading via volk
     VMA_STATIC_VULKAN_FUNCTIONS=0
     VMA_DYNAMIC_VULKAN_FUNCTIONS=1
