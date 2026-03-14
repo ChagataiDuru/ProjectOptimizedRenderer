@@ -49,6 +49,8 @@ int main() {
     float deltaTime = 0.016f; // 16ms default until first real measurement
 
     spdlog::info("Entering render loop");
+    SDL_SetWindowRelativeMouseMode(
+        static_cast<SDL_Window *>(window.getHandle()), true);
 
     // === Main Render Loop ===
     bool running = true;
