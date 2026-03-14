@@ -48,12 +48,14 @@ static VkShaderModule makeShaderModule(VkDevice device, const std::vector<uint32
 }
 
 // Synchronization2 image layout transition helper (core in Vulkan 1.3 / 1.4).
+// aspectMask defaults to COLOR but must be VK_IMAGE_ASPECT_DEPTH_BIT for depth images.
 static void transitionImage(
-    VkCommandBuffer      cmd,
-    VkImage              image,
+    VkCommandBuffer       cmd,
+    VkImage               image,
     VkPipelineStageFlags2 srcStage,  VkAccessFlags2 srcAccess,
     VkPipelineStageFlags2 dstStage,  VkAccessFlags2 dstAccess,
-    VkImageLayout        oldLayout,  VkImageLayout newLayout)
+    VkImageLayout         oldLayout, VkImageLayout  newLayout,
+    VkImageAspectFlags    aspectMask = VK_IMAGE_ASPECT_COLOR_BIT)
 {
     const VkImageMemoryBarrier2 barrier{
         .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
@@ -66,7 +68,7 @@ static void transitionImage(
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .image               = image,
-        .subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+        .subresourceRange    = { aspectMask, 0, 1, 0, 1 },
     };
     const VkDependencyInfo dep{
         .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
@@ -87,6 +89,7 @@ Renderer::Renderer(VulkanContext& ctx, Swapchain& swapchain)
     , m_indexBuffer(ctx)
     , m_cameraUBOBuffer(ctx)
     , m_lightUBOBuffer(ctx)
+    , m_depthImage(ctx)
 {
 }
 
@@ -100,6 +103,7 @@ void Renderer::init()
     m_frameSync.init(3);
     m_commandBuffer.init(m_ctx.getGraphicsQueueFamily(), 3);
     loadModel(std::string(ASSET_DIR) + "/models/sponza.glb");
+    createDepthImage();
     createPbrPipeline();       // also creates m_cameraSetLayout (bindings 0 + 1)
     createCameraUBO();
     createLightUBO();
@@ -263,11 +267,15 @@ void Renderer::createPbrPipeline()
         .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
     };
 
-    // No depth buffer yet — Phase 1.2 will add a depth attachment
+    // Phase 1.5: reverse-Z depth — near=1.0 far=0.0, clear to 0.0, compare GREATER
     const VkPipelineDepthStencilStateCreateInfo depthStencil{
-        .sType            = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-        .depthTestEnable  = VK_FALSE,
-        .depthWriteEnable = VK_FALSE,
+        .sType             = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable   = VK_TRUE,
+        .depthWriteEnable  = VK_TRUE,
+        // Reverse-Z: a closer fragment has a LARGER depth value, so it passes if greater
+        .depthCompareOp    = VK_COMPARE_OP_GREATER,
+        .depthBoundsTestEnable = VK_FALSE,
+        .stencilTestEnable = VK_FALSE,
     };
 
     const VkPipelineColorBlendAttachmentState blendAttachment{
@@ -331,12 +339,13 @@ void Renderer::createPbrPipeline()
     VK_CHECK(vkCreatePipelineLayout(m_ctx.getDevice(), &layoutInfo, nullptr, &m_pipelineLayout));
 
     // VkPipelineRenderingCreateInfo replaces VkRenderPass for dynamic rendering (core in 1.3/1.4)
+    // Must declare the depth format here so the pipeline is compatible with the render attachment.
     const VkFormat colorFormat = m_swapchain.getFormat();
     const VkPipelineRenderingCreateInfo renderingInfo{
         .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
         .colorAttachmentCount    = 1,
         .pColorAttachmentFormats = &colorFormat,
-        .depthAttachmentFormat   = VK_FORMAT_UNDEFINED,
+        .depthAttachmentFormat   = VK_FORMAT_D32_SFLOAT,
         .stencilAttachmentFormat = VK_FORMAT_UNDEFINED,
     };
 
@@ -419,6 +428,18 @@ void Renderer::setLightParameters(const glm::vec3& direction, const glm::vec3& c
     m_lightUBOBuffer.upload(&light, sizeof(LightUBO));
     spdlog::debug("Light updated: dir=({:.2f},{:.2f},{:.2f}), intensity={:.2f}",
                   direction.x, direction.y, direction.z, intensity);
+}
+
+void Renderer::createDepthImage()
+{
+    const VkExtent2D ext = m_swapchain.getExtent();
+    // D32_SFLOAT: 32-bit float depth, no stencil, optimal for reverse-Z precision
+    m_depthImage.create(ext.width, ext.height, 1,
+                        VK_FORMAT_D32_SFLOAT,
+                        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                        VK_IMAGE_ASPECT_DEPTH_BIT);
+
+    spdlog::info("Depth image created: {}x{} D32_SFLOAT (reverse-Z)", ext.width, ext.height);
 }
 
 void Renderer::createDescriptorPool()
@@ -517,13 +538,32 @@ void Renderer::render()
         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,  VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
         VK_IMAGE_LAYOUT_UNDEFINED,                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
+    // Depth image transitions from UNDEFINED each frame — LOAD_OP_CLEAR discards previous
+    // contents anyway, so UNDEFINED→DEPTH_ATTACHMENT_OPTIMAL is valid and avoids layout tracking.
+    transitionImage(cmd, m_depthImage.getImage(),
+        VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,              0,
+        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+        VK_IMAGE_LAYOUT_UNDEFINED,                         VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_ASPECT_DEPTH_BIT);
+
     const VkRenderingAttachmentInfo colorAttachment{
         .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
         .imageView   = m_swapchain.getCurrentImageView(),
         .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
         .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
-        .clearValue  = { .color = { .float32 = { 0.1f, 0.2f, 0.3f, 1.0f } } },
+        .clearValue  = { .color = { .float32 = { 0.01f, 0.01f, 0.01f, 1.0f } } },
+    };
+
+    // Reverse-Z: clear depth to 0.0 (far plane); closer fragments have larger depth values
+    const VkRenderingAttachmentInfo depthAttachment{
+        .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView   = m_depthImage.getImageView(),
+        .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp     = VK_ATTACHMENT_STORE_OP_DONT_CARE,  // not sampled after, no need to store
+        .clearValue  = { .depthStencil = { 0.0f, 0 } },
     };
 
     const VkRenderingInfo renderingInfo{
@@ -532,6 +572,7 @@ void Renderer::render()
         .layerCount           = 1,
         .colorAttachmentCount = 1,
         .pColorAttachments    = &colorAttachment,
+        .pDepthAttachment     = &depthAttachment,
     };
 
     vkCmdBeginRendering(cmd, &renderingInfo);

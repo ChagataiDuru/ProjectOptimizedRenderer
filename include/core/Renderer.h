@@ -5,6 +5,7 @@
 #include "core/CommandBuffer.h"
 #include "core/FrameSync.h"
 #include "resource/Buffer.h"
+#include "resource/Image.h"
 #include "resource/Model.h"
 #include <glm/glm.hpp>
 #include <vector>
@@ -83,11 +84,16 @@ private:
 
     Buffer           m_cameraUBOBuffer;
     Buffer           m_lightUBOBuffer;
+
+    // Phase 1.5: depth buffer — D32_SFLOAT, reverse-Z (clear=0.0, compare=GREATER)
+    Image            m_depthImage;
+
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet  m_descriptorSet  = VK_NULL_HANDLE;
 
     void createCameraUBO();
     void createLightUBO();
+    void createDepthImage();
     void createDescriptorPool();
     void createDescriptorSet();
 };
