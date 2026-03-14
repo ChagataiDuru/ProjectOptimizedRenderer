@@ -30,6 +30,10 @@ public:
     // Placeholder: Phase 1.2 will wire this to a per-frame UBO upload.
     void setCameraMatrices(const glm::mat4& view, const glm::mat4& projection);
 
+    // Phase 1.4: update the directional light parameters at any time
+    void setLightParameters(const glm::vec3& direction, const glm::vec3& color,
+                            float intensity, float ambient);
+
 private:
     void render();
     void createPbrPipeline();
@@ -69,11 +73,21 @@ private:
         glm::mat4 projection;
     };
 
+    // Phase 1.4: directional light UBO — host-visible, updated via setLightParameters()
+    struct LightUBO {
+        glm::vec3 lightDirection;   // world-space direction (normalized, pointing toward scene)
+        float     lightIntensity;   // brightness multiplier
+        glm::vec3 lightColor;       // RGB color
+        float     ambientIntensity; // ambient light level
+    };
+
     Buffer           m_cameraUBOBuffer;
+    Buffer           m_lightUBOBuffer;
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet  m_descriptorSet  = VK_NULL_HANDLE;
 
     void createCameraUBO();
+    void createLightUBO();
     void createDescriptorPool();
     void createDescriptorSet();
 };

@@ -86,6 +86,7 @@ Renderer::Renderer(VulkanContext& ctx, Swapchain& swapchain)
     , m_vertexBuffer(ctx)
     , m_indexBuffer(ctx)
     , m_cameraUBOBuffer(ctx)
+    , m_lightUBOBuffer(ctx)
 {
 }
 
@@ -99,11 +100,12 @@ void Renderer::init()
     m_frameSync.init(3);
     m_commandBuffer.init(m_ctx.getGraphicsQueueFamily(), 3);
     loadModel(std::string(ASSET_DIR) + "/models/sponza.glb");
-    createPbrPipeline();       // also creates m_cameraSetLayout
+    createPbrPipeline();       // also creates m_cameraSetLayout (bindings 0 + 1)
     createCameraUBO();
+    createLightUBO();
     createDescriptorPool();
-    createDescriptorSet();     // allocates from pool, binds UBO to set 0 binding 0
-    spdlog::info("Renderer initialized (Phase 1.2: camera UBO + descriptor set)");
+    createDescriptorSet();     // allocates from pool, binds camera (b0) + light (b1)
+    spdlog::info("Renderer initialized (Phase 1.4: PBR shading + directional light)");
 }
 
 void Renderer::shutdown()
@@ -290,18 +292,25 @@ void Renderer::createPbrPipeline()
         .pDynamicStates    = dynamicStates.data(),
     };
 
-    // Camera UBO descriptor set layout (set = 0, binding = 0).
-    // Phase 1.2 will allocate + bind the actual descriptor set each frame.
-    const VkDescriptorSetLayoutBinding cameraBinding{
-        .binding         = 0,
-        .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-        .descriptorCount = 1,
-        .stageFlags      = VK_SHADER_STAGE_VERTEX_BIT,
-    };
+    // Descriptor set layout: set 0 holds both camera (binding 0) and light (binding 1) UBOs.
+    const std::array<VkDescriptorSetLayoutBinding, 2> setBindings{{
+        {   // binding 0: camera matrices — read in vertex shader
+            .binding         = 0,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags      = VK_SHADER_STAGE_VERTEX_BIT,
+        },
+        {   // binding 1: directional light — read in fragment shader
+            .binding         = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
+        },
+    }};
     const VkDescriptorSetLayoutCreateInfo setLayoutInfo{
         .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 1,
-        .pBindings    = &cameraBinding,
+        .bindingCount = static_cast<uint32_t>(setBindings.size()),
+        .pBindings    = setBindings.data(),
     };
     VK_CHECK(vkCreateDescriptorSetLayout(m_ctx.getDevice(), &setLayoutInfo, nullptr, &m_cameraSetLayout));
 
@@ -384,11 +393,40 @@ void Renderer::createCameraUBO()
     spdlog::info("Camera UBO created ({} bytes, host-visible)", sizeof(CameraUBO));
 }
 
+void Renderer::createLightUBO()
+{
+    m_lightUBOBuffer.createHostVisible(sizeof(LightUBO), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+
+    // Default sun: slightly off-vertical, warm white, moderate ambient
+    setLightParameters(
+        glm::normalize(glm::vec3(0.5f, 1.0f, 0.3f)),
+        glm::vec3(1.0f),
+        1.0f,
+        0.2f);
+
+    spdlog::info("Light UBO created ({} bytes, host-visible)", sizeof(LightUBO));
+}
+
+void Renderer::setLightParameters(const glm::vec3& direction, const glm::vec3& color,
+                                   float intensity, float ambient)
+{
+    const LightUBO light{
+        glm::normalize(direction),
+        intensity,
+        color,
+        ambient,
+    };
+    m_lightUBOBuffer.upload(&light, sizeof(LightUBO));
+    spdlog::debug("Light updated: dir=({:.2f},{:.2f},{:.2f}), intensity={:.2f}",
+                  direction.x, direction.y, direction.z, intensity);
+}
+
 void Renderer::createDescriptorPool()
 {
+    // 2 uniform buffer descriptors: camera (binding 0) + light (binding 1)
     const VkDescriptorPoolSize poolSize{
         .type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-        .descriptorCount = 1,
+        .descriptorCount = 2,
     };
     const VkDescriptorPoolCreateInfo poolCI{
         .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -397,13 +435,13 @@ void Renderer::createDescriptorPool()
         .pPoolSizes    = &poolSize,
     };
     VK_CHECK(vkCreateDescriptorPool(m_ctx.getDevice(), &poolCI, nullptr, &m_descriptorPool));
-    spdlog::info("Descriptor pool created (1 uniform buffer)");
+    spdlog::info("Descriptor pool created (2 uniform buffers: camera + light)");
 }
 
 void Renderer::createDescriptorSet()
 {
     // m_cameraSetLayout was already created in createPbrPipeline() and
-    // baked into the pipeline layout — reuse it directly.
+    // baked into the pipeline layout — reuse it directly (now holds bindings 0 + 1).
     const VkDescriptorSetAllocateInfo allocInfo{
         .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
         .descriptorPool     = m_descriptorPool,
@@ -412,23 +450,41 @@ void Renderer::createDescriptorSet()
     };
     VK_CHECK(vkAllocateDescriptorSets(m_ctx.getDevice(), &allocInfo, &m_descriptorSet));
 
-    const VkDescriptorBufferInfo bufferInfo{
+    const VkDescriptorBufferInfo cameraInfo{
         .buffer = m_cameraUBOBuffer.getBuffer(),
         .offset = 0,
         .range  = sizeof(CameraUBO),
     };
-    const VkWriteDescriptorSet write{
-        .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .dstSet          = m_descriptorSet,
-        .dstBinding      = 0,
-        .dstArrayElement = 0,
-        .descriptorCount = 1,
-        .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-        .pBufferInfo     = &bufferInfo,
+    const VkDescriptorBufferInfo lightInfo{
+        .buffer = m_lightUBOBuffer.getBuffer(),
+        .offset = 0,
+        .range  = sizeof(LightUBO),
     };
-    vkUpdateDescriptorSets(m_ctx.getDevice(), 1, &write, 0, nullptr);
 
-    spdlog::info("Descriptor set allocated and bound to camera UBO (set=0, binding=0)");
+    const std::array<VkWriteDescriptorSet, 2> writes{{
+        {
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet          = m_descriptorSet,
+            .dstBinding      = 0,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .pBufferInfo     = &cameraInfo,
+        },
+        {
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet          = m_descriptorSet,
+            .dstBinding      = 1,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .pBufferInfo     = &lightInfo,
+        },
+    }};
+    vkUpdateDescriptorSets(m_ctx.getDevice(),
+                           static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+
+    spdlog::info("Descriptor set allocated: camera UBO (binding=0), light UBO (binding=1)");
 }
 
 // ── Frame loop ────────────────────────────────────────────────────────────────
