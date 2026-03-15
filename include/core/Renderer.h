@@ -64,12 +64,25 @@ private:
     std::vector<MeshRenderData> m_meshRenderData;
 
     // Phase 1.1: pipeline resources
-    VkPipeline            m_pipeline        = VK_NULL_HANDLE;
-    VkPipelineLayout      m_pipelineLayout  = VK_NULL_HANDLE;
-    VkDescriptorSetLayout m_cameraSetLayout = VK_NULL_HANDLE;
+    VkPipeline            m_pipeline           = VK_NULL_HANDLE;
+    VkPipelineLayout      m_pipelineLayout     = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_cameraSetLayout    = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_materialSetLayout  = VK_NULL_HANDLE;  // Phase 2.3: set=1 textures
     // Shader modules are destroyed after pipeline creation; kept as VK_NULL_HANDLE thereafter.
-    VkShaderModule        m_vertModule      = VK_NULL_HANDLE;
-    VkShaderModule        m_fragModule      = VK_NULL_HANDLE;
+    VkShaderModule        m_vertModule         = VK_NULL_HANDLE;
+    VkShaderModule        m_fragModule         = VK_NULL_HANDLE;
+
+    // Phase 2.3: material descriptor sets (one per Model::materials entry)
+    std::vector<VkDescriptorSet> m_materialSets;
+
+    // Push constant data for material factors sent to the fragment shader.
+    // Lives at offset 64 (after the 64-byte model matrix at offset 0).
+    struct MaterialPushConstants {
+        glm::vec4 baseColorFactor = glm::vec4(1.0f);
+        float     metallicFactor  = 1.0f;
+        float     roughnessFactor = 1.0f;
+        float     _pad[2]         = {};  // pad to 32 bytes
+    };
 
     // Phase 1.2: camera UBO — host-visible so we can memcpy each frame without staging
     struct CameraUBO {
@@ -104,4 +117,5 @@ private:
     void createDepthImage();
     void createDescriptorPool();
     void createDescriptorSet();
+    void createMaterialDescriptorSets();  // Phase 2.3
 };
