@@ -102,21 +102,30 @@ void Renderer::init()
 {
     m_frameSync.init(3);
     m_commandBuffer.init(m_ctx.getGraphicsQueueFamily(), 3);
-    loadModel(std::string(ASSET_DIR) + "/models/sponza.glb");
+    loadModel(std::string(ASSET_DIR) + "/models/sponza/glTF/Sponza.gltf");
     createDepthImage();
     createPbrPipeline();       // also creates m_cameraSetLayout (bindings 0 + 1)
     createCameraUBO();
     createLightUBO();
     createDescriptorPool();
     createDescriptorSet();     // allocates from pool, binds camera (b0) + light (b1)
-    spdlog::info("Renderer initialized (Phase 1.4: PBR shading + directional light)");
+    spdlog::info("Renderer initialized");
 }
 
 void Renderer::shutdown()
 {
     if (m_ctx.getDevice() == VK_NULL_HANDLE) return;
     vkDeviceWaitIdle(m_ctx.getDevice());
-    destroyPipeline();
+
+    destroyPipeline();          // pipeline, layout, descriptor pool/set, shaders
+
+    // Destroy GPU resources that hold VMA allocations
+    m_depthImage.destroy();
+    m_lightUBOBuffer.destroy();
+    m_cameraUBOBuffer.destroy();
+    m_indexBuffer.destroy();
+    m_vertexBuffer.destroy();
+
     m_commandBuffer.shutdown();
     m_frameSync.shutdown();
 }
@@ -257,8 +266,8 @@ void Renderer::createPbrPipeline()
         .sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
         .polygonMode = VK_POLYGON_MODE_FILL,
         // Back-face culling enabled: cube normals are outward-facing CCW, so back faces are CW.
-        .cullMode    = VK_CULL_MODE_BACK_BIT,
-        .frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .cullMode    = VK_CULL_MODE_NONE,
+        .frontFace   = VK_FRONT_FACE_CLOCKWISE,
         .lineWidth   = 1.0f,
     };
 
@@ -408,10 +417,11 @@ void Renderer::createLightUBO()
 
     // Default sun: slightly off-vertical, warm white, moderate ambient
     setLightParameters(
-        glm::normalize(glm::vec3(0.5f, 1.0f, 0.3f)),
-        glm::vec3(1.0f),
-        1.0f,
-        0.2f);
+        glm::normalize(glm::vec3(1.0f, 1.0f, 1.0f)), // Light direction (toward camera)
+        glm::vec3(1.0f, 1.0f, 1.0f),                 // White light
+        1.5f,                                        // Increase intensity
+        0.3f                                         // Ambient light
+    );
 
     spdlog::info("Light UBO created ({} bytes, host-visible)", sizeof(LightUBO));
 }
