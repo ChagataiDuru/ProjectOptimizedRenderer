@@ -15,6 +15,7 @@ layout(push_constant) uniform PushConstants {
 layout(binding = 0, set = 0) uniform CameraData {
     mat4 view;
     mat4 projection;
+    vec3 cameraPos;     // World-space camera position
 } camera;
 
 // ── Output interface block to fragment shader ────────────────────────────────

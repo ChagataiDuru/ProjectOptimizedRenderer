@@ -7,13 +7,32 @@ layout(location = 0) in VS_OUT {
     vec2 uv;
 } fs_in;
 
-// ── Uniform bindings (set 0) ──────────────────────────────────────────────────
+// ── Per-frame uniform bindings (set 0) ───────────────────────────────────────
+layout(binding = 0, set = 0) uniform CameraData {
+    mat4 view;
+    mat4 projection;
+    vec3 cameraPos;
+} camera;
+
 layout(binding = 1, set = 0) uniform LightData {
     vec3  lightDirection;   // world-space, pointing TOWARD the scene (like the sun)
     float lightIntensity;
     vec3  lightColor;
     float ambientIntensity;
 } light;
+
+// ── Material textures (set 1) ─────────────────────────────────────────────────
+layout(binding = 0, set = 1) uniform sampler2D texAlbedo;
+layout(binding = 1, set = 1) uniform sampler2D texNormal;
+layout(binding = 2, set = 1) uniform sampler2D texMetallicRoughness;
+
+// ── Material factors via push constants ──────────────────────────────────────
+// offset = 64: this block starts after the 64-byte model matrix (vertex stage).
+layout(push_constant) uniform MaterialPC {
+    layout(offset = 64) vec4  baseColorFactor;
+    float metallicFactor;
+    float roughnessFactor;
+} material;
 
 // ── Output ────────────────────────────────────────────────────────────────────
 layout(location = 0) out vec4 outColor;
@@ -33,13 +52,13 @@ float distributionGGX(vec3 N, vec3 H, float roughness) {
     return a2 / max(PI * denom * denom, 0.0001);
 }
 
-// ── Fresnel-Schlick Approximation ─────────────────────────────────────────────
+// ── Fresnel-Schlick Approximation ────────────────────────────────────────────
 // F0 = base reflectivity at normal incidence (0.04 for dielectrics, tinted for metals).
 vec3 fresnelSchlick(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
-// ── Smith Geometry Function ───────────────────────────────────────────────────
+// ── Smith Geometry Function ──────────────────────────────────────────────────
 // Models self-shadowing and masking of microfacets (both view and light side).
 float geometrySchlickGGX(float NdotV, float roughness) {
     float r = roughness + 1.0;
@@ -54,7 +73,7 @@ float geometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
            geometrySchlickGGX(NdotL, roughness);
 }
 
-// ── Cook-Torrance BRDF ────────────────────────────────────────────────────────
+// ── Cook-Torrance BRDF ───────────────────────────────────────────────────────
 // Returns outgoing radiance for one directional light hit.
 vec3 cookTorrance(vec3 N, vec3 L, vec3 V,
                   vec3 baseColor, float metallic, float roughness) {
@@ -80,37 +99,74 @@ vec3 cookTorrance(vec3 N, vec3 L, vec3 V,
     return (kD * baseColor / PI + specular) * radiance * NdotL;
 }
 
-// ── Reinhard Tone Mapping ─────────────────────────────────────────────────────
+// ── Reinhard Tone Mapping ────────────────────────────────────────────────────
 vec3 tonemapReinhard(vec3 hdr) {
     return hdr / (hdr + vec3(1.0));
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 void main() {
+    // ── Sample material textures ─────────────────────────────────────────
+    // Albedo: texture is SRGB, hardware decodes to linear on sample.
+    // Multiply by baseColorFactor (glTF spec: factor × texture).
+    vec4  albedoSample = texture(texAlbedo, fs_in.uv) * material.baseColorFactor;
+    vec3  baseColor    = albedoSample.rgb;
+    float alpha        = albedoSample.a;
+
+    // Metallic-roughness: green = roughness, blue = metallic (glTF convention).
+    // Texture is UNORM (linear data). Multiply by material factors.
+    vec4  mrSample  = texture(texMetallicRoughness, fs_in.uv);
+    float metallic  = mrSample.b * material.metallicFactor;
+    float roughness = mrSample.g * material.roughnessFactor;
+
+    // Clamp roughness to avoid division-by-zero in GGX (perfectly smooth = NaN)
+    roughness = clamp(roughness, 0.04, 1.0);
+
+    // ── Normal mapping ───────────────────────────────────────────────────
     vec3 N = normalize(fs_in.normal);
-    // View vector: direction from surface toward camera.
-    // NOTE: assumes camera is near world origin — will be improved when
-    // camera position is added to the CameraUBO in a later phase.
-    vec3 V = normalize(-fs_in.worldPos);
-    // Light vector: direction from surface toward the light source
+    if (!gl_FrontFacing) N = -N;
+    vec3 normalSample = texture(texNormal, fs_in.uv).rgb;
+    // Only apply normal map if the texture is not the 1x1 white fallback
+    if (normalSample != vec3(1.0)) {
+        // Decode from [0,1] to [-1,1]
+        vec3 tangentNormal = normalSample * 2.0 - 1.0;
+
+        // Reconstruct TBN from screen-space derivatives — avoids dependence on
+        // vertex tangent quality (some glTF exporters produce unreliable tangents).
+        vec3 Q1  = dFdx(fs_in.worldPos);
+        vec3 Q2  = dFdy(fs_in.worldPos);
+        vec2 st1 = dFdx(fs_in.uv);
+        vec2 st2 = dFdy(fs_in.uv);
+
+        vec3 T   = normalize(Q1 * st2.t - Q2 * st1.t);
+        vec3 B   = normalize(cross(N, T));
+        mat3 TBN = mat3(T, B, N);
+
+        N = normalize(TBN * tangentNormal);
+    }
+
+    // ── View vector (from surface toward camera) ─────────────────────────
+    // Uses actual camera world position — fixes specular for moving cameras.
+    vec3 V = normalize(camera.cameraPos - fs_in.worldPos);
+
+    // ── Light vector (from surface toward light source) ──────────────────
     vec3 L = normalize(light.lightDirection);
 
-    // Placeholder material — will be driven by glTF textures in Phase 1.6
-    vec3  baseColor = vec3(0.8);
-    float metallic  = 0.0;
-    float roughness = 0.5;
-
-    // Direct lighting
+    // ── Direct lighting ──────────────────────────────────────────────────
     vec3 Lo = cookTorrance(N, L, V, baseColor, metallic, roughness);
 
-    // Simple ambient (constant indirect approximation)
+    // ── Ambient ──────────────────────────────────────────────────────────
     vec3 ambient = baseColor * light.ambientIntensity;
 
     vec3 color = ambient + Lo;
 
-    // Tone map HDR -> LDR, then gamma correct
+    // ── Tone mapping (HDR → LDR) ─────────────────────────────────────────
     color = tonemapReinhard(color);
-    color = pow(color, vec3(1.0 / 2.2));
 
-    outColor = vec4(color, 1.0);
+    // NOTE: No manual gamma correction here.
+    // The swapchain is VK_FORMAT_B8G8R8A8_SRGB — the hardware automatically applies
+    // the linear→sRGB transfer function on framebuffer write.
+    // The previous pow(color, vec3(1.0/2.2)) was double-gamma-correcting.
+
+    outColor = vec4(color, alpha);
 }

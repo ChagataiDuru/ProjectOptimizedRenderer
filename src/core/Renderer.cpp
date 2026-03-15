@@ -496,7 +496,7 @@ void Renderer::createCameraUBO()
     // UBOs change every frame so device-local + staging would be needlessly expensive.
     m_cameraUBOBuffer.createHostVisible(sizeof(CameraUBO), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
 
-    const CameraUBO initial{ glm::mat4(1.0f), glm::mat4(1.0f) };
+    const CameraUBO initial{ glm::mat4(1.0f), glm::mat4(1.0f), glm::vec3(0.0f), 0.0f };
     m_cameraUBOBuffer.upload(&initial, sizeof(CameraUBO));
 
     spdlog::info("Camera UBO created ({} bytes, host-visible)", sizeof(CameraUBO));
@@ -510,7 +510,7 @@ void Renderer::createLightUBO()
     setLightParameters(
         glm::normalize(glm::vec3(1.0f, 1.0f, 1.0f)), // Light direction (toward camera)
         glm::vec3(1.0f, 1.0f, 1.0f),                 // White light
-        1.5f,                                        // Increase intensity
+        3.5f,                                        // Increase intensity
         0.3f                                         // Ambient light
     );
 
@@ -850,9 +850,10 @@ void Renderer::render()
     VK_CHECK(vkEndCommandBuffer(cmd));
 }
 
-void Renderer::setCameraMatrices(const glm::mat4& view, const glm::mat4& projection)
+void Renderer::setCameraMatrices(const glm::mat4& view, const glm::mat4& projection,
+                                  const glm::vec3& cameraPos)
 {
-    const CameraUBO ubo{ view, projection };
+    const CameraUBO ubo{ view, projection, cameraPos, 0.0f };
     m_cameraUBOBuffer.upload(&ubo, sizeof(CameraUBO));
 }
 

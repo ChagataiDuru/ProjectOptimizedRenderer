@@ -112,7 +112,8 @@ int main() {
 
       // ── Pass camera matrices to renderer ──────────────────────────────
       renderer.setCameraMatrices(camera.getViewMatrix(),
-                                 camera.getProjectionMatrix());
+                                 camera.getProjectionMatrix(),
+                                 camera.getPosition());
 
       // ── Render ────────────────────────────────────────────────────────
       renderer.beginFrame();

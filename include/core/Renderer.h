@@ -31,7 +31,8 @@ public:
     void endFrame();
 
     // Placeholder: Phase 1.2 will wire this to a per-frame UBO upload.
-    void setCameraMatrices(const glm::mat4& view, const glm::mat4& projection);
+    void setCameraMatrices(const glm::mat4& view, const glm::mat4& projection,
+                           const glm::vec3& cameraPos);
 
     // Phase 1.4: update the directional light parameters at any time
     void setLightParameters(const glm::vec3& direction, const glm::vec3& color,
@@ -88,6 +89,8 @@ private:
     struct CameraUBO {
         glm::mat4 view;
         glm::mat4 projection;
+        glm::vec3 cameraPos;    // World-space camera position (for specular in fragment shader)
+        float     _pad = 0.0f;  // std140: vec3 pads to 16 bytes → total size 144
     };
 
     // Phase 1.4: directional light UBO — host-visible, updated via setLightParameters()
