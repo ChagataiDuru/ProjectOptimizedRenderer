@@ -18,7 +18,14 @@ public:
     // Decodes to RGBA8, uploads via staging buffer recorded into transferCmd.
     // Caller must submit transferCmd and wait for fence before using the texture.
     // Caller must call releaseStaging() after the fence signals.
+    // Default format is VK_FORMAT_R8G8B8A8_SRGB (albedo).
     void loadFromFile(const std::string& filepath,
+                      VkCommandBuffer transferCmd,
+                      SamplerCache& samplerCache);
+
+    // Load with explicit format (SRGB for color textures, UNORM for linear data).
+    void loadFromFile(const std::string& filepath,
+                      VkFormat format,
                       VkCommandBuffer transferCmd,
                       SamplerCache& samplerCache);
 

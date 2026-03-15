@@ -43,6 +43,14 @@ void Texture::loadFromFile(const std::string& filepath,
                            VkCommandBuffer transferCmd,
                            SamplerCache& samplerCache)
 {
+    loadFromFile(filepath, VK_FORMAT_R8G8B8A8_SRGB, transferCmd, samplerCache);
+}
+
+void Texture::loadFromFile(const std::string& filepath,
+                           VkFormat format,
+                           VkCommandBuffer transferCmd,
+                           SamplerCache& samplerCache)
+{
     int w = 0, h = 0, channels = 0;
     stbi_uc* pixels = stbi_load(filepath.c_str(), &w, &h, &channels, STBI_rgb_alpha);
     if (!pixels) {
@@ -51,7 +59,7 @@ void Texture::loadFromFile(const std::string& filepath,
 
     const VkDeviceSize dataSize = static_cast<VkDeviceSize>(w) * h * 4;
     m_image.createFromData(static_cast<uint32_t>(w), static_cast<uint32_t>(h),
-                           VK_FORMAT_R8G8B8A8_SRGB,
+                           format,
                            pixels, dataSize, transferCmd);
     stbi_image_free(pixels);
 

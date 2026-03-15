@@ -1,12 +1,26 @@
 #pragma once
 #include "resource/Mesh.h"
+#include "resource/Material.h"
 #include <vector>
 #include <string>
 #include <glm/glm.hpp>
 
+// Describes what type of data a texture contains (determines VkFormat at upload time).
+enum class TextureType {
+    Color,   // sRGB — albedo, emissive
+    Linear,  // UNORM — normal maps, metallic-roughness, occlusion
+};
+
+struct TextureEntry {
+    std::string path;  // Absolute file path resolved from glTF URI
+    TextureType type;  // Determines VK_FORMAT at load time
+};
+
 struct Model {
-    std::string       name;
-    std::vector<Mesh> meshes;
+    std::string               name;
+    std::vector<Mesh>         meshes;
+    std::vector<Material>     materials;
+    std::vector<TextureEntry> textures;  // Deduplicated list of texture file paths
 
     // Bounding box (computed after loading)
     glm::vec3 boundsMin = glm::vec3(0);

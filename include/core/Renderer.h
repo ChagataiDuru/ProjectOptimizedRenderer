@@ -7,6 +7,8 @@
 #include "resource/Buffer.h"
 #include "resource/Image.h"
 #include "resource/Model.h"
+#include "resource/Texture.h"
+#include "resource/SamplerCache.h"
 #include <glm/glm.hpp>
 #include <vector>
 #include <string>
@@ -54,8 +56,9 @@ private:
 
     // Phase 1.3: model and per-mesh draw data
     struct MeshRenderData {
-        uint32_t firstIndex;   // starting element in the index buffer
-        uint32_t indexCount;   // number of indices for this mesh
+        uint32_t firstIndex;              // starting element in the index buffer
+        uint32_t indexCount;              // number of indices for this mesh
+        int32_t  materialIndex = -1;      // index into Model::materials (Phase 2.2)
     };
     Model                     m_model;
     std::vector<MeshRenderData> m_meshRenderData;
@@ -84,6 +87,11 @@ private:
 
     Buffer           m_cameraUBOBuffer;
     Buffer           m_lightUBOBuffer;
+
+    // Phase 2.1/2.2: texture infrastructure
+    SamplerCache         m_samplerCache;
+    std::vector<Texture> m_textures;     // Indexed parallel to Model::textures
+    Texture              m_fallbackWhite; // 1x1 white texture for missing slots
 
     // Phase 1.5: depth buffer — D32_SFLOAT, reverse-Z (clear=0.0, compare=GREATER)
     Image            m_depthImage;

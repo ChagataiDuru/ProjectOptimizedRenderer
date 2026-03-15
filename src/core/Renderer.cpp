@@ -89,6 +89,8 @@ Renderer::Renderer(VulkanContext& ctx, Swapchain& swapchain)
     , m_indexBuffer(ctx)
     , m_cameraUBOBuffer(ctx)
     , m_lightUBOBuffer(ctx)
+    , m_samplerCache(ctx)
+    , m_fallbackWhite(ctx)
     , m_depthImage(ctx)
 {
 }
@@ -119,6 +121,13 @@ void Renderer::shutdown()
 
     destroyPipeline();          // pipeline, layout, descriptor pool/set, shaders
 
+    // Destroy textures before VMA teardown (textures hold VmaAllocations)
+    m_fallbackWhite.destroy();
+    for (auto& tex : m_textures)
+        tex.destroy();
+    m_textures.clear();
+    m_samplerCache.shutdown();
+
     // Destroy GPU resources that hold VMA allocations
     m_depthImage.destroy();
     m_lightUBOBuffer.destroy();
@@ -146,8 +155,9 @@ void Renderer::loadModel(const std::string& modelPath)
 
     for (const auto& mesh : m_model.meshes) {
         MeshRenderData data{};
-        data.firstIndex = static_cast<uint32_t>(allIndices.size());
-        data.indexCount = static_cast<uint32_t>(mesh.indices.size());
+        data.firstIndex    = static_cast<uint32_t>(allIndices.size());
+        data.indexCount    = static_cast<uint32_t>(mesh.indices.size());
+        data.materialIndex = mesh.materialIndex;
         m_meshRenderData.push_back(data);
 
         allVertices.insert(allVertices.end(), mesh.vertices.begin(), mesh.vertices.end());
@@ -192,6 +202,34 @@ void Renderer::loadModel(const std::string& modelPath)
     m_vertexBuffer.uploadStaged(allVertices.data(), vertSize, transferCmd);
     m_indexBuffer.uploadStaged(allIndices.data(),   idxSize,  transferCmd);
 
+    // ── Texture upload ────────────────────────────────────────────────────────
+    // All texture copy commands are recorded into the same transferCmd so they
+    // share one submit/fence with the geometry buffers.
+
+    m_fallbackWhite.createSolidColor(255, 255, 255, 255, transferCmd, m_samplerCache);
+
+    m_textures.reserve(m_model.textures.size());
+    for (const auto& texEntry : m_model.textures) {
+        m_textures.emplace_back(m_ctx);
+        auto& tex = m_textures.back();
+
+        if (texEntry.path.empty()) {
+            spdlog::warn("Renderer: skipping texture with empty path (embedded/unsupported)");
+            continue;
+        }
+
+        const VkFormat format = (texEntry.type == TextureType::Color)
+            ? VK_FORMAT_R8G8B8A8_SRGB
+            : VK_FORMAT_R8G8B8A8_UNORM;
+
+        try {
+            tex.loadFromFile(texEntry.path, format, transferCmd, m_samplerCache);
+        } catch (const std::exception& e) {
+            spdlog::error("Renderer: failed to load texture '{}': {}", texEntry.path, e.what());
+            // Leave tex invalid — draw loop will use fallback in Phase 2.3
+        }
+    }
+
     VK_CHECK(vkEndCommandBuffer(transferCmd));
 
     VkFence fence;
@@ -208,6 +246,9 @@ void Renderer::loadModel(const std::string& modelPath)
 
     m_vertexBuffer.releaseStaging();
     m_indexBuffer.releaseStaging();
+    m_fallbackWhite.releaseStaging();
+    for (auto& tex : m_textures)
+        tex.releaseStaging();
 
     vkDestroyFence(m_ctx.getDevice(), fence, nullptr);
     vkDestroyCommandPool(m_ctx.getDevice(), transferPool, nullptr);
