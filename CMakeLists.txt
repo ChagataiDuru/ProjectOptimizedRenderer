@@ -96,12 +96,16 @@ add_executable(ProjectOptimizedRenderer
     src/resource/Shader.cpp
     src/resource/ResourceSet.cpp
     src/resource/GLTFLoader.cpp
+    src/resource/StbImageImpl.cpp
+    src/resource/Texture.cpp
+    src/resource/SamplerCache.cpp
 )
 
 target_include_directories(ProjectOptimizedRenderer PRIVATE
     "${CMAKE_SOURCE_DIR}/include"
     "${VMA_INCLUDE_DIR}"
     "${CMAKE_SOURCE_DIR}/external/cgltf"
+    "${CMAKE_SOURCE_DIR}/external/stb"
 )
 
 # ── Compiler flags (platform-specific) ────────────────────────────────────────

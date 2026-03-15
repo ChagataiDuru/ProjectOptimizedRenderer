@@ -26,6 +26,10 @@ public:
     void transitionLayout(VkCommandBuffer cmd,
                           VkImageLayout oldLayout, VkImageLayout newLayout);
 
+    // Release staging buffer after GPU transfer is complete.
+    // Call after the transfer command buffer has been submitted and the fence has signaled.
+    void releaseStaging();
+
     void destroy();
 
     VkImage     getImage()     const { return m_image; }

@@ -205,6 +205,15 @@ void Image::transitionLayout(VkCommandBuffer cmd,
 
 // ── Cleanup ───────────────────────────────────────────────────────────────────
 
+void Image::releaseStaging()
+{
+    if (m_stagingBuffer != VK_NULL_HANDLE) {
+        vmaDestroyBuffer(m_ctx.getAllocator(), m_stagingBuffer, m_stagingAlloc);
+        m_stagingBuffer = VK_NULL_HANDLE;
+        m_stagingAlloc  = nullptr;
+    }
+}
+
 void Image::destroy()
 {
     if (m_stagingBuffer != VK_NULL_HANDLE) {
