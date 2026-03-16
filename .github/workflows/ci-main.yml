@@ -32,17 +32,34 @@ jobs:
       - name: Detect Conan profile
         run: conan profile detect --force
 
-      - name: Install dependencies (Conan)
-        run: conan install . --output-folder=build --build=missing
+      # ── macOS: install MoltenVK (required by CheckMoltenVK.cmake) ─────
+      - name: Install MoltenVK (macOS)
+        if: runner.os == 'macOS'
+        run: brew install molten-vk
 
-      - name: Build on macOS
+      # ── Vulkan SDK for Windows (provides headers, loader, glslc) ──────
+      - name: Install Vulkan SDK (Windows)
+        if: runner.os == 'Windows'
+        uses: humbletim/install-vulkan-sdk@v1.2.1
+        with:
+          version: latest
+          cache: true
+
+      # ── Conan install: explicitly request Debug build type ────────────
+      # Default profile from "conan profile detect" uses Release,
+      # which only generates a "conan-release" preset. We need "conan-debug".
+      - name: Install dependencies (Conan)
+        run: conan install . --output-folder=build --build=missing -s build_type=Debug
+
+      # ── Build ─────────────────────────────────────────────────────────
+      - name: Configure & Build (macOS)
         if: runner.os == 'macOS'
         run: |
           cmake --preset conan-debug
           cmake --build --preset conan-debug
 
-      - name: Build on Windows
+      - name: Configure & Build (Windows)
         if: runner.os == 'Windows'
         run: |
-          cmake --preset win-debug
-          cmake --build --preset win-debug
+          cmake --preset conan-debug
+          cmake --build --preset conan-debug
