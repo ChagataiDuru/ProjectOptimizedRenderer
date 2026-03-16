@@ -100,6 +100,8 @@ add_executable(ProjectOptimizedRenderer
     src/resource/Texture.cpp
     src/resource/SamplerCache.cpp
     src/debug/ImGuiManager.cpp
+    src/debug/GPUTimer.cpp
+    src/debug/Screenshot.cpp
     # ── Dear ImGui core ───────────────────────────────────────────────────────
     external/imgui/imgui.cpp
     external/imgui/imgui_draw.cpp

@@ -94,6 +94,8 @@ Renderer::Renderer(VulkanContext& ctx, Swapchain& swapchain)
     , m_samplerCache(ctx)
     , m_fallbackWhite(ctx)
     , m_depthImage(ctx)
+    , m_gpuTimer(ctx)
+    , m_screenshot(ctx)
 {
 }
 
@@ -108,13 +110,31 @@ void Renderer::init()
     m_frameSync.init(3);
     m_commandBuffer.init(m_ctx.getGraphicsQueueFamily(), 3);
     createDepthImage();
-    createPbrPipeline();       // creates both set layouts + pipeline layout
+    createPbrPipeline();
     createCameraUBO();
     createLightUBO();
-    createDescriptorPool();    // sized for camera/light + all materials
-    createDescriptorSet();     // allocates set=0 (camera + light)
-    createMaterialDescriptorSets();  // allocates set=1 per material
-    spdlog::info("Renderer initialized (Phase 2.3: per-material descriptors)");
+    createDescriptorPool();
+    createDescriptorSet();
+    createMaterialDescriptorSets();
+    m_gpuTimer.init(16);
+
+    // Populate static render stats (counts that don't change after load)
+    m_renderStats.meshCount     = static_cast<uint32_t>(m_meshRenderData.size());
+    m_renderStats.materialCount = static_cast<uint32_t>(m_model.materials.size());
+    m_renderStats.textureCount  = static_cast<uint32_t>(m_textures.size());
+    m_renderStats.textureMemoryBytes = 0;
+    for (const auto& tex : m_textures) {
+        if (tex.isValid()) {
+            const VkExtent3D ext = tex.getExtent();
+            // Each texel is 4 bytes (RGBA8); depth = 1 for 2D textures.
+            m_renderStats.textureMemoryBytes += static_cast<size_t>(ext.width) * ext.height * 4;
+        }
+    }
+
+    spdlog::info("Renderer initialized: {} meshes, {} materials, {} textures ({:.1f} MB GPU tex)",
+                 m_renderStats.meshCount, m_renderStats.materialCount,
+                 m_renderStats.textureCount,
+                 m_renderStats.textureMemoryBytes / (1024.0f * 1024.0f));
 }
 
 void Renderer::shutdown()
@@ -122,7 +142,8 @@ void Renderer::shutdown()
     if (m_ctx.getDevice() == VK_NULL_HANDLE) return;
     vkDeviceWaitIdle(m_ctx.getDevice());
 
-    destroyPipeline();          // pipeline, layout, descriptor pool/set, shaders
+    m_gpuTimer.shutdown();
+    destroyPipeline();
 
     // Destroy textures before VMA teardown (textures hold VmaAllocations)
     m_fallbackWhite.destroy();
@@ -715,6 +736,8 @@ void Renderer::createMaterialDescriptorSets()
 void Renderer::beginFrame()
 {
     m_frameSync.waitForFrame();
+    // Fence has signaled — previous frame's GPU work is complete; safe to read timestamps.
+    m_gpuTimer.collectResults();
     m_frameSync.resetFence();
     m_commandBuffer.resetFrame();
 
@@ -732,6 +755,13 @@ void Renderer::render()
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
     };
     VK_CHECK(vkBeginCommandBuffer(cmd, &beginInfo));
+
+    // Reset per-frame query slots and GPU timer name map
+    m_gpuTimer.beginFrame(cmd);
+
+    // Reset per-frame draw statistics
+    m_renderStats.drawCalls = 0;
+    m_renderStats.triangles = 0;
 
     // Swapchain images start in UNDEFINED layout each frame — transition to writable attachment.
     // UNDEFINED oldLayout means the driver is free to discard contents (correct, we clear anyway).
@@ -776,6 +806,8 @@ void Renderer::render()
         .pColorAttachments    = &colorAttachment,
         .pDepthAttachment     = &depthAttachment,
     };
+
+    m_gpuTimer.writeTimestamp(cmd, "ScenePass_Begin");
 
     vkCmdBeginRendering(cmd, &renderingInfo);
 
@@ -837,9 +869,13 @@ void Renderer::render()
         }
 
         vkCmdDrawIndexed(cmd, mesh.indexCount, 1, mesh.firstIndex, 0, 0);
+        m_renderStats.drawCalls++;
+        m_renderStats.triangles += mesh.indexCount / 3;
     }
 
     vkCmdEndRendering(cmd);
+
+    m_gpuTimer.writeTimestamp(cmd, "ScenePass_End");
 
     // Phase 2.5: ImGui overlay pass (LOAD_OP_LOAD preserves the PBR scene).
     if (m_imguiManager) {
@@ -849,6 +885,8 @@ void Renderer::render()
             m_swapchain.getExtent());
     }
 
+    m_gpuTimer.writeTimestamp(cmd, "ImGuiPass_End");
+
     // Transition to PRESENT_SRC_KHR so the presentation engine can consume the image.
     // Without this barrier, MoltenVK's Metal presentation layer sees an incorrect layout.
     transitionImage(cmd, m_swapchain.getCurrentImage(),
@@ -857,6 +895,12 @@ void Renderer::render()
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,          VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
 
     VK_CHECK(vkEndCommandBuffer(cmd));
+}
+
+void Renderer::requestScreenshot(const std::string& filename)
+{
+    m_screenshotRequested = true;
+    m_screenshotFilename  = filename;
 }
 
 void Renderer::setCameraMatrices(const glm::mat4& view, const glm::mat4& projection,
@@ -895,6 +939,14 @@ void Renderer::endFrame()
     else if (presentResult != VK_SUCCESS)
         throw std::runtime_error("vkQueuePresentKHR failed: " +
                                  std::to_string(static_cast<int>(presentResult)));
+
+    if (m_screenshotRequested) {
+        // Block until the device is fully idle so the presented image is safe to read.
+        vkDeviceWaitIdle(m_ctx.getDevice());
+        m_screenshot.capture(m_swapchain, m_screenshotFilename);
+        m_screenshotRequested = false;
+        m_screenshotFilename.clear();
+    }
 
     // Advance both frame indices together to keep sync primitives and command buffers aligned
     m_frameSync.advanceFrame();

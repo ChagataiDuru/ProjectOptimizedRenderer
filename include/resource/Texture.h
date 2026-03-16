@@ -46,6 +46,7 @@ public:
 
     VkImageView        getImageView() const { return m_image.getImageView(); }
     VkSampler          getSampler()   const { return m_sampler; }
+    VkExtent3D         getExtent()    const { return m_image.getExtent(); }
     bool               isValid()      const { return m_image.getImage() != VK_NULL_HANDLE; }
     const std::string& getPath()      const { return m_filepath; }
 

@@ -110,6 +110,38 @@ int main() {
       }
     }});
 
+    imguiManager.registerPanel({"Render Stats", [&]() {
+      const auto& stats = renderer.getRenderStats();
+      ImGui::Text("Draw calls:  %u",   stats.drawCalls);
+      ImGui::Text("Triangles:   %u",   stats.triangles);
+      ImGui::Text("Meshes:      %u",   stats.meshCount);
+      ImGui::Text("Materials:   %u",   stats.materialCount);
+      ImGui::Text("Textures:    %u",   stats.textureCount);
+      if (stats.textureMemoryBytes > 0) {
+        ImGui::Text("Tex memory:  %.1f MB",
+                    stats.textureMemoryBytes / (1024.0f * 1024.0f));
+      }
+      ImGui::Separator();
+      ImGui::TextDisabled("F2: save screenshot");
+    }});
+
+    imguiManager.registerPanel({"GPU Timing", [&]() {
+      const auto& timer = renderer.getGPUTimer();
+      if (!timer.isValid()) {
+        ImGui::TextDisabled("GPU timestamps not supported on this device");
+        return;
+      }
+      const float sceneMs = timer.getElapsedMs("ScenePass_Begin", "ScenePass_End");
+      const float imguiMs = timer.getElapsedMs("ScenePass_End",   "ImGuiPass_End");
+      const float totalMs = sceneMs + imguiMs;
+      ImGui::Text("Scene pass:  %.3f ms", sceneMs);
+      ImGui::Text("ImGui pass:  %.3f ms", imguiMs);
+      ImGui::Text("GPU total:   %.3f ms", totalMs);
+      ImGui::Separator();
+      ImGui::Text("Budget 60 Hz: 16.67 ms");
+      ImGui::ProgressBar(totalMs / 16.67f, ImVec2(-1.0f, 0.0f), "");
+    }});
+
     // === Mouse capture state ===
     bool mouseCaptured = true;
     SDL_SetWindowRelativeMouseMode(
@@ -146,12 +178,17 @@ int main() {
           break;
 
         // F1: toggle between captured (gameplay) and free (UI) mouse mode
+        // F2: capture screenshot to screenshots/
         case SDL_EVENT_KEY_DOWN:
           if (event.key.scancode == SDL_SCANCODE_F1) {
             mouseCaptured = !mouseCaptured;
             SDL_SetWindowRelativeMouseMode(
                 static_cast<SDL_Window*>(window.getHandle()), mouseCaptured);
             spdlog::debug("Mouse capture: {}", mouseCaptured ? "on" : "off");
+          }
+          if (event.key.scancode == SDL_SCANCODE_F2) {
+            renderer.requestScreenshot();
+            spdlog::info("Screenshot requested");
           }
           break;
 
