@@ -1,4 +1,5 @@
 #include "core/Renderer.h"
+#include "debug/ImGuiManager.h"
 #include "resource/GLTFLoader.h"
 #include "resource/Vertex.h"
 
@@ -839,6 +840,14 @@ void Renderer::render()
     }
 
     vkCmdEndRendering(cmd);
+
+    // Phase 2.5: ImGui overlay pass (LOAD_OP_LOAD preserves the PBR scene).
+    if (m_imguiManager) {
+        m_imguiManager->recordRenderPass(
+            cmd,
+            m_swapchain.getCurrentImageView(),
+            m_swapchain.getExtent());
+    }
 
     // Transition to PRESENT_SRC_KHR so the presentation engine can consume the image.
     // Without this barrier, MoltenVK's Metal presentation layer sees an incorrect layout.

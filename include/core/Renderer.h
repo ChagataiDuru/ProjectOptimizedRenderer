@@ -2,6 +2,8 @@
 
 #include "core/VulkanContext.h"
 #include "core/Swapchain.h"
+
+class ImGuiManager;  // forward declare — full header pulled in by Renderer.cpp
 #include "core/CommandBuffer.h"
 #include "core/FrameSync.h"
 #include "resource/Buffer.h"
@@ -37,6 +39,9 @@ public:
     // Phase 1.4: update the directional light parameters at any time
     void setLightParameters(const glm::vec3& direction, const glm::vec3& color,
                             float intensity, float ambient);
+
+    // Phase 2.5: wire an ImGuiManager to receive an overlay render pass each frame
+    void setImGuiManager(ImGuiManager* mgr) { m_imguiManager = mgr; }
 
 private:
     void render();
@@ -114,6 +119,9 @@ private:
 
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet  m_descriptorSet  = VK_NULL_HANDLE;
+
+    // Phase 2.5: optional ImGui overlay pass (null = disabled)
+    ImGuiManager*    m_imguiManager   = nullptr;
 
     void createCameraUBO();
     void createLightUBO();

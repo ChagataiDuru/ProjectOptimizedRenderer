@@ -99,6 +99,15 @@ add_executable(ProjectOptimizedRenderer
     src/resource/StbImageImpl.cpp
     src/resource/Texture.cpp
     src/resource/SamplerCache.cpp
+    src/debug/ImGuiManager.cpp
+    # ── Dear ImGui core ───────────────────────────────────────────────────────
+    external/imgui/imgui.cpp
+    external/imgui/imgui_draw.cpp
+    external/imgui/imgui_tables.cpp
+    external/imgui/imgui_widgets.cpp
+    # ── Dear ImGui backends ───────────────────────────────────────────────────
+    external/imgui/backends/imgui_impl_sdl3.cpp
+    external/imgui/backends/imgui_impl_vulkan.cpp
 )
 
 target_include_directories(ProjectOptimizedRenderer PRIVATE
@@ -106,6 +115,8 @@ target_include_directories(ProjectOptimizedRenderer PRIVATE
     "${VMA_INCLUDE_DIR}"
     "${CMAKE_SOURCE_DIR}/external/cgltf"
     "${CMAKE_SOURCE_DIR}/external/stb"
+    "${CMAKE_SOURCE_DIR}/external/imgui"
+    "${CMAKE_SOURCE_DIR}/external/imgui/backends"
 )
 
 # ── Compiler flags (platform-specific) ────────────────────────────────────────
@@ -141,7 +152,24 @@ target_compile_definitions(ProjectOptimizedRenderer PRIVATE
     # VMA: use dynamic Vulkan function loading via volk
     VMA_STATIC_VULKAN_FUNCTIONS=0
     VMA_DYNAMIC_VULKAN_FUNCTIONS=1
+    # ImGui: use volk for Vulkan symbol resolution (avoids VK_NO_PROTOTYPES conflicts)
+    IMGUI_IMPL_VULKAN_USE_VOLK
 )
+
+# ── Suppress warnings in third-party ImGui sources ────────────────────────────
+set(IMGUI_SOURCES
+    "${CMAKE_SOURCE_DIR}/external/imgui/imgui.cpp"
+    "${CMAKE_SOURCE_DIR}/external/imgui/imgui_draw.cpp"
+    "${CMAKE_SOURCE_DIR}/external/imgui/imgui_tables.cpp"
+    "${CMAKE_SOURCE_DIR}/external/imgui/imgui_widgets.cpp"
+    "${CMAKE_SOURCE_DIR}/external/imgui/backends/imgui_impl_sdl3.cpp"
+    "${CMAKE_SOURCE_DIR}/external/imgui/backends/imgui_impl_vulkan.cpp"
+)
+if(MSVC)
+    set_source_files_properties(${IMGUI_SOURCES} PROPERTIES COMPILE_FLAGS "/w")
+else()
+    set_source_files_properties(${IMGUI_SOURCES} PROPERTIES COMPILE_FLAGS "-w")
+endif()
 
 if(APPLE)
     target_compile_definitions(ProjectOptimizedRenderer PRIVATE
