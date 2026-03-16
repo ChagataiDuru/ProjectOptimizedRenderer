@@ -33,26 +33,22 @@ jobs:
         run: conan profile detect --force
 
       # ── macOS dependencies ────────────────────────────────────────────
-      # MoltenVK: required by CheckMoltenVK.cmake
-      # glslang (brew): provides glslangValidator CLI for shader compilation
-      #   Conan's glslang package only builds the library, not the CLI tools.
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
         run: brew install molten-vk glslang
 
       # ── Conan install ─────────────────────────────────────────────────
-      # -s build_type=Debug: generates "conan-debug" preset (default profile is Release)
-      # -s compiler.cppstd=20: Windows MSVC auto-profile defaults to C++14,
-      #   but spirv-tools requires C++17 and our project uses C++20
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
         run: conan install . --output-folder=build --build=missing -s build_type=Debug
 
+      # Windows MSVC: -s compiler.cppstd=20 (default is C++14, spirv-tools needs 17+)
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
         run: conan install . --output-folder=build --build=missing -s build_type=Debug -s compiler.cppstd=20
 
       # ── Build ─────────────────────────────────────────────────────────
+      # macOS: Conan generates "conan-debug" preset (single-config Ninja)
       - name: Configure & Build (macOS)
         if: runner.os == 'macOS'
         run: |
@@ -62,5 +58,4 @@ jobs:
       - name: Configure & Build (Windows)
         if: runner.os == 'Windows'
         run: |
-          cmake --preset conan-debug
-          cmake --build --preset conan-debug
+          cmake --build --preset win-debug
