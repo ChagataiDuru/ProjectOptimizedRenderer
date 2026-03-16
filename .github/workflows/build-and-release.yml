@@ -1,4 +1,4 @@
-name: Release Build
+name: Build & Release
 
 on:
   push:
@@ -7,8 +7,8 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (e.g. v2.0.0)"
-        required: true
+        description: "Tag to build (e.g. v2.0.0-pre)"
+        required: false
 
 jobs:
   build:
@@ -20,11 +20,9 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            artifact_name: ProjectOptimizedRenderer-macOS-arm64
-            binary_path: build/conan-debug/ProjectOptimizedRenderer
+            platform: macOS-arm64
           - os: windows-latest
-            artifact_name: ProjectOptimizedRenderer-Windows-x64
-            binary_path: build/Debug/ProjectOptimizedRenderer.exe
+            platform: Windows-x64
 
     steps:
       - name: Checkout repository
@@ -67,17 +65,17 @@ jobs:
       - name: Configure & Build (Windows)
         if: runner.os == 'Windows'
         run: |
-          cmake --preset conan-default
-          cmake --build --preset conan-default --config Debug
+          cmake --preset win-debug
+          cmake --build --preset win-debug --config Debug
 
-      # ── Package artifacts ─────────────────────────────────────────────
+      # ── Package ───────────────────────────────────────────────────────
       - name: Package (macOS)
         if: runner.os == 'macOS'
         run: |
           mkdir -p staging/shaders
           cp build/conan-debug/ProjectOptimizedRenderer staging/
           cp build/conan-debug/shaders/*.spv staging/shaders/ || true
-          cd staging && zip -r ../${{ matrix.artifact_name }}.zip .
+          cd staging && zip -r ../ProjectOptimizedRenderer-${{ matrix.platform }}.zip .
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
@@ -86,14 +84,13 @@ jobs:
           mkdir -p staging/shaders
           cp build/Debug/ProjectOptimizedRenderer.exe staging/ || cp build/conan-default/Debug/ProjectOptimizedRenderer.exe staging/
           cp build/shaders/*.spv staging/shaders/ 2>/dev/null || cp build/conan-default/shaders/*.spv staging/shaders/ 2>/dev/null || true
-          cd staging && 7z a -tzip ../${{ matrix.artifact_name }}.zip .
+          cd staging && 7z a -tzip ../ProjectOptimizedRenderer-${{ matrix.platform }}.zip .
 
-      # ── Upload build artifact ─────────────────────────────────────────
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact_name }}
-          path: ${{ matrix.artifact_name }}.zip
+          name: ProjectOptimizedRenderer-${{ matrix.platform }}
+          path: ProjectOptimizedRenderer-${{ matrix.platform }}.zip
 
   # ── Create GitHub Release ───────────────────────────────────────────
   release:
@@ -101,19 +98,17 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - name: List artifacts
-        run: find artifacts -type f
-
       - name: Determine tag
         id: tag
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
             echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
           else
             echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
