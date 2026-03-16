@@ -37,14 +37,6 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install molten-vk
 
-      # ── Vulkan SDK for Windows (provides headers, loader, glslc) ──────
-      - name: Install Vulkan SDK (Windows)
-        if: runner.os == 'Windows'
-        uses: humbletim/install-vulkan-sdk@v1.2.1
-        with:
-          version: latest
-          cache: true
-
       # ── Conan install: explicitly request Debug build type ────────────
       # Default profile from "conan profile detect" uses Release,
       # which only generates a "conan-release" preset. We need "conan-debug".
