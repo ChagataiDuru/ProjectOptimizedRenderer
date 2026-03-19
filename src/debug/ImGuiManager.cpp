@@ -12,6 +12,7 @@
 #include <imgui_internal.h>   // DockBuilder API (stable but not in public imgui.h)
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_vulkan.h>
+#include <IconsFontAwesome6.h>
 
 // SDL3 event type for the processEvent cast.
 #include <SDL3/SDL_events.h>
@@ -271,34 +272,72 @@ void ImGuiManager::endFrame()
     // ── Menu bar ────────────────────────────────────────────────────────────
     if (ImGui::BeginMenuBar()) {
 
+        // ── File ────────────────────────────────────────────────────────────
+        if (ImGui::BeginMenu("File")) {
+            if (ImGui::MenuItem(ICON_FA_FOLDER_OPEN " Load glTF...", nullptr, false, false)) {
+                // Placeholder — file dialog in a future phase
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem(ICON_FA_CAMERA " Screenshot", "F2")) {
+                // Handled in main.cpp via F2; this is a mirror entry
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem(ICON_FA_RIGHT_FROM_BRACKET " Quit", "Esc")) {
+                m_quitRequested = true;
+            }
+            ImGui::EndMenu();
+        }
+
+        // ── View ─────────────────────────────────────────────────────────────
         if (ImGui::BeginMenu("View")) {
             for (auto& panel : m_panels) {
                 ImGui::MenuItem(panel.name.c_str(), nullptr, &panel.visible);
             }
             ImGui::Separator();
-            if (ImGui::MenuItem("Reset Layout")) {
+            if (ImGui::MenuItem(ICON_FA_EXPAND " Fullscreen", "F11"))
+                toggleVisible();
+            ImGui::Separator();
+            if (ImGui::MenuItem(ICON_FA_ARROWS_ROTATE " Reset Layout"))
                 m_firstFrame = true;
-            }
             ImGui::EndMenu();
         }
 
+        // ── Rendering ────────────────────────────────────────────────────────
+        if (ImGui::BeginMenu("Rendering")) {
+            if (m_renderToggles.wireframe)
+                ImGui::MenuItem(ICON_FA_BORDER_ALL " Wireframe", nullptr,
+                                m_renderToggles.wireframe);
+            if (m_renderToggles.showNormals)
+                ImGui::MenuItem(ICON_FA_ARROWS_UP_DOWN_LEFT_RIGHT " Show Normals", nullptr,
+                                m_renderToggles.showNormals);
+            ImGui::Separator();
+            ImGui::MenuItem(ICON_FA_WAND_MAGIC_SPARKLES " SMAA (Phase 3)", nullptr, false, false);
+            ImGui::MenuItem(ICON_FA_CLOUD_SUN " Shadows (Phase 4)", nullptr, false, false);
+            ImGui::MenuItem(ICON_FA_GRIP " VRS (Phase 5)", nullptr, false, false);
+            ImGui::EndMenu();
+        }
+
+        // ── Settings ─────────────────────────────────────────────────────────
         if (ImGui::BeginMenu("Settings")) {
             if (ImGui::MenuItem("Dark Theme",  nullptr, m_theme == Theme::Dark))
                 setTheme(Theme::Dark);
             if (ImGui::MenuItem("Light Theme", nullptr, m_theme == Theme::Light))
                 setTheme(Theme::Light);
-
             ImGui::Separator();
-
             float alpha = m_bgAlpha;
             if (ImGui::SliderFloat("Panel Opacity", &alpha, 0.3f, 1.0f, "%.2f"))
                 setBackgroundAlpha(alpha);
-
             ImGui::EndMenu();
         }
 
-        if (ImGui::BeginMenu("Debug")) {
-            ImGui::MenuItem("(Future debug options)", nullptr, false, false);
+        // ── Help ─────────────────────────────────────────────────────────────
+        if (ImGui::BeginMenu("Help")) {
+            ImGui::Text("ProjectOptimizedRenderer");
+            ImGui::Separator();
+            ImGui::Text("F1:   Toggle mouse capture");
+            ImGui::Text("F2:   Screenshot");
+            ImGui::Text("F11:  Toggle UI overlay");
+            ImGui::Text("WASD + Mouse: FPS camera");
             ImGui::EndMenu();
         }
 

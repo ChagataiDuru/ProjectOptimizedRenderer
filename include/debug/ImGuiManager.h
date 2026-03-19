@@ -72,6 +72,16 @@ public:
     void  setBackgroundAlpha(float alpha);
     float getBackgroundAlpha() const { return m_bgAlpha; }
 
+    // Returns true when the user clicked File → Quit.
+    bool shouldQuit() const { return m_quitRequested; }
+
+    // Rendering toggle pointers — set by main.cpp; the Rendering menu writes through them.
+    struct RenderToggles {
+        bool* wireframe   = nullptr;
+        bool* showNormals = nullptr;
+    };
+    void setRenderToggles(RenderToggles toggles) { m_renderToggles = toggles; }
+
 private:
     VulkanContext& m_ctx;
     Swapchain&     m_swapchain;
@@ -83,6 +93,9 @@ private:
 
     Theme m_theme   = Theme::Dark;
     float m_bgAlpha = 0.92f;     // Slightly transparent — scene peeks through panel edges
+
+    bool          m_quitRequested = false;
+    RenderToggles m_renderToggles;
 
     void buildDefaultLayout(ImGuiID dockspaceId);
     void applyTheme();

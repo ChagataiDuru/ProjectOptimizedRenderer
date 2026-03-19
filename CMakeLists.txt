@@ -102,6 +102,7 @@ add_executable(ProjectOptimizedRenderer
     src/debug/ImGuiManager.cpp
     src/debug/GPUTimer.cpp
     src/debug/Screenshot.cpp
+    src/debug/LogSink.cpp
     # ── Dear ImGui core ───────────────────────────────────────────────────────
     external/imgui/imgui.cpp
     external/imgui/imgui_draw.cpp

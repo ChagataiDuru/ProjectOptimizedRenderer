@@ -43,6 +43,15 @@ public:
     // Phase 2.5: wire an ImGuiManager to receive an overlay render pass each frame
     void setImGuiManager(ImGuiManager* mgr) { m_imguiManager = mgr; }
 
+    // Read-only access for UI panels
+    const Model& getModel() const { return m_model; }
+
+    // Rendering toggles — stored here, applied when pipeline variants are added
+    void setWireframeEnabled(bool enabled) { m_wireframe   = enabled; }
+    void setNormalVisualization(bool enabled) { m_showNormals = enabled; }
+    bool isWireframeEnabled()     const { return m_wireframe; }
+    bool isNormalVisualization()  const { return m_showNormals; }
+
     // Phase 2.6: render statistics — populated each frame in render()
     struct RenderStats {
         uint32_t drawCalls          = 0;
@@ -145,6 +154,10 @@ private:
 
     bool        m_screenshotRequested = false;
     std::string m_screenshotFilename;
+
+    // Rendering toggles (UI-driven; applied when pipeline variants are added)
+    bool m_wireframe   = false;
+    bool m_showNormals = false;
 
     void createCameraUBO();
     void createLightUBO();

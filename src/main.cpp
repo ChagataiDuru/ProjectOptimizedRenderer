@@ -5,6 +5,7 @@
 #include "core/VulkanContext.h"
 #include "core/Window.h"
 #include "debug/ImGuiManager.h"
+#include "debug/LogSink.h"
 
 #include <SDL3/SDL.h>
 #include <array>
@@ -17,9 +18,15 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
+#include <string>
 
 int main() {
-  auto logger = spdlog::stdout_color_mt("POR");
+  // ── Logger: stdout + ImGui ring buffer ──────────────────────────────────────
+  auto stdoutSink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+  auto imguiSink  = std::make_shared<ImGuiLogSink>(500);
+
+  auto logger = std::make_shared<spdlog::logger>(
+      "POR", spdlog::sinks_init_list{ stdoutSink, imguiSink });
   spdlog::set_default_logger(logger);
   spdlog::set_level(spdlog::level::debug);
   spdlog::set_pattern("[%H:%M:%S.%e] [%^%l%$] %v");
@@ -48,6 +55,14 @@ int main() {
     ImGuiManager imguiManager(vulkanContext, swapchain);
     imguiManager.init(window.getHandle());
     renderer.setImGuiManager(&imguiManager);
+
+    // === Rendering toggles (menu bar writes, render loop forwards to renderer) ===
+    bool wireframeEnabled = false;
+    bool showNormals      = false;
+    ImGuiManager::RenderToggles renderToggles;
+    renderToggles.wireframe   = &wireframeEnabled;
+    renderToggles.showNormals = &showNormals;
+    imguiManager.setRenderToggles(renderToggles);
 
     // === Camera Setup ===
     Camera camera;
@@ -89,7 +104,6 @@ int main() {
       const glm::vec3 pos = camera.getPosition();
       ImGui::Text("Position:  (%.2f, %.2f, %.2f)", pos.x, pos.y, pos.z);
 
-      // Derive yaw/pitch from quaternion for display
       const glm::vec3 euler = glm::degrees(glm::eulerAngles(camera.getOrientation()));
       ImGui::Text("Pitch/Yaw: (%.1f°, %.1f°)", euler.x, euler.y);
       ImGui::Spacing();
@@ -141,6 +155,166 @@ int main() {
       ImGui::Separator();
       ImGui::Text("Budget 60 Hz: 16.67 ms");
       ImGui::ProgressBar(totalMs / 16.67f, ImVec2(-1.0f, 0.0f), "");
+    }, DockLocation::Bottom);
+
+    // ── Scene Hierarchy ──────────────────────────────────────────────────────
+    int selectedMeshIndex = -1;
+
+    imguiManager.registerPanel(ICON_FA_SITEMAP " Scene", [&]() {
+      const auto& model = renderer.getModel();
+      const auto& stats = renderer.getRenderStats();
+
+      ImGui::Text("%zu meshes, %u materials",
+                  model.meshes.size(), stats.materialCount);
+      ImGui::Separator();
+
+      if (ImGui::BeginChild("MeshList", ImVec2(0, 0), ImGuiChildFlags_None)) {
+        for (int i = 0; i < static_cast<int>(model.meshes.size()); ++i) {
+          const auto& mesh = model.meshes[i];
+          bool isSelected = (selectedMeshIndex == i);
+
+          // Color indicator from the mesh's base color factor
+          if (mesh.materialIndex >= 0 &&
+              mesh.materialIndex < static_cast<int>(model.materials.size())) {
+            const auto& mat = model.materials[mesh.materialIndex];
+            ImVec4 col(mat.baseColorFactor.r, mat.baseColorFactor.g,
+                       mat.baseColorFactor.b, 1.0f);
+            ImGui::ColorButton("##c", col,
+                               ImGuiColorEditFlags_NoTooltip |
+                               ImGuiColorEditFlags_NoDragDrop,
+                               ImVec2(12.0f, 12.0f));
+            ImGui::SameLine();
+          }
+
+          if (ImGui::Selectable(mesh.name.c_str(), isSelected))
+            selectedMeshIndex = i;
+        }
+      }
+      ImGui::EndChild();
+    }, DockLocation::Right);
+
+    // ── Properties ───────────────────────────────────────────────────────────
+    imguiManager.registerPanel(ICON_FA_SLIDERS " Properties", [&]() {
+      const auto& model = renderer.getModel();
+
+      if (selectedMeshIndex < 0 ||
+          selectedMeshIndex >= static_cast<int>(model.meshes.size())) {
+        ImGui::TextDisabled("Select a mesh in the Scene panel");
+        return;
+      }
+
+      const auto& mesh = model.meshes[selectedMeshIndex];
+
+      ImGui::Text(ICON_FA_CUBE " %s", mesh.name.c_str());
+      ImGui::Separator();
+      ImGui::Text("Vertices:  %zu", mesh.vertices.size());
+      ImGui::Text("Triangles: %zu", mesh.indices.size() / 3);
+
+      if (mesh.materialIndex >= 0 &&
+          mesh.materialIndex < static_cast<int>(model.materials.size())) {
+        const auto& mat = model.materials[mesh.materialIndex];
+
+        ImGui::Separator();
+        ImGui::Text(ICON_FA_PALETTE " Material: %s", mat.name.c_str());
+
+        ImVec4 baseColor(mat.baseColorFactor.r, mat.baseColorFactor.g,
+                         mat.baseColorFactor.b, mat.baseColorFactor.a);
+        ImGui::ColorEdit4("##basecol", &baseColor.x,
+                          ImGuiColorEditFlags_NoInputs |
+                          ImGuiColorEditFlags_NoLabel);
+        ImGui::SameLine();
+        ImGui::Text("Base Color Factor");
+
+        ImGui::Text("Metallic:  %.2f", mat.metallicFactor);
+        ImGui::Text("Roughness: %.2f", mat.roughnessFactor);
+        ImGui::Text("Alpha:     %s",
+                    mat.alphaMode == Material::AlphaMode::Opaque ? "Opaque" :
+                    mat.alphaMode == Material::AlphaMode::Mask   ? "Mask" : "Blend");
+        ImGui::Text("Double-sided: %s", mat.doubleSided ? "Yes" : "No");
+
+        ImGui::Separator();
+        ImGui::Text(ICON_FA_IMAGE " Textures");
+
+        // Display just the filename portion of the texture path
+        auto showTex = [&](const char* label, int32_t idx) {
+          if (idx >= 0 && idx < static_cast<int>(model.textures.size())) {
+            std::string path = model.textures[idx].path;
+            auto slash = path.find_last_of("/\\");
+            if (slash != std::string::npos) path = path.substr(slash + 1);
+            ImGui::Text("  %s: %s", label, path.c_str());
+          } else {
+            ImGui::TextDisabled("  %s: (none)", label);
+          }
+        };
+
+        showTex("Albedo",    mat.albedoTextureIndex);
+        showTex("Normal",    mat.normalTextureIndex);
+        showTex("Metal/Rgh", mat.metallicRoughnessTextureIndex);
+      } else {
+        ImGui::TextDisabled("No material assigned");
+      }
+    }, DockLocation::Right);
+
+    // ── Log Console ───────────────────────────────────────────────────────────
+    imguiManager.registerPanel(ICON_FA_TERMINAL " Console", [&]() {
+      static bool showDebug = false;
+      static bool showInfo  = true;
+      static bool showWarn  = true;
+      static bool showError = true;
+
+      ImGui::Checkbox("Debug", &showDebug); ImGui::SameLine();
+      ImGui::Checkbox("Info",  &showInfo);  ImGui::SameLine();
+      ImGui::Checkbox("Warn",  &showWarn);  ImGui::SameLine();
+      ImGui::Checkbox("Error", &showError); ImGui::SameLine();
+      if (ImGui::Button(ICON_FA_TRASH " Clear"))
+        imguiSink->clear();
+
+      ImGui::Separator();
+
+      if (ImGui::BeginChild("LogScroll", ImVec2(0, 0), ImGuiChildFlags_None)) {
+        for (const auto& entry : imguiSink->getEntries()) {
+          bool   show  = false;
+          ImVec4 color = ImVec4(0.8f, 0.8f, 0.8f, 1.0f);
+
+          switch (entry.level) {
+            case spdlog::level::debug:
+              show = showDebug;
+              color = ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
+              break;
+            case spdlog::level::info:
+              show = showInfo;
+              color = ImVec4(0.85f, 0.85f, 0.85f, 1.0f);
+              break;
+            case spdlog::level::warn:
+              show = showWarn;
+              color = ImVec4(1.0f, 0.8f, 0.3f, 1.0f);
+              break;
+            case spdlog::level::err:
+            case spdlog::level::critical:
+              show = showError;
+              color = ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
+              break;
+            default:
+              show  = true;
+              break;
+          }
+
+          if (show) {
+            ImGui::PushStyleColor(ImGuiCol_Text, color);
+            ImGui::TextUnformatted(entry.message.c_str());
+            ImGui::PopStyleColor();
+          }
+        }
+
+        // Auto-scroll to bottom when new entries arrive
+        static size_t lastCount = 0;
+        size_t currentCount = imguiSink->getEntryCount();
+        if (currentCount != lastCount) {
+          ImGui::SetScrollHereY(1.0f);
+          lastCount = currentCount;
+        }
+      }
+      ImGui::EndChild();
     }, DockLocation::Bottom);
 
     // === Mouse capture state ===
@@ -229,6 +403,15 @@ int main() {
           break;
         }
       }
+
+      // ── Quit via menu bar ─────────────────────────────────────────────
+      if (imguiManager.shouldQuit()) {
+        running = false;
+      }
+
+      // ── Sync rendering toggles to renderer ────────────────────────────
+      renderer.setWireframeEnabled(wireframeEnabled);
+      renderer.setNormalVisualization(showNormals);
 
       // ── Camera update (only when mouse is captured / not interacting with UI) ──
       if (mouseCaptured) {
