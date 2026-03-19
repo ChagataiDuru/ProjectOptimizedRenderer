@@ -6,6 +6,9 @@
 #include <string>
 #include <vector>
 
+// ImGuiID (unsigned int) is used in the private buildDefaultLayout signature.
+#include <imgui.h>
+
 // Where a panel prefers to be docked in the default layout.
 enum class DockLocation {
     Right,      // Right column (scene hierarchy, properties)
@@ -24,6 +27,8 @@ struct DebugPanel {
 
 class ImGuiManager {
 public:
+    enum class Theme { Dark, Light };
+
     ImGuiManager(VulkanContext& ctx, Swapchain& swapchain);
     ~ImGuiManager();
 
@@ -55,10 +60,17 @@ public:
     void processEvent(const void* sdlEvent);
 
     // Toggle entire ImGui visibility (F11 fullscreen mode).
-    // When hidden, endFrame/recordRenderPass become no-ops for widget drawing.
     void setVisible(bool visible) { m_visible = visible; }
     bool isVisible() const        { return m_visible; }
     void toggleVisible()          { m_visible = !m_visible; }
+
+    // Theme and appearance.
+    void  setTheme(Theme theme);
+    Theme getTheme() const { return m_theme; }
+
+    // 0.0 = fully transparent panels, 1.0 = opaque. Reapplies theme immediately.
+    void  setBackgroundAlpha(float alpha);
+    float getBackgroundAlpha() const { return m_bgAlpha; }
 
 private:
     VulkanContext& m_ctx;
@@ -69,5 +81,10 @@ private:
     bool                    m_visible     = true;
     bool                    m_firstFrame  = true;  // Applies default layout on first frame only
 
+    Theme m_theme   = Theme::Dark;
+    float m_bgAlpha = 0.92f;     // Slightly transparent — scene peeks through panel edges
+
     void buildDefaultLayout(ImGuiID dockspaceId);
+    void applyTheme();
+    void loadFonts();
 };

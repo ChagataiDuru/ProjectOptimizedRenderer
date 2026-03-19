@@ -12,6 +12,7 @@
 #include <cmath>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <IconsFontAwesome6.h>
 #include <imgui.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
@@ -70,7 +71,7 @@ int main() {
     std::array<float, 90> fpsHistory{};
     int fpsHistoryOffset = 0;
 
-    imguiManager.registerPanel("Performance", [&]() {
+    imguiManager.registerPanel(ICON_FA_CHART_LINE " Performance", [&]() {
       float fps = (deltaTime > 0.0f) ? (1.0f / deltaTime) : 0.0f;
       fpsHistory[static_cast<size_t>(fpsHistoryOffset)] = fps;
       fpsHistoryOffset = (fpsHistoryOffset + 1) % static_cast<int>(fpsHistory.size());
@@ -84,7 +85,7 @@ int main() {
         ImVec2(0.0f, 60.0f));
     }, DockLocation::Bottom);
 
-    imguiManager.registerPanel("Camera", [&]() {
+    imguiManager.registerPanel(ICON_FA_VIDEO " Camera", [&]() {
       const glm::vec3 pos = camera.getPosition();
       ImGui::Text("Position:  (%.2f, %.2f, %.2f)", pos.x, pos.y, pos.z);
 
@@ -95,7 +96,7 @@ int main() {
       ImGui::TextDisabled("WASD: move  Mouse: look  F1: toggle cursor");
     }, DockLocation::Right);
 
-    imguiManager.registerPanel("Light", [&]() {
+    imguiManager.registerPanel(ICON_FA_SUN " Light", [&]() {
       bool changed = false;
       changed |= ImGui::SliderFloat3("Direction", lightState.direction, -1.0f, 1.0f);
       changed |= ImGui::ColorEdit3("Color",       lightState.color);
@@ -110,7 +111,7 @@ int main() {
       }
     }, DockLocation::Right);
 
-    imguiManager.registerPanel("Render Stats", [&]() {
+    imguiManager.registerPanel(ICON_FA_CUBES " Render Stats", [&]() {
       const auto& stats = renderer.getRenderStats();
       ImGui::Text("Draw calls:  %u",   stats.drawCalls);
       ImGui::Text("Triangles:   %u",   stats.triangles);
@@ -125,7 +126,7 @@ int main() {
       ImGui::TextDisabled("F2: save screenshot");
     }, DockLocation::Bottom);
 
-    imguiManager.registerPanel("GPU Timing", [&]() {
+    imguiManager.registerPanel(ICON_FA_CLOCK " GPU Timing", [&]() {
       const auto& timer = renderer.getGPUTimer();
       if (!timer.isValid()) {
         ImGui::TextDisabled("GPU timestamps not supported on this device");
