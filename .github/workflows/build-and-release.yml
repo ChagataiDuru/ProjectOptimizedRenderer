@@ -2,134 +2,171 @@ name: Build & Release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches: ["main"]
+    tags: ["v*"]
+  pull_request:
+    branches: ["main"]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag to build (e.g. v2.0.0-pre)"
-        required: false
+
+permissions:
+  contents: read
 
 jobs:
   build:
+    name: Build (${{ matrix.os }} / ${{ matrix.preset }})
     runs-on: ${{ matrix.os }}
-    permissions:
-      contents: read
+
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
-            platform: macOS-arm64
+          - os: ubuntu-latest
+            preset: linux-debug
+            artifact_name: ProjectOptimizedRenderer-linux
           - os: windows-latest
-            platform: Windows-x64
+            preset: win-debug
+            artifact_name: ProjectOptimizedRenderer-windows
+          - os: macos-latest
+            preset: macos-debug
+            artifact_name: ProjectOptimizedRenderer-macos
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
+      - name: Setup Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v5
+
+      # Optional but useful if your presets rely on Python/conan helpers.
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install Conan
-        run: python -m pip install --upgrade pip conan
-
-      - name: Detect Conan profile
-        run: conan profile detect --force
-
-      # ── macOS dependencies ────────────────────────────────────────────
-      - name: Install system dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: brew install molten-vk glslang
-
-      # ── Conan install ─────────────────────────────────────────────────
-      - name: Install dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: conan install . --output-folder=build --build=missing -s build_type=Debug
-
-      - name: Install dependencies (Windows)
-        if: runner.os == 'Windows'
-        run: conan install . --output-folder=build --build=missing -s build_type=Debug -s compiler.cppstd=20
-
-      # ── Build ─────────────────────────────────────────────────────────
-      - name: Configure & Build (macOS)
-        if: runner.os == 'macOS'
+      # Linux dependencies (adjust package list as your project needs)
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
         run: |
-          cmake --preset conan-debug
-          cmake --build --preset conan-debug
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libx11-dev \
+            libxrandr-dev \
+            libxinerama-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libgl1-mesa-dev \
+            mesa-vulkan-drivers \
+            vulkan-tools \
+            libvulkan-dev
 
-      - name: Configure & Build (Windows)
+      # Install Vulkan SDK on Windows so find_package(Vulkan 1.4 REQUIRED) succeeds.
+      - name: Setup Vulkan SDK (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          cmake --preset win-debug
-          cmake --build --preset win-debug --config Debug
+          choco install vulkan-sdk --yes --no-progress
+          $vulkanRoot = Get-ChildItem "C:\VulkanSDK" -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $vulkanRoot) { throw "Vulkan SDK install failed: C:\VulkanSDK not found." }
 
-      # ── Package ───────────────────────────────────────────────────────
-      - name: Package (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          mkdir -p staging/shaders
-          cp build/conan-debug/ProjectOptimizedRenderer staging/
-          cp build/conan-debug/shaders/*.spv staging/shaders/ || true
-          cd staging && zip -r ../ProjectOptimizedRenderer-${{ matrix.platform }}.zip .
+          "VULKAN_SDK=$($vulkanRoot.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "Vulkan_ROOT=$($vulkanRoot.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
+          # Ensure tools/libs are discoverable during configure/build
+          "PATH=$($vulkanRoot.FullName)\Bin;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Show tool versions
         shell: bash
         run: |
-          mkdir -p staging/shaders
-          cp build/Debug/ProjectOptimizedRenderer.exe staging/ || cp build/conan-default/Debug/ProjectOptimizedRenderer.exe staging/
-          cp build/shaders/*.spv staging/shaders/ 2>/dev/null || cp build/conan-default/shaders/*.spv staging/shaders/ 2>/dev/null || true
-          cd staging && 7z a -tzip ../ProjectOptimizedRenderer-${{ matrix.platform }}.zip .
+          cmake --version
+          ninja --version
+          c++ --version || true
+          gcc --version || true
+          clang --version || true
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            echo "VULKAN_SDK=${VULKAN_SDK:-<unset>}"
+          fi
+
+      - name: Configure
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EXTRA_ARGS=()
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            # Helps CMake's FindVulkan locate the SDK on windows-latest + MinGW.
+            EXTRA_ARGS+=("-DVulkan_ROOT=${VULKAN_SDK}")
+          fi
+
+          cmake --preset "${{ matrix.preset }}" "${EXTRA_ARGS[@]}"
+
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --build --preset "${{ matrix.preset }}" --config Debug --parallel
+
+      - name: Locate built executable
+        id: locate_bin
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EXE_NAME="ProjectOptimizedRenderer"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            EXE_NAME="${EXE_NAME}.exe"
+          fi
+
+          # Common output locations for single-config and multi-config generators.
+          CANDIDATES=(
+            "build/conan-debug/${EXE_NAME}"
+            "build/conan-debug/Debug/${EXE_NAME}"
+            "build/conan-debug/Release/${EXE_NAME}"
+            "build/${EXE_NAME}"
+            "build/Debug/${EXE_NAME}"
+            "build/Release/${EXE_NAME}"
+            "${EXE_NAME}"
+          )
+
+          BIN_PATH=""
+          for p in "${CANDIDATES[@]}"; do
+            if [[ -f "$p" ]]; then
+              BIN_PATH="$p"
+              break
+            fi
+          done
+
+          if [[ -z "$BIN_PATH" ]]; then
+            BIN_PATH="$(find build -type f -name "${EXE_NAME}" | head -n 1 || true)"
+          fi
+
+          if [[ -z "$BIN_PATH" ]]; then
+            echo "ERROR: Could not find built executable: ${EXE_NAME}"
+            echo "Dumping build tree for diagnostics:"
+            find build -maxdepth 8 -type f | sort || true
+            exit 1
+          fi
+
+          echo "Found executable: $BIN_PATH"
+          echo "bin_path=$BIN_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp "${{ steps.locate_bin.outputs.bin_path }}" "dist/ProjectOptimizedRenderer.exe"
+          else
+            cp "${{ steps.locate_bin.outputs.bin_path }}" "dist/ProjectOptimizedRenderer"
+            chmod +x "dist/ProjectOptimizedRenderer" || true
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ProjectOptimizedRenderer-${{ matrix.platform }}
-          path: ProjectOptimizedRenderer-${{ matrix.platform }}.zip
-
-  # ── Create GitHub Release ───────────────────────────────────────────
-  release:
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Determine tag
-        id: tag
-        run: |
-          if [ -n "${{ github.event.inputs.tag }}" ]; then
-            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
-          else
-            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Determine if pre-release
-        id: prerelease
-        run: |
-          TAG="${{ steps.tag.outputs.tag }}"
-          if echo "$TAG" | grep -qiE '(alpha|beta|rc|pre|debug|dev)'; then
-            echo "is_prerelease=true" >> $GITHUB_OUTPUT
-          else
-            echo "is_prerelease=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          name: "${{ steps.tag.outputs.tag }}"
-          prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
-          generate_release_notes: true
-          files: |
-            artifacts/**/*.zip
+          name: ${{ matrix.artifact_name }}
+          path: dist/*
+          if-no-files-found: error
