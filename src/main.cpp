@@ -143,18 +143,61 @@ int main() {
     imguiManager.registerPanel(ICON_FA_CLOCK " GPU Timing", [&]() {
       const auto& timer = renderer.getGPUTimer();
       if (!timer.isValid()) {
-        ImGui::TextDisabled("GPU timestamps not supported on this device");
+        ImGui::TextDisabled("GPU timestamps not available");
         return;
       }
+
       const float sceneMs = timer.getElapsedMs("ScenePass_Begin", "ScenePass_End");
       const float imguiMs = timer.getElapsedMs("ScenePass_End",   "ImGuiPass_End");
       const float totalMs = sceneMs + imguiMs;
-      ImGui::Text("Scene pass:  %.3f ms", sceneMs);
-      ImGui::Text("ImGui pass:  %.3f ms", imguiMs);
-      ImGui::Text("GPU total:   %.3f ms", totalMs);
-      ImGui::Separator();
-      ImGui::Text("Budget 60 Hz: 16.67 ms");
-      ImGui::ProgressBar(totalMs / 16.67f, ImVec2(-1.0f, 0.0f), "");
+      const float budget  = 16.67f;  // 60 Hz
+
+      ImGui::Text("Budget: %.2f / %.2f ms (60 Hz)", totalMs, budget);
+
+      // ── Stacked bar chart ──────────────────────────────────────────────────
+      const float barWidth  = ImGui::GetContentRegionAvail().x;
+      const float barHeight = 20.0f;
+      ImVec2      barStart  = ImGui::GetCursorScreenPos();
+      ImDrawList* draw      = ImGui::GetWindowDrawList();
+
+      // Dark background track
+      draw->AddRectFilled(barStart,
+          ImVec2(barStart.x + barWidth, barStart.y + barHeight),
+          IM_COL32(40, 40, 45, 255), 4.0f);
+
+      // Scene pass — blue
+      const float sceneW = glm::min((sceneMs / budget) * barWidth, barWidth);
+      draw->AddRectFilled(barStart,
+          ImVec2(barStart.x + sceneW, barStart.y + barHeight),
+          IM_COL32(66, 150, 250, 200), 4.0f);
+
+      // ImGui pass — green, stacked after scene
+      const float imguiW = glm::min((imguiMs / budget) * barWidth,
+                                    barWidth - sceneW);
+      draw->AddRectFilled(
+          ImVec2(barStart.x + sceneW, barStart.y),
+          ImVec2(barStart.x + sceneW + imguiW, barStart.y + barHeight),
+          IM_COL32(80, 200, 120, 200), 4.0f);
+
+      // 100% budget marker — red vertical line at right edge
+      draw->AddLine(
+          ImVec2(barStart.x + barWidth, barStart.y),
+          ImVec2(barStart.x + barWidth, barStart.y + barHeight),
+          IM_COL32(255, 80, 80, 200), 2.0f);
+
+      // Advance cursor past the manually-drawn bar
+      ImGui::Dummy(ImVec2(barWidth, barHeight + 4.0f));
+
+      // Legend
+      ImGui::ColorButton("##sc", ImVec4(0.26f, 0.59f, 0.98f, 1.0f),
+                         ImGuiColorEditFlags_NoTooltip, ImVec2(10.0f, 10.0f));
+      ImGui::SameLine();
+      ImGui::Text("Scene: %.3f ms", sceneMs);
+
+      ImGui::ColorButton("##im", ImVec4(0.31f, 0.78f, 0.47f, 1.0f),
+                         ImGuiColorEditFlags_NoTooltip, ImVec2(10.0f, 10.0f));
+      ImGui::SameLine();
+      ImGui::Text("ImGui: %.3f ms", imguiMs);
     }, DockLocation::Bottom);
 
     // ── Scene Hierarchy ──────────────────────────────────────────────────────

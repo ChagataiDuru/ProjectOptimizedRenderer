@@ -39,6 +39,12 @@ void ImGuiManager::init(void* sdlWindow)
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 
+    // Persist layout to the project root (ASSET_DIR/../imgui.ini) so it survives
+    // rebuilds and is not lost when the working directory changes.
+    // 'static' keeps the string alive for the lifetime of the ImGui context.
+    static std::string iniPath = std::string(ASSET_DIR) + "/../imgui.ini";
+    io.IniFilename = iniPath.c_str();
+
     // Load fonts before the backends are initialised — the atlas is built once
     // during ImGui_ImplVulkan_Init and cannot be rebuilt without recreation.
     loadFonts();
@@ -327,6 +333,13 @@ void ImGuiManager::endFrame()
             float alpha = m_bgAlpha;
             if (ImGui::SliderFloat("Panel Opacity", &alpha, 0.3f, 1.0f, "%.2f"))
                 setBackgroundAlpha(alpha);
+            ImGui::Separator();
+            ImGui::MenuItem(ICON_FA_GAUGE_HIGH " FPS Overlay", nullptr, &m_showFPSOverlay);
+            ImGui::Separator();
+            if (ImGui::MenuItem(ICON_FA_FLOPPY_DISK " Save Layout")) {
+                ImGui::SaveIniSettingsToDisk(ImGui::GetIO().IniFilename);
+                spdlog::info("Layout saved to {}", ImGui::GetIO().IniFilename);
+            }
             ImGui::EndMenu();
         }
 
@@ -353,6 +366,31 @@ void ImGuiManager::endFrame()
             panel.drawFn();
             ImGui::End();
         }
+    }
+
+    // ── Viewport FPS overlay ─────────────────────────────────────────────────
+    // A small pinned window in the top-left corner. NoSavedSettings keeps it
+    // out of imgui.ini so it always appears at the same position regardless of
+    // any previously saved layout.
+    if (m_showFPSOverlay) {
+        ImGuiWindowFlags overlayFlags =
+            ImGuiWindowFlags_NoDecoration         |
+            ImGuiWindowFlags_NoDocking            |
+            ImGuiWindowFlags_AlwaysAutoResize     |
+            ImGuiWindowFlags_NoSavedSettings      |
+            ImGuiWindowFlags_NoFocusOnAppearing   |
+            ImGuiWindowFlags_NoNav                |
+            ImGuiWindowFlags_NoMove               |
+            ImGuiWindowFlags_NoInputs;
+
+        ImGui::SetNextWindowPos(ImVec2(10.0f, 32.0f), ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(0.4f);
+
+        if (ImGui::Begin("##FPSOverlay", nullptr, overlayFlags)) {
+            const ImGuiIO& io = ImGui::GetIO();
+            ImGui::Text("%.0f FPS  %.1f ms", io.Framerate, 1000.0f / io.Framerate);
+        }
+        ImGui::End();
     }
 
     ImGui::Render();
@@ -400,40 +438,43 @@ void ImGuiManager::buildDefaultLayout(ImGuiID dockspaceId)
     ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::DockBuilderSetNodeSize(dockspaceId, viewport->WorkSize);
 
-    // Split: right column (25%) — capture both halves; dockCenter is the left remainder.
-    // DockBuilderSplitNode returns out_id_at_dir; the opposite side comes via out_id_at_opposite_dir.
+    // Right column 22%, left remainder 78%.
+    // Both out-params captured — omitting out_id_at_opposite_dir causes the
+    // return value to alias dockRight, making subsequent splits double-split it.
     ImGuiID dockRight;
     ImGuiID dockCenter;
-    ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Right, 0.25f, &dockRight, &dockCenter);
+    ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Right, 0.22f,
+                                &dockRight, &dockCenter);
 
-    // Split left remainder into bottom strip (25% height) and main viewport.
+    // Bottom strip 20% of the left area, main viewport gets the rest.
     ImGuiID dockBottom;
     ImGuiID dockMain;
-    ImGui::DockBuilderSplitNode(dockCenter, ImGuiDir_Down, 0.25f, &dockBottom, &dockMain);
+    ImGui::DockBuilderSplitNode(dockCenter, ImGuiDir_Down, 0.20f,
+                                &dockBottom, &dockMain);
 
-    // Split right column into top and bottom halves (panels tab together within each).
+    // Right column: Scene hierarchy on top 60%, Properties/Camera/Light on bottom 40%.
     ImGuiID dockRightTop;
     ImGuiID dockRightBottom;
-    ImGui::DockBuilderSplitNode(dockRight, ImGuiDir_Down, 0.5f, &dockRightBottom, &dockRightTop);
+    ImGui::DockBuilderSplitNode(dockRight, ImGuiDir_Down, 0.40f,
+                                &dockRightBottom, &dockRightTop);
 
-    bool rightTopUsed = false;
+    // Name-based assignment gives explicit control over which node each panel
+    // goes to, independent of registration order.
     for (const auto& panel : m_panels) {
-        ImGuiID targetNode;
-        switch (panel.dockLocation) {
-            case DockLocation::Right:
-                targetNode    = rightTopUsed ? dockRightBottom : dockRightTop;
-                rightTopUsed  = true;
-                break;
-            case DockLocation::Bottom:
-                targetNode = dockBottom;
-                break;
-            case DockLocation::Floating:
-            default:
-                continue;
-        }
-        ImGui::DockBuilderDockWindow(panel.name.c_str(), targetNode);
+        ImGuiID target = 0;
+
+        const std::string& n = panel.name;
+        if      (n.find("Scene")      != std::string::npos) target = dockRightTop;
+        else if (n.find("Properties") != std::string::npos ||
+                 n.find("Camera")     != std::string::npos ||
+                 n.find("Light")      != std::string::npos) target = dockRightBottom;
+        else if (panel.dockLocation == DockLocation::Bottom) target = dockBottom;
+        else if (panel.dockLocation == DockLocation::Right)  target = dockRightTop;
+
+        if (target != 0)
+            ImGui::DockBuilderDockWindow(panel.name.c_str(), target);
     }
 
     ImGui::DockBuilderFinish(dockspaceId);
-    spdlog::info("Default dock layout applied");
+    spdlog::info("Default dock layout applied (22% right, 20% bottom)");
 }

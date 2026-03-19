@@ -75,6 +75,10 @@ public:
     // Returns true when the user clicked File → Quit.
     bool shouldQuit() const { return m_quitRequested; }
 
+    // Viewport FPS overlay — small counter in the top-left corner.
+    void setShowFPSOverlay(bool show) { m_showFPSOverlay = show; }
+    bool showFPSOverlay() const       { return m_showFPSOverlay; }
+
     // Rendering toggle pointers — set by main.cpp; the Rendering menu writes through them.
     struct RenderToggles {
         bool* wireframe   = nullptr;
@@ -94,7 +98,8 @@ private:
     Theme m_theme   = Theme::Dark;
     float m_bgAlpha = 0.92f;     // Slightly transparent — scene peeks through panel edges
 
-    bool          m_quitRequested = false;
+    bool          m_quitRequested  = false;
+    bool          m_showFPSOverlay = true;
     RenderToggles m_renderToggles;
 
     void buildDefaultLayout(ImGuiID dockspaceId);
