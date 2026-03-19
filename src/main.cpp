@@ -70,7 +70,7 @@ int main() {
     std::array<float, 90> fpsHistory{};
     int fpsHistoryOffset = 0;
 
-    imguiManager.registerPanel({"Performance", [&]() {
+    imguiManager.registerPanel("Performance", [&]() {
       float fps = (deltaTime > 0.0f) ? (1.0f / deltaTime) : 0.0f;
       fpsHistory[static_cast<size_t>(fpsHistoryOffset)] = fps;
       fpsHistoryOffset = (fpsHistoryOffset + 1) % static_cast<int>(fpsHistory.size());
@@ -82,9 +82,9 @@ int main() {
         "FPS",
         0.0f, 300.0f,
         ImVec2(0.0f, 60.0f));
-    }});
+    }, DockLocation::Bottom);
 
-    imguiManager.registerPanel({"Camera", [&]() {
+    imguiManager.registerPanel("Camera", [&]() {
       const glm::vec3 pos = camera.getPosition();
       ImGui::Text("Position:  (%.2f, %.2f, %.2f)", pos.x, pos.y, pos.z);
 
@@ -93,9 +93,9 @@ int main() {
       ImGui::Text("Pitch/Yaw: (%.1f°, %.1f°)", euler.x, euler.y);
       ImGui::Spacing();
       ImGui::TextDisabled("WASD: move  Mouse: look  F1: toggle cursor");
-    }});
+    }, DockLocation::Right);
 
-    imguiManager.registerPanel({"Light", [&]() {
+    imguiManager.registerPanel("Light", [&]() {
       bool changed = false;
       changed |= ImGui::SliderFloat3("Direction", lightState.direction, -1.0f, 1.0f);
       changed |= ImGui::ColorEdit3("Color",       lightState.color);
@@ -108,9 +108,9 @@ int main() {
           lightState.intensity,
           lightState.ambient);
       }
-    }});
+    }, DockLocation::Right);
 
-    imguiManager.registerPanel({"Render Stats", [&]() {
+    imguiManager.registerPanel("Render Stats", [&]() {
       const auto& stats = renderer.getRenderStats();
       ImGui::Text("Draw calls:  %u",   stats.drawCalls);
       ImGui::Text("Triangles:   %u",   stats.triangles);
@@ -123,9 +123,9 @@ int main() {
       }
       ImGui::Separator();
       ImGui::TextDisabled("F2: save screenshot");
-    }});
+    }, DockLocation::Bottom);
 
-    imguiManager.registerPanel({"GPU Timing", [&]() {
+    imguiManager.registerPanel("GPU Timing", [&]() {
       const auto& timer = renderer.getGPUTimer();
       if (!timer.isValid()) {
         ImGui::TextDisabled("GPU timestamps not supported on this device");
@@ -140,7 +140,7 @@ int main() {
       ImGui::Separator();
       ImGui::Text("Budget 60 Hz: 16.67 ms");
       ImGui::ProgressBar(totalMs / 16.67f, ImVec2(-1.0f, 0.0f), "");
-    }});
+    }, DockLocation::Bottom);
 
     // === Mouse capture state ===
     bool mouseCaptured = true;
@@ -190,6 +190,17 @@ int main() {
             renderer.requestScreenshot();
             spdlog::info("Screenshot requested");
           }
+          if (event.key.scancode == SDL_SCANCODE_F11) {
+            imguiManager.toggleVisible();
+            spdlog::info("ImGui overlay: {}",
+                         imguiManager.isVisible() ? "visible" : "hidden (F11 fullscreen)");
+            // When hiding ImGui, ensure mouse is captured for FPS camera
+            if (!imguiManager.isVisible() && !mouseCaptured) {
+              mouseCaptured = true;
+              SDL_SetWindowRelativeMouseMode(
+                  static_cast<SDL_Window*>(window.getHandle()), true);
+            }
+          }
           break;
 
         case SDL_EVENT_MOUSE_MOTION: {
@@ -229,8 +240,9 @@ int main() {
                                  camera.getProjectionMatrix(),
                                  camera.getPosition());
 
-      // ── Build ImGui frame (invoke panel callbacks) ─────────────────────
+      // ── Build ImGui frame ─────────────────────────────────────────────
       imguiManager.beginFrame();
+      imguiManager.endFrame();   // Dockspace + panel drawing + ImGui::Render()
 
       // ── Render ────────────────────────────────────────────────────────
       renderer.beginFrame();
