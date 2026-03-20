@@ -342,10 +342,11 @@ void VulkanContext::createLogicalDevice()
     };
 
     m_vulkan13Features = {
-        .sType            = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-        .pNext            = &m_vulkan12Features,
-        .synchronization2 = VK_TRUE,
-        .dynamicRendering = VK_TRUE,    // core since 1.3; no VkRenderPass
+        .sType                          = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+        .pNext                          = &m_vulkan12Features,
+        .shaderDemoteToHelperInvocation = VK_TRUE,  // Required for SPIR-V 1.6 OpDemoteToHelperInvocation (discard)
+        .synchronization2               = VK_TRUE,
+        .dynamicRendering               = VK_TRUE,
     };
 
     m_vulkan14Features = {
@@ -360,6 +361,7 @@ void VulkanContext::createLogicalDevice()
         .pNext    = &m_vulkan14Features,
         .features = {
             .fillModeNonSolid = VK_TRUE,  // Required for VK_POLYGON_MODE_LINE (wireframe)
+            .samplerAnisotropy = VK_TRUE,
         },
     };
 

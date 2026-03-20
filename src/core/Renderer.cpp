@@ -885,21 +885,21 @@ void Renderer::createShadowResources()
                        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                        VK_IMAGE_ASPECT_DEPTH_BIT);
 
-    // ── Comparison sampler ────────────────────────────────────────────────────
-    // compareEnable = VK_TRUE turns this into a shadow/comparison sampler.
-    // The shader uses sampler2DShadow; the hardware performs depth comparison per sample.
+    // ── Shadow sampler (non-comparison) ──────────────────────────────────────
+    // compareEnable = VK_FALSE: raw depth fetch; manual comparison done in the shader.
+    // This avoids mutableComparisonSamplers (VK_KHR_portability_subset on MoltenVK).
+    // NEAREST filter: linear filtering of raw depth values is meaningless for hard shadows.
     const VkSamplerCreateInfo samplerCI{
         .sType            = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-        .magFilter        = VK_FILTER_LINEAR,
-        .minFilter        = VK_FILTER_LINEAR,
+        .magFilter        = VK_FILTER_NEAREST,
+        .minFilter        = VK_FILTER_NEAREST,
         .mipmapMode       = VK_SAMPLER_MIPMAP_MODE_NEAREST,
         .addressModeU     = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
         .addressModeV     = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
         .addressModeW     = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
         .mipLodBias       = 0.0f,
         .anisotropyEnable = VK_FALSE,
-        .compareEnable    = VK_TRUE,
-        .compareOp        = VK_COMPARE_OP_LESS_OR_EQUAL,  // ref <= depth → lit (1.0)
+        .compareEnable    = VK_FALSE,  // Manual comparison in shader — MoltenVK portable
         .minLod           = 0.0f,
         .maxLod           = 0.0f,
         .borderColor      = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE,  // outside map = fully lit

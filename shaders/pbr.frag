@@ -25,8 +25,8 @@ layout(binding = 2, set = 0) uniform ShadowData {
     mat4 lightViewProj;
 } shadow;
 
-// Comparison sampler: hardware performs depth test per sample (PCF-ready).
-layout(binding = 3, set = 0) uniform sampler2DShadow shadowMap;
+// Regular sampler: raw depth fetch; comparison is done manually in computeShadow().
+layout(binding = 3, set = 0) uniform sampler2D shadowMap;
 
 // ── Material textures (set 1) ─────────────────────────────────────────────────
 layout(binding = 0, set = 1) uniform sampler2D texAlbedo;
@@ -113,27 +113,38 @@ vec3 tonemapReinhard(vec3 hdr) {
 }
 
 // ── Shadow factor ─────────────────────────────────────────────────────────────
-// Returns 1.0 (fully lit) when the surface is not in shadow, 0.0 when occluded.
-// texture(sampler2DShadow, vec3(uv, refDepth)) performs hardware comparison:
-//   result = (storedDepth >= refDepth) ? 1.0 : 0.0
-// A small bias on refDepth prevents self-shadowing (shadow acne).
 float computeShadow(vec3 worldPos) {
-    // Transform fragment into light clip space.
     vec4 lightClip = shadow.lightViewProj * vec4(worldPos, 1.0);
-    // Perspective divide (ortho projection → w == 1, but kept general).
     vec3 ndc = lightClip.xyz / lightClip.w;
-    // Map NDC [-1,1] → UV [0,1] for X/Y; Z is already in [0,1] for Vulkan.
+
+    // Map XY from [-1,1] NDC to [0,1] texture coordinates
     vec2 shadowUV = ndc.xy * 0.5 + 0.5;
 
-    // Outside the shadow map frustum → assume lit (border sampler = OPAQUE_WHITE).
+    // Outside the shadow map → fully lit
     if (shadowUV.x < 0.0 || shadowUV.x > 1.0 ||
-        shadowUV.y < 0.0 || shadowUV.y > 1.0 ||
-        ndc.z < 0.0       || ndc.z > 1.0)
+        shadowUV.y < 0.0 || shadowUV.y > 1.0)
         return 1.0;
 
-    // Depth bias: nudge reference depth slightly toward the light to avoid acne.
-    float refDepth = ndc.z - 0.005;
-    return texture(shadowMap, vec3(shadowUV, refDepth));
+    // Fragment's depth in light space [0,1] (standard Z)
+    float currentDepth = ndc.z;
+
+    // Outside depth range → fully lit
+    if (currentDepth < 0.0 || currentDepth > 1.0)
+        return 1.0;
+
+    // Use texelFetch to read raw depth — bypasses sampler entirely.
+    // texture() with sampler2D on D32_SFLOAT returns 0.0 on MoltenVK;
+    // texelFetch reads the actual depth value reliably on all implementations.
+    ivec2 shadowMapSize = textureSize(shadowMap, 0);
+    ivec2 texCoord = ivec2(shadowUV * vec2(shadowMapSize));
+    texCoord = clamp(texCoord, ivec2(0), shadowMapSize - 1);
+    float storedDepth = texelFetch(shadowMap, texCoord, 0).r;
+
+    // Bias to reduce shadow acne
+    float bias = 0.005;
+
+    // Lit if fragment depth <= stored depth (standard Z: closer = smaller)
+    return (currentDepth - bias) <= storedDepth ? 1.0 : 0.0;
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
