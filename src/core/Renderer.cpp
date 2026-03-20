@@ -1,4 +1,5 @@
 #include "core/Renderer.h"
+#include "core/VulkanUtil.h"
 #include "debug/ImGuiManager.h"
 #include "resource/GLTFLoader.h"
 #include "resource/Vertex.h"
@@ -47,37 +48,6 @@ static VkShaderModule makeShaderModule(VkDevice device, const std::vector<uint32
     VkShaderModule mod;
     VK_CHECK(vkCreateShaderModule(device, &info, nullptr, &mod));
     return mod;
-}
-
-// Synchronization2 image layout transition helper (core in Vulkan 1.3 / 1.4).
-// aspectMask defaults to COLOR but must be VK_IMAGE_ASPECT_DEPTH_BIT for depth images.
-static void transitionImage(
-    VkCommandBuffer       cmd,
-    VkImage               image,
-    VkPipelineStageFlags2 srcStage,  VkAccessFlags2 srcAccess,
-    VkPipelineStageFlags2 dstStage,  VkAccessFlags2 dstAccess,
-    VkImageLayout         oldLayout, VkImageLayout  newLayout,
-    VkImageAspectFlags    aspectMask = VK_IMAGE_ASPECT_COLOR_BIT)
-{
-    const VkImageMemoryBarrier2 barrier{
-        .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .srcStageMask        = srcStage,
-        .srcAccessMask       = srcAccess,
-        .dstStageMask        = dstStage,
-        .dstAccessMask       = dstAccess,
-        .oldLayout           = oldLayout,
-        .newLayout           = newLayout,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image               = image,
-        .subresourceRange    = { aspectMask, 0, 1, 0, 1 },
-    };
-    const VkDependencyInfo dep{
-        .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .imageMemoryBarrierCount = 1,
-        .pImageMemoryBarriers    = &barrier,
-    };
-    vkCmdPipelineBarrier2(cmd, &dep);
 }
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
@@ -286,8 +256,9 @@ void Renderer::loadModel(const std::string& modelPath)
 void Renderer::createPbrPipeline()
 {
     const std::string dir = SHADER_DIR;
-    m_vertModule = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/pbr.vert.spv"));
-    m_fragModule = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/pbr.frag.spv"));
+    m_vertModule        = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/pbr.vert.spv"));
+    m_fragModule        = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/pbr.frag.spv"));
+    m_normalsFragModule = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/pbr_normals.frag.spv"));
 
     const std::array<VkPipelineShaderStageCreateInfo, 2> stages{{
         {
@@ -300,6 +271,21 @@ void Renderer::createPbrPipeline()
             .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
             .stage  = VK_SHADER_STAGE_FRAGMENT_BIT,
             .module = m_fragModule,
+            .pName  = "main",
+        },
+    }};
+
+    const std::array<VkPipelineShaderStageCreateInfo, 2> normalsStages{{
+        {
+            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage  = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = m_vertModule,
+            .pName  = "main",
+        },
+        {
+            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage  = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = m_normalsFragModule,
             .pName  = "main",
         },
     }};
@@ -327,7 +313,7 @@ void Renderer::createPbrPipeline()
         .scissorCount  = 1,
     };
 
-    const VkPipelineRasterizationStateCreateInfo rasterization{
+    VkPipelineRasterizationStateCreateInfo rasterization{
         .sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
         .polygonMode = VK_POLYGON_MODE_FILL,
         // Back-face culling enabled: cube normals are outward-facing CCW, so back faces are CW.
@@ -468,6 +454,11 @@ void Renderer::createPbrPipeline()
         .stencilAttachmentFormat = VK_FORMAT_UNDEFINED,
     };
 
+    // ── Create both solid and wireframe pipelines in one batch call ──────────
+    // The wireframe pipeline is identical except for polygonMode = LINE.
+    VkPipelineRasterizationStateCreateInfo wireframeRasterization = rasterization;
+    wireframeRasterization.polygonMode = VK_POLYGON_MODE_LINE;
+
     const VkGraphicsPipelineCreateInfo pipelineInfo{
         .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .pNext               = &renderingInfo,
@@ -485,14 +476,36 @@ void Renderer::createPbrPipeline()
         .renderPass          = VK_NULL_HANDLE,  // Dynamic rendering: no render pass object
     };
 
+    VkGraphicsPipelineCreateInfo wireframePipelineInfo = pipelineInfo;
+    wireframePipelineInfo.pRasterizationState = &wireframeRasterization;
+
+    // Normals pipeline: same as solid but with the normals-only fragment shader
+    VkGraphicsPipelineCreateInfo normalsPipelineInfo = pipelineInfo;
+    normalsPipelineInfo.pStages    = normalsStages.data();
+    normalsPipelineInfo.stageCount = static_cast<uint32_t>(normalsStages.size());
+
+    const std::array<VkGraphicsPipelineCreateInfo, 3> pipelineInfos = {
+        pipelineInfo,
+        wireframePipelineInfo,
+        normalsPipelineInfo,
+    };
+
+    std::array<VkPipeline, 3> pipelines{};
     VK_CHECK(vkCreateGraphicsPipelines(
-        m_ctx.getDevice(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_pipeline));
+        m_ctx.getDevice(), VK_NULL_HANDLE,
+        static_cast<uint32_t>(pipelineInfos.size()),
+        pipelineInfos.data(), nullptr, pipelines.data()));
+
+    m_pipeline          = pipelines[0];
+    m_wireframePipeline = pipelines[1];
+    m_normalsPipeline   = pipelines[2];
 
     // Shader modules are only needed during pipeline compilation — free them immediately
-    vkDestroyShaderModule(m_ctx.getDevice(), m_vertModule, nullptr); m_vertModule = VK_NULL_HANDLE;
-    vkDestroyShaderModule(m_ctx.getDevice(), m_fragModule, nullptr); m_fragModule = VK_NULL_HANDLE;
+    vkDestroyShaderModule(m_ctx.getDevice(), m_vertModule, nullptr);         m_vertModule        = VK_NULL_HANDLE;
+    vkDestroyShaderModule(m_ctx.getDevice(), m_fragModule, nullptr);         m_fragModule        = VK_NULL_HANDLE;
+    vkDestroyShaderModule(m_ctx.getDevice(), m_normalsFragModule, nullptr);  m_normalsFragModule = VK_NULL_HANDLE;
 
-    spdlog::info("PBR pipeline created (pbr.vert + pbr.frag)");
+    spdlog::info("PBR pipelines created: solid + wireframe + normals");
 }
 
 void Renderer::destroyPipeline()
@@ -504,7 +517,10 @@ void Renderer::destroyPipeline()
     m_materialSets.clear();
     if (m_vertModule         != VK_NULL_HANDLE) { vkDestroyShaderModule(dev, m_vertModule, nullptr);               m_vertModule        = VK_NULL_HANDLE; }
     if (m_fragModule         != VK_NULL_HANDLE) { vkDestroyShaderModule(dev, m_fragModule, nullptr);               m_fragModule        = VK_NULL_HANDLE; }
+    if (m_normalsFragModule  != VK_NULL_HANDLE) { vkDestroyShaderModule(dev, m_normalsFragModule, nullptr);        m_normalsFragModule = VK_NULL_HANDLE; }
     if (m_pipeline           != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_pipeline, nullptr);                     m_pipeline          = VK_NULL_HANDLE; }
+    if (m_wireframePipeline  != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_wireframePipeline, nullptr);            m_wireframePipeline = VK_NULL_HANDLE; }
+    if (m_normalsPipeline    != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_normalsPipeline, nullptr);              m_normalsPipeline   = VK_NULL_HANDLE; }
     if (m_pipelineLayout     != VK_NULL_HANDLE) { vkDestroyPipelineLayout(dev, m_pipelineLayout, nullptr);         m_pipelineLayout    = VK_NULL_HANDLE; }
     if (m_materialSetLayout  != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(dev, m_materialSetLayout, nullptr); m_materialSetLayout = VK_NULL_HANDLE; }
     if (m_cameraSetLayout    != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(dev, m_cameraSetLayout, nullptr);   m_cameraSetLayout   = VK_NULL_HANDLE; }
@@ -733,16 +749,60 @@ void Renderer::createMaterialDescriptorSets()
 
 // ── Frame loop ────────────────────────────────────────────────────────────────
 
-void Renderer::beginFrame()
+void Renderer::handleResize()
+{
+    const VkExtent2D oldExt = m_swapchain.getExtent();
+
+    // CRITICAL: drain the GPU before destroying any resources.
+    // The just-submitted command buffer may still reference the depth image.
+    // Swapchain::recreate() also calls vkDeviceWaitIdle() internally —
+    // the second call is a no-op since the device is already idle.
+    vkDeviceWaitIdle(m_ctx.getDevice());
+
+    m_depthImage.destroy();
+
+    // Recreate swapchain. Passing current extent as hint; Swapchain::createSwapchain()
+    // reads surface capabilities and uses cap.currentExtent when available (most platforms),
+    // falling back to clamped requested dimensions otherwise.
+    m_swapchain.recreate(oldExt.width, oldExt.height);
+
+    const VkExtent2D newExt = m_swapchain.getExtent();
+    if (newExt.width > 0 && newExt.height > 0) {
+        createDepthImage();
+    }
+
+    spdlog::info("Renderer resized: {}x{} -> {}x{}", oldExt.width, oldExt.height,
+                 newExt.width, newExt.height);
+}
+
+bool Renderer::beginFrame()
 {
     m_frameSync.waitForFrame();
     // Fence has signaled — previous frame's GPU work is complete; safe to read timestamps.
     m_gpuTimer.collectResults();
-    m_frameSync.resetFence();
+
+    // NOTE: fence is NOT reset here. It is reset in endFrame() immediately before submit.
+    // This prevents a deadlock if beginFrame() returns false (skip frame): the fence
+    // remains signaled, so the next waitForFrame() returns immediately.
+
     m_commandBuffer.resetFrame();
 
-    if (!m_swapchain.acquireNextImage(m_frameSync.getImageAvailableSemaphore()))
-        spdlog::warn("Swapchain out of date on acquire — resize handling in next phase");
+    if (!m_swapchain.acquireNextImage(m_frameSync.getImageAvailableSemaphore())) {
+        // Swapchain out of date — recreate and retry.
+        // The semaphore was NOT signaled by the failed acquire, so it's safe to reuse.
+        handleResize();
+
+        // After resize, check for zero-size extent (window minimized).
+        const VkExtent2D ext = m_swapchain.getExtent();
+        if (ext.width == 0 || ext.height == 0)
+            return false;
+
+        // Retry acquire with the new swapchain.
+        if (!m_swapchain.acquireNextImage(m_frameSync.getImageAvailableSemaphore()))
+            return false;
+    }
+
+    return true;
 }
 
 void Renderer::render()
@@ -765,14 +825,14 @@ void Renderer::render()
 
     // Swapchain images start in UNDEFINED layout each frame — transition to writable attachment.
     // UNDEFINED oldLayout means the driver is free to discard contents (correct, we clear anyway).
-    transitionImage(cmd, m_swapchain.getCurrentImage(),
+    vkutil::transitionImage(cmd, m_swapchain.getCurrentImage(),
         VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,             0,
         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,  VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
         VK_IMAGE_LAYOUT_UNDEFINED,                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
     // Depth image transitions from UNDEFINED each frame — LOAD_OP_CLEAR discards previous
     // contents anyway, so UNDEFINED→DEPTH_ATTACHMENT_OPTIMAL is valid and avoids layout tracking.
-    transitionImage(cmd, m_depthImage.getImage(),
+    vkutil::transitionImage(cmd, m_depthImage.getImage(),
         VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,              0,
         VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
             VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
@@ -811,7 +871,12 @@ void Renderer::render()
 
     vkCmdBeginRendering(cmd, &renderingInfo);
 
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
+    VkPipeline activePipeline = m_pipeline;
+    if (m_showNormals)
+        activePipeline = m_normalsPipeline;
+    else if (m_wireframe)
+        activePipeline = m_wireframePipeline;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activePipeline);
 
     const VkExtent2D ext = m_swapchain.getExtent();
     const VkViewport viewport{
@@ -889,7 +954,7 @@ void Renderer::render()
 
     // Transition to PRESENT_SRC_KHR so the presentation engine can consume the image.
     // Without this barrier, MoltenVK's Metal presentation layer sees an incorrect layout.
-    transitionImage(cmd, m_swapchain.getCurrentImage(),
+    vkutil::transitionImage(cmd, m_swapchain.getCurrentImage(),
         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,  VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
         VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,           0,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,          VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
@@ -914,6 +979,10 @@ void Renderer::endFrame()
 {
     render();
 
+    // Reset fence immediately before the submit that will signal it.
+    // (Moved from beginFrame to prevent deadlock on skipped frames.)
+    m_frameSync.resetFence();
+
     m_commandBuffer.submit(
         m_ctx.getGraphicsQueue(),
         m_frameSync.getImageAvailableSemaphore(),
@@ -934,9 +1003,9 @@ void Renderer::endFrame()
     };
 
     const VkResult presentResult = vkQueuePresentKHR(m_ctx.getGraphicsQueue(), &presentInfo);
-    if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR)
-        spdlog::warn("Swapchain suboptimal/out-of-date on present — resize handling in next phase");
-    else if (presentResult != VK_SUCCESS)
+    if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR) {
+        handleResize();
+    } else if (presentResult != VK_SUCCESS)
         throw std::runtime_error("vkQueuePresentKHR failed: " +
                                  std::to_string(static_cast<int>(presentResult)));
 

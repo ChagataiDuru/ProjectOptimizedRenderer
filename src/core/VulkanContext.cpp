@@ -356,8 +356,11 @@ void VulkanContext::createLogicalDevice()
     };
 
     m_enabledFeatures = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-        .pNext = &m_vulkan14Features,
+        .sType    = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+        .pNext    = &m_vulkan14Features,
+        .features = {
+            .fillModeNonSolid = VK_TRUE,  // Required for VK_POLYGON_MODE_LINE (wireframe)
+        },
     };
 
     // VK_KHR_swapchain is not core — always required for presentation.

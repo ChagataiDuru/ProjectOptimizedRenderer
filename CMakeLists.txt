@@ -87,6 +87,7 @@ add_executable(ProjectOptimizedRenderer
     src/core/CommandBuffer.cpp
     src/core/FrameSync.cpp
     src/core/Renderer.cpp
+    src/core/VulkanUtil.cpp
     src/core/Camera.cpp
     src/resource/VmaImpl.cpp
     src/resource/Buffer.cpp
@@ -206,6 +207,11 @@ shader_compile_glsl(
     TARGET ProjectOptimizedRenderer
     SOURCE "${CMAKE_SOURCE_DIR}/shaders/pbr.frag"
     OUTPUT "pbr.frag.spv"
+)
+shader_compile_glsl(
+    TARGET ProjectOptimizedRenderer
+    SOURCE "${CMAKE_SOURCE_DIR}/shaders/pbr_normals.frag"
+    OUTPUT "pbr_normals.frag.spv"
 )
 
 target_link_libraries(ProjectOptimizedRenderer PRIVATE

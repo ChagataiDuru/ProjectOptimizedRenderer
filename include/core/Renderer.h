@@ -29,7 +29,9 @@ public:
     void shutdown();
 
     // Wait for frame slot, collect GPU timer results, reset command buffer, acquire image.
-    void beginFrame();
+    // Returns false if the frame should be skipped (e.g. window minimized).
+    // Caller must NOT call endFrame() when beginFrame() returns false.
+    bool beginFrame();
 
     // Record commands, submit, present, advance frame indices.
     void endFrame();
@@ -71,6 +73,7 @@ public:
 
 private:
     void render();
+    void handleResize();
     void createPbrPipeline();
     void loadModel(const std::string& modelPath);
     void destroyPipeline();
@@ -97,11 +100,14 @@ private:
 
     // Pipeline resources
     VkPipeline            m_pipeline           = VK_NULL_HANDLE;
+    VkPipeline            m_wireframePipeline  = VK_NULL_HANDLE;
+    VkPipeline            m_normalsPipeline    = VK_NULL_HANDLE;
     VkPipelineLayout      m_pipelineLayout     = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_cameraSetLayout    = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_materialSetLayout  = VK_NULL_HANDLE;
     VkShaderModule        m_vertModule         = VK_NULL_HANDLE;
     VkShaderModule        m_fragModule         = VK_NULL_HANDLE;
+    VkShaderModule        m_normalsFragModule  = VK_NULL_HANDLE;
 
     // Material descriptor sets (one per Model::materials entry)
     std::vector<VkDescriptorSet> m_materialSets;

@@ -40,16 +40,12 @@ void Swapchain::recreate(uint32_t newWidth, uint32_t newHeight)
 
     destroyImageViews();
 
-    VkSwapchainKHR old = m_swapchain;
-    m_swapchain = VK_NULL_HANDLE;
-
     m_requestedWidth  = newWidth;
     m_requestedHeight = newHeight;
 
+    // createSwapchain() passes the current m_swapchain as oldSwapchain
+    // in VkSwapchainCreateInfoKHR, then destroys it after successful creation.
     createSwapchain();
-    // Old swapchain destroyed inside createSwapchain() via oldSwapchain field
-    if (old != VK_NULL_HANDLE)
-        vkDestroySwapchainKHR(m_ctx.getDevice(), old, nullptr);
 
     createImageViews();
     spdlog::info("Swapchain recreated: {}x{}", m_extent.width, m_extent.height);
@@ -184,9 +180,19 @@ void Swapchain::createSwapchain()
         // On NVIDIA, consider VK_PRESENT_MODE_MAILBOX_KHR for uncapped fps (future option).
         .presentMode      = VK_PRESENT_MODE_FIFO_KHR,
         .clipped          = VK_TRUE,
+        .oldSwapchain     = m_swapchain,  // VK_NULL_HANDLE on first create; retires old on recreate
     };
 
-    VK_CHECK(vkCreateSwapchainKHR(m_ctx.getDevice(), &createInfo, nullptr, &m_swapchain));
+    VkSwapchainKHR newSwapchain = VK_NULL_HANDLE;
+    VK_CHECK(vkCreateSwapchainKHR(m_ctx.getDevice(), &createInfo, nullptr, &newSwapchain));
+
+    // Destroy the old swapchain AFTER the new one is successfully created.
+    // The driver has already retired it (images are unusable), but we must
+    // still call vkDestroySwapchainKHR to free the handle.
+    if (m_swapchain != VK_NULL_HANDLE)
+        vkDestroySwapchainKHR(m_ctx.getDevice(), m_swapchain, nullptr);
+
+    m_swapchain = newSwapchain;
 
     uint32_t actualCount = 0;
     vkGetSwapchainImagesKHR(m_ctx.getDevice(), m_swapchain, &actualCount, nullptr);
