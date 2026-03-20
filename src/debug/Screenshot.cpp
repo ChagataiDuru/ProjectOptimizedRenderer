@@ -1,5 +1,6 @@
 #include "debug/Screenshot.h"
 #include "core/Swapchain.h"
+#include "core/VulkanUtil.h"
 #include "resource/Buffer.h"
 
 #include <spdlog/spdlog.h>
@@ -11,37 +12,6 @@
 // stb_image_write — single-TU implementation, same pattern as stb_image
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
-
-// ── Synchronization2 image layout transition helper ───────────────────────────
-// (local duplicate of the one in Renderer.cpp — Screenshot is a standalone module)
-static void transitionImage(
-    VkCommandBuffer       cmd,
-    VkImage               image,
-    VkPipelineStageFlags2 srcStage,  VkAccessFlags2 srcAccess,
-    VkPipelineStageFlags2 dstStage,  VkAccessFlags2 dstAccess,
-    VkImageLayout         oldLayout, VkImageLayout  newLayout,
-    VkImageAspectFlags    aspectMask = VK_IMAGE_ASPECT_COLOR_BIT)
-{
-    const VkImageMemoryBarrier2 barrier{
-        .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .srcStageMask        = srcStage,
-        .srcAccessMask       = srcAccess,
-        .dstStageMask        = dstStage,
-        .dstAccessMask       = dstAccess,
-        .oldLayout           = oldLayout,
-        .newLayout           = newLayout,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image               = image,
-        .subresourceRange    = { aspectMask, 0, 1, 0, 1 },
-    };
-    const VkDependencyInfo dep{
-        .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .imageMemoryBarrierCount = 1,
-        .pImageMemoryBarriers    = &barrier,
-    };
-    vkCmdPipelineBarrier2(cmd, &dep);
-}
 
 // ── Screenshot ────────────────────────────────────────────────────────────────
 
@@ -104,7 +74,7 @@ void Screenshot::capture(const Swapchain& swapchain, const std::string& filename
     VkImage srcImage = swapchain.getCurrentImage();
 
     // Transition swapchain image PRESENT_SRC_KHR → TRANSFER_SRC_OPTIMAL
-    transitionImage(cmd, srcImage,
+    vkutil::transitionImage(cmd, srcImage,
         VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,  VK_ACCESS_2_NONE,
         VK_PIPELINE_STAGE_2_TRANSFER_BIT,       VK_ACCESS_2_TRANSFER_READ_BIT,
         VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -126,7 +96,7 @@ void Screenshot::capture(const Swapchain& swapchain, const std::string& filename
                            readback.getBuffer(), 1, &region);
 
     // Restore to PRESENT_SRC_KHR so the layout is consistent for any further use
-    transitionImage(cmd, srcImage,
+    vkutil::transitionImage(cmd, srcImage,
         VK_PIPELINE_STAGE_2_TRANSFER_BIT,      VK_ACCESS_2_TRANSFER_READ_BIT,
         VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,  VK_ACCESS_2_NONE,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,  VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);

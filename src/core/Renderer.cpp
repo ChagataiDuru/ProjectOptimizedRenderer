@@ -1,4 +1,5 @@
 #include "core/Renderer.h"
+#include "core/VulkanUtil.h"
 #include "debug/ImGuiManager.h"
 #include "resource/GLTFLoader.h"
 #include "resource/Vertex.h"
@@ -47,37 +48,6 @@ static VkShaderModule makeShaderModule(VkDevice device, const std::vector<uint32
     VkShaderModule mod;
     VK_CHECK(vkCreateShaderModule(device, &info, nullptr, &mod));
     return mod;
-}
-
-// Synchronization2 image layout transition helper (core in Vulkan 1.3 / 1.4).
-// aspectMask defaults to COLOR but must be VK_IMAGE_ASPECT_DEPTH_BIT for depth images.
-static void transitionImage(
-    VkCommandBuffer       cmd,
-    VkImage               image,
-    VkPipelineStageFlags2 srcStage,  VkAccessFlags2 srcAccess,
-    VkPipelineStageFlags2 dstStage,  VkAccessFlags2 dstAccess,
-    VkImageLayout         oldLayout, VkImageLayout  newLayout,
-    VkImageAspectFlags    aspectMask = VK_IMAGE_ASPECT_COLOR_BIT)
-{
-    const VkImageMemoryBarrier2 barrier{
-        .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .srcStageMask        = srcStage,
-        .srcAccessMask       = srcAccess,
-        .dstStageMask        = dstStage,
-        .dstAccessMask       = dstAccess,
-        .oldLayout           = oldLayout,
-        .newLayout           = newLayout,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image               = image,
-        .subresourceRange    = { aspectMask, 0, 1, 0, 1 },
-    };
-    const VkDependencyInfo dep{
-        .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .imageMemoryBarrierCount = 1,
-        .pImageMemoryBarriers    = &barrier,
-    };
-    vkCmdPipelineBarrier2(cmd, &dep);
 }
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
@@ -765,14 +735,14 @@ void Renderer::render()
 
     // Swapchain images start in UNDEFINED layout each frame — transition to writable attachment.
     // UNDEFINED oldLayout means the driver is free to discard contents (correct, we clear anyway).
-    transitionImage(cmd, m_swapchain.getCurrentImage(),
+    vkutil::transitionImage(cmd, m_swapchain.getCurrentImage(),
         VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,             0,
         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,  VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
         VK_IMAGE_LAYOUT_UNDEFINED,                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
     // Depth image transitions from UNDEFINED each frame — LOAD_OP_CLEAR discards previous
     // contents anyway, so UNDEFINED→DEPTH_ATTACHMENT_OPTIMAL is valid and avoids layout tracking.
-    transitionImage(cmd, m_depthImage.getImage(),
+    vkutil::transitionImage(cmd, m_depthImage.getImage(),
         VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,              0,
         VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
             VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
@@ -889,7 +859,7 @@ void Renderer::render()
 
     // Transition to PRESENT_SRC_KHR so the presentation engine can consume the image.
     // Without this barrier, MoltenVK's Metal presentation layer sees an incorrect layout.
-    transitionImage(cmd, m_swapchain.getCurrentImage(),
+    vkutil::transitionImage(cmd, m_swapchain.getCurrentImage(),
         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,  VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
         VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,           0,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,          VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
