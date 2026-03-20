@@ -297,7 +297,7 @@ void Renderer::createPbrPipeline()
         .scissorCount  = 1,
     };
 
-    const VkPipelineRasterizationStateCreateInfo rasterization{
+    VkPipelineRasterizationStateCreateInfo rasterization{
         .sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
         .polygonMode = VK_POLYGON_MODE_FILL,
         // Back-face culling enabled: cube normals are outward-facing CCW, so back faces are CW.
@@ -438,6 +438,11 @@ void Renderer::createPbrPipeline()
         .stencilAttachmentFormat = VK_FORMAT_UNDEFINED,
     };
 
+    // ── Create both solid and wireframe pipelines in one batch call ──────────
+    // The wireframe pipeline is identical except for polygonMode = LINE.
+    VkPipelineRasterizationStateCreateInfo wireframeRasterization = rasterization;
+    wireframeRasterization.polygonMode = VK_POLYGON_MODE_LINE;
+
     const VkGraphicsPipelineCreateInfo pipelineInfo{
         .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .pNext               = &renderingInfo,
@@ -455,14 +460,28 @@ void Renderer::createPbrPipeline()
         .renderPass          = VK_NULL_HANDLE,  // Dynamic rendering: no render pass object
     };
 
+    VkGraphicsPipelineCreateInfo wireframePipelineInfo = pipelineInfo;
+    wireframePipelineInfo.pRasterizationState = &wireframeRasterization;
+
+    const std::array<VkGraphicsPipelineCreateInfo, 2> pipelineInfos = {
+        pipelineInfo,
+        wireframePipelineInfo,
+    };
+
+    std::array<VkPipeline, 2> pipelines{};
     VK_CHECK(vkCreateGraphicsPipelines(
-        m_ctx.getDevice(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_pipeline));
+        m_ctx.getDevice(), VK_NULL_HANDLE,
+        static_cast<uint32_t>(pipelineInfos.size()),
+        pipelineInfos.data(), nullptr, pipelines.data()));
+
+    m_pipeline          = pipelines[0];
+    m_wireframePipeline = pipelines[1];
 
     // Shader modules are only needed during pipeline compilation — free them immediately
     vkDestroyShaderModule(m_ctx.getDevice(), m_vertModule, nullptr); m_vertModule = VK_NULL_HANDLE;
     vkDestroyShaderModule(m_ctx.getDevice(), m_fragModule, nullptr); m_fragModule = VK_NULL_HANDLE;
 
-    spdlog::info("PBR pipeline created (pbr.vert + pbr.frag)");
+    spdlog::info("PBR pipelines created: solid + wireframe (pbr.vert + pbr.frag)");
 }
 
 void Renderer::destroyPipeline()
@@ -475,6 +494,7 @@ void Renderer::destroyPipeline()
     if (m_vertModule         != VK_NULL_HANDLE) { vkDestroyShaderModule(dev, m_vertModule, nullptr);               m_vertModule        = VK_NULL_HANDLE; }
     if (m_fragModule         != VK_NULL_HANDLE) { vkDestroyShaderModule(dev, m_fragModule, nullptr);               m_fragModule        = VK_NULL_HANDLE; }
     if (m_pipeline           != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_pipeline, nullptr);                     m_pipeline          = VK_NULL_HANDLE; }
+    if (m_wireframePipeline  != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_wireframePipeline, nullptr);            m_wireframePipeline = VK_NULL_HANDLE; }
     if (m_pipelineLayout     != VK_NULL_HANDLE) { vkDestroyPipelineLayout(dev, m_pipelineLayout, nullptr);         m_pipelineLayout    = VK_NULL_HANDLE; }
     if (m_materialSetLayout  != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(dev, m_materialSetLayout, nullptr); m_materialSetLayout = VK_NULL_HANDLE; }
     if (m_cameraSetLayout    != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(dev, m_cameraSetLayout, nullptr);   m_cameraSetLayout   = VK_NULL_HANDLE; }
@@ -825,7 +845,8 @@ void Renderer::render()
 
     vkCmdBeginRendering(cmd, &renderingInfo);
 
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
+    VkPipeline activePipeline = m_wireframe ? m_wireframePipeline : m_pipeline;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activePipeline);
 
     const VkExtent2D ext = m_swapchain.getExtent();
     const VkViewport viewport{

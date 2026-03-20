@@ -100,6 +100,7 @@ private:
 
     // Pipeline resources
     VkPipeline            m_pipeline           = VK_NULL_HANDLE;
+    VkPipeline            m_wireframePipeline  = VK_NULL_HANDLE;
     VkPipelineLayout      m_pipelineLayout     = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_cameraSetLayout    = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_materialSetLayout  = VK_NULL_HANDLE;
