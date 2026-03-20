@@ -317,9 +317,10 @@ void ImGuiManager::endFrame()
                 ImGui::MenuItem(ICON_FA_ARROWS_UP_DOWN_LEFT_RIGHT " Show Normals", nullptr,
                                 m_renderToggles.showNormals);
             ImGui::Separator();
-            ImGui::MenuItem(ICON_FA_WAND_MAGIC_SPARKLES " SMAA (Phase 3)", nullptr, false, false);
-            ImGui::MenuItem(ICON_FA_CLOUD_SUN " Shadows (Phase 4)", nullptr, false, false);
-            ImGui::MenuItem(ICON_FA_GRIP " VRS (Phase 5)", nullptr, false, false);
+            ImGui::MenuItem(ICON_FA_CLOUD_SUN " Shadows",     nullptr, false, false);
+            ImGui::MenuItem(ICON_FA_PALETTE " Tone Mapping",  nullptr, false, false);
+            ImGui::MenuItem(ICON_FA_WAND_MAGIC_SPARKLES " SMAA", nullptr, false, false);
+            ImGui::MenuItem(ICON_FA_GRIP " VRS",              nullptr, false, false);
             ImGui::EndMenu();
         }
 
