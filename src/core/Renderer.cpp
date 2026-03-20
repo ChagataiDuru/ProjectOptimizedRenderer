@@ -256,8 +256,9 @@ void Renderer::loadModel(const std::string& modelPath)
 void Renderer::createPbrPipeline()
 {
     const std::string dir = SHADER_DIR;
-    m_vertModule = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/pbr.vert.spv"));
-    m_fragModule = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/pbr.frag.spv"));
+    m_vertModule        = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/pbr.vert.spv"));
+    m_fragModule        = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/pbr.frag.spv"));
+    m_normalsFragModule = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/pbr_normals.frag.spv"));
 
     const std::array<VkPipelineShaderStageCreateInfo, 2> stages{{
         {
@@ -270,6 +271,21 @@ void Renderer::createPbrPipeline()
             .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
             .stage  = VK_SHADER_STAGE_FRAGMENT_BIT,
             .module = m_fragModule,
+            .pName  = "main",
+        },
+    }};
+
+    const std::array<VkPipelineShaderStageCreateInfo, 2> normalsStages{{
+        {
+            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage  = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = m_vertModule,
+            .pName  = "main",
+        },
+        {
+            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage  = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = m_normalsFragModule,
             .pName  = "main",
         },
     }};
@@ -463,12 +479,18 @@ void Renderer::createPbrPipeline()
     VkGraphicsPipelineCreateInfo wireframePipelineInfo = pipelineInfo;
     wireframePipelineInfo.pRasterizationState = &wireframeRasterization;
 
-    const std::array<VkGraphicsPipelineCreateInfo, 2> pipelineInfos = {
+    // Normals pipeline: same as solid but with the normals-only fragment shader
+    VkGraphicsPipelineCreateInfo normalsPipelineInfo = pipelineInfo;
+    normalsPipelineInfo.pStages    = normalsStages.data();
+    normalsPipelineInfo.stageCount = static_cast<uint32_t>(normalsStages.size());
+
+    const std::array<VkGraphicsPipelineCreateInfo, 3> pipelineInfos = {
         pipelineInfo,
         wireframePipelineInfo,
+        normalsPipelineInfo,
     };
 
-    std::array<VkPipeline, 2> pipelines{};
+    std::array<VkPipeline, 3> pipelines{};
     VK_CHECK(vkCreateGraphicsPipelines(
         m_ctx.getDevice(), VK_NULL_HANDLE,
         static_cast<uint32_t>(pipelineInfos.size()),
@@ -476,12 +498,14 @@ void Renderer::createPbrPipeline()
 
     m_pipeline          = pipelines[0];
     m_wireframePipeline = pipelines[1];
+    m_normalsPipeline   = pipelines[2];
 
     // Shader modules are only needed during pipeline compilation — free them immediately
-    vkDestroyShaderModule(m_ctx.getDevice(), m_vertModule, nullptr); m_vertModule = VK_NULL_HANDLE;
-    vkDestroyShaderModule(m_ctx.getDevice(), m_fragModule, nullptr); m_fragModule = VK_NULL_HANDLE;
+    vkDestroyShaderModule(m_ctx.getDevice(), m_vertModule, nullptr);         m_vertModule        = VK_NULL_HANDLE;
+    vkDestroyShaderModule(m_ctx.getDevice(), m_fragModule, nullptr);         m_fragModule        = VK_NULL_HANDLE;
+    vkDestroyShaderModule(m_ctx.getDevice(), m_normalsFragModule, nullptr);  m_normalsFragModule = VK_NULL_HANDLE;
 
-    spdlog::info("PBR pipelines created: solid + wireframe (pbr.vert + pbr.frag)");
+    spdlog::info("PBR pipelines created: solid + wireframe + normals");
 }
 
 void Renderer::destroyPipeline()
@@ -493,8 +517,10 @@ void Renderer::destroyPipeline()
     m_materialSets.clear();
     if (m_vertModule         != VK_NULL_HANDLE) { vkDestroyShaderModule(dev, m_vertModule, nullptr);               m_vertModule        = VK_NULL_HANDLE; }
     if (m_fragModule         != VK_NULL_HANDLE) { vkDestroyShaderModule(dev, m_fragModule, nullptr);               m_fragModule        = VK_NULL_HANDLE; }
+    if (m_normalsFragModule  != VK_NULL_HANDLE) { vkDestroyShaderModule(dev, m_normalsFragModule, nullptr);        m_normalsFragModule = VK_NULL_HANDLE; }
     if (m_pipeline           != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_pipeline, nullptr);                     m_pipeline          = VK_NULL_HANDLE; }
     if (m_wireframePipeline  != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_wireframePipeline, nullptr);            m_wireframePipeline = VK_NULL_HANDLE; }
+    if (m_normalsPipeline    != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_normalsPipeline, nullptr);              m_normalsPipeline   = VK_NULL_HANDLE; }
     if (m_pipelineLayout     != VK_NULL_HANDLE) { vkDestroyPipelineLayout(dev, m_pipelineLayout, nullptr);         m_pipelineLayout    = VK_NULL_HANDLE; }
     if (m_materialSetLayout  != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(dev, m_materialSetLayout, nullptr); m_materialSetLayout = VK_NULL_HANDLE; }
     if (m_cameraSetLayout    != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(dev, m_cameraSetLayout, nullptr);   m_cameraSetLayout   = VK_NULL_HANDLE; }
@@ -845,7 +871,11 @@ void Renderer::render()
 
     vkCmdBeginRendering(cmd, &renderingInfo);
 
-    VkPipeline activePipeline = m_wireframe ? m_wireframePipeline : m_pipeline;
+    VkPipeline activePipeline = m_pipeline;
+    if (m_showNormals)
+        activePipeline = m_normalsPipeline;
+    else if (m_wireframe)
+        activePipeline = m_wireframePipeline;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activePipeline);
 
     const VkExtent2D ext = m_swapchain.getExtent();

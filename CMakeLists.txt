@@ -208,6 +208,11 @@ shader_compile_glsl(
     SOURCE "${CMAKE_SOURCE_DIR}/shaders/pbr.frag"
     OUTPUT "pbr.frag.spv"
 )
+shader_compile_glsl(
+    TARGET ProjectOptimizedRenderer
+    SOURCE "${CMAKE_SOURCE_DIR}/shaders/pbr_normals.frag"
+    OUTPUT "pbr_normals.frag.spv"
+)
 
 target_link_libraries(ProjectOptimizedRenderer PRIVATE
     volk::volk

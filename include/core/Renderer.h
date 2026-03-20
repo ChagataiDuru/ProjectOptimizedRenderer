@@ -101,11 +101,13 @@ private:
     // Pipeline resources
     VkPipeline            m_pipeline           = VK_NULL_HANDLE;
     VkPipeline            m_wireframePipeline  = VK_NULL_HANDLE;
+    VkPipeline            m_normalsPipeline    = VK_NULL_HANDLE;
     VkPipelineLayout      m_pipelineLayout     = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_cameraSetLayout    = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_materialSetLayout  = VK_NULL_HANDLE;
     VkShaderModule        m_vertModule         = VK_NULL_HANDLE;
     VkShaderModule        m_fragModule         = VK_NULL_HANDLE;
+    VkShaderModule        m_normalsFragModule  = VK_NULL_HANDLE;
 
     // Material descriptor sets (one per Model::materials entry)
     std::vector<VkDescriptorSet> m_materialSets;
