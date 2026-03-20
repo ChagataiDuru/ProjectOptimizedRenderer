@@ -923,6 +923,8 @@ void Renderer::render()
                 .baseColorFactor  = mat.baseColorFactor,
                 .metallicFactor   = mat.metallicFactor,
                 .roughnessFactor  = mat.roughnessFactor,
+                .alphaCutoff      = (mat.alphaMode == Material::AlphaMode::Mask)
+                                    ? mat.alphaCutoff : 0.0f,
             };
             vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
                                64, sizeof(MaterialPushConstants), &matPC);
