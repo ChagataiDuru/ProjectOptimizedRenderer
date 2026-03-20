@@ -174,10 +174,11 @@ int main() {
         return;
       }
 
-      const float sceneMs = timer.getElapsedMs("ScenePass_Begin", "ScenePass_End");
-      const float imguiMs = timer.getElapsedMs("ScenePass_End",   "ImGuiPass_End");
-      const float totalMs = sceneMs + imguiMs;
-      const float budget  = 16.67f;  // 60 Hz
+      const float shadowMs = timer.getElapsedMs("ShadowPass_Begin", "ShadowPass_End");
+      const float sceneMs  = timer.getElapsedMs("ScenePass_Begin",  "ScenePass_End");
+      const float imguiMs  = timer.getElapsedMs("ScenePass_End",    "ImGuiPass_End");
+      const float totalMs  = shadowMs + sceneMs + imguiMs;
+      const float budget   = 16.67f;  // 60 Hz
 
       ImGui::Text("Budget: %.2f / %.2f ms (60 Hz)", totalMs, budget);
 
@@ -192,18 +193,25 @@ int main() {
           ImVec2(barStart.x + barWidth, barStart.y + barHeight),
           IM_COL32(40, 40, 45, 255), 4.0f);
 
-      // Scene pass — blue
-      const float sceneW = glm::min((sceneMs / budget) * barWidth, barWidth);
+      // Shadow pass — orange, leftmost
+      const float shadowW = glm::min((shadowMs / budget) * barWidth, barWidth);
       draw->AddRectFilled(barStart,
-          ImVec2(barStart.x + sceneW, barStart.y + barHeight),
+          ImVec2(barStart.x + shadowW, barStart.y + barHeight),
+          IM_COL32(255, 165, 0, 200), 4.0f);
+
+      // Scene pass — blue, stacked after shadow
+      const float sceneW = glm::min((sceneMs / budget) * barWidth, barWidth - shadowW);
+      draw->AddRectFilled(
+          ImVec2(barStart.x + shadowW, barStart.y),
+          ImVec2(barStart.x + shadowW + sceneW, barStart.y + barHeight),
           IM_COL32(66, 150, 250, 200), 4.0f);
 
       // ImGui pass — green, stacked after scene
       const float imguiW = glm::min((imguiMs / budget) * barWidth,
-                                    barWidth - sceneW);
+                                    barWidth - shadowW - sceneW);
       draw->AddRectFilled(
-          ImVec2(barStart.x + sceneW, barStart.y),
-          ImVec2(barStart.x + sceneW + imguiW, barStart.y + barHeight),
+          ImVec2(barStart.x + shadowW + sceneW, barStart.y),
+          ImVec2(barStart.x + shadowW + sceneW + imguiW, barStart.y + barHeight),
           IM_COL32(80, 200, 120, 200), 4.0f);
 
       // 100% budget marker — red vertical line at right edge
@@ -216,6 +224,11 @@ int main() {
       ImGui::Dummy(ImVec2(barWidth, barHeight + 4.0f));
 
       // Legend
+      ImGui::ColorButton("##sh", ImVec4(1.0f, 0.65f, 0.0f, 1.0f),
+                         ImGuiColorEditFlags_NoTooltip, ImVec2(10.0f, 10.0f));
+      ImGui::SameLine();
+      ImGui::Text("Shadow: %.3f ms", shadowMs);
+
       ImGui::ColorButton("##sc", ImVec4(0.26f, 0.59f, 0.98f, 1.0f),
                          ImGuiColorEditFlags_NoTooltip, ImVec2(10.0f, 10.0f));
       ImGui::SameLine();

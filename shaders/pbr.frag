@@ -21,6 +21,13 @@ layout(binding = 1, set = 0) uniform LightData {
     float ambientIntensity;
 } light;
 
+layout(binding = 2, set = 0) uniform ShadowData {
+    mat4 lightViewProj;
+} shadow;
+
+// Comparison sampler: hardware performs depth test per sample (PCF-ready).
+layout(binding = 3, set = 0) uniform sampler2DShadow shadowMap;
+
 // ── Material textures (set 1) ─────────────────────────────────────────────────
 layout(binding = 0, set = 1) uniform sampler2D texAlbedo;
 layout(binding = 1, set = 1) uniform sampler2D texNormal;
@@ -105,6 +112,30 @@ vec3 tonemapReinhard(vec3 hdr) {
     return hdr / (hdr + vec3(1.0));
 }
 
+// ── Shadow factor ─────────────────────────────────────────────────────────────
+// Returns 1.0 (fully lit) when the surface is not in shadow, 0.0 when occluded.
+// texture(sampler2DShadow, vec3(uv, refDepth)) performs hardware comparison:
+//   result = (storedDepth >= refDepth) ? 1.0 : 0.0
+// A small bias on refDepth prevents self-shadowing (shadow acne).
+float computeShadow(vec3 worldPos) {
+    // Transform fragment into light clip space.
+    vec4 lightClip = shadow.lightViewProj * vec4(worldPos, 1.0);
+    // Perspective divide (ortho projection → w == 1, but kept general).
+    vec3 ndc = lightClip.xyz / lightClip.w;
+    // Map NDC [-1,1] → UV [0,1] for X/Y; Z is already in [0,1] for Vulkan.
+    vec2 shadowUV = ndc.xy * 0.5 + 0.5;
+
+    // Outside the shadow map frustum → assume lit (border sampler = OPAQUE_WHITE).
+    if (shadowUV.x < 0.0 || shadowUV.x > 1.0 ||
+        shadowUV.y < 0.0 || shadowUV.y > 1.0 ||
+        ndc.z < 0.0       || ndc.z > 1.0)
+        return 1.0;
+
+    // Depth bias: nudge reference depth slightly toward the light to avoid acne.
+    float refDepth = ndc.z - 0.005;
+    return texture(shadowMap, vec3(shadowUV, refDepth));
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 void main() {
     // ── Sample material textures ─────────────────────────────────────────
@@ -161,6 +192,10 @@ void main() {
 
     // ── Direct lighting ──────────────────────────────────────────────────
     vec3 Lo = cookTorrance(N, L, V, baseColor, metallic, roughness);
+
+    // ── Shadow ───────────────────────────────────────────────────────────
+    float shadowFactor = computeShadow(fs_in.worldPos);
+    Lo *= shadowFactor;
 
     // ── Ambient ──────────────────────────────────────────────────────────
     vec3 ambient = baseColor * light.ambientIntensity;

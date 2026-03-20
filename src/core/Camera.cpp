@@ -62,17 +62,17 @@ void Camera::processKeyboard(const bool *keys) {
   velocity = glm::vec3(0);
 
   if (keys[SDL_SCANCODE_W])
-    velocity.z -= 500.0f; // forward  (-Z)
+    velocity.z -= 500000.0f; // forward  (-Z)
   if (keys[SDL_SCANCODE_S])
-    velocity.z += 500.0f; // backward (+Z)
+    velocity.z += 500000.0f; // backward (+Z)
   if (keys[SDL_SCANCODE_A])
-    velocity.x -= 500.0f; // left
+    velocity.x -= 500000.0f; // left
   if (keys[SDL_SCANCODE_D])
-    velocity.x += 500.0f; // right
+    velocity.x += 500000.0f; // right
   if (keys[SDL_SCANCODE_SPACE])
-    velocity.y += 500.0f; // up
+    velocity.y += 500000.0f; // up
   if (keys[SDL_SCANCODE_LCTRL])
-    velocity.y -= 500.0f; // down
+    velocity.y -= 500000.0f; // down
 
   // Normalize to prevent diagonal movement from being faster than axis-aligned.
   if (glm::length(velocity) > 0.01f) {

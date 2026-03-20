@@ -168,7 +168,7 @@ void Swapchain::createSwapchain()
         .imageColorSpace  = m_colorSpace,
         .imageExtent      = m_extent,
         .imageArrayLayers = 1,
-        .imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        .imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
         // EXCLUSIVE avoids unnecessary sync overhead when a single queue family handles
         // both graphics and presentation (true for both Apple Silicon UMA and most
         // NVIDIA configurations where graphics queue also supports present).

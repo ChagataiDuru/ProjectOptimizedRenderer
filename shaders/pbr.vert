@@ -37,5 +37,5 @@ void main() {
     vs_out.uv = inUV;
 
     // Clip-space output
-    gl_Position = camera.projection * camera.view * worldPos;
+    gl_Position = camera.projection * camera.view * worldPos * 2;
 }

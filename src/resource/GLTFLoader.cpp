@@ -8,6 +8,7 @@
 #include <glm/glm.hpp>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
+#include <limits>
 #include <string>
 
 Model GLTFLoader::loadGLTF(const std::string& filepath)
@@ -179,6 +180,18 @@ Model GLTFLoader::loadGLTF(const std::string& filepath)
                 model.meshes.push_back(std::move(mesh));
         }
     }
+
+    // Compute scene AABB from all vertex positions (used by shadow camera framing).
+    glm::vec3 aabbMin( std::numeric_limits<float>::max());
+    glm::vec3 aabbMax(-std::numeric_limits<float>::max());
+    for (const auto& mesh : model.meshes) {
+        for (const auto& v : mesh.vertices) {
+            aabbMin = glm::min(aabbMin, v.position);
+            aabbMax = glm::max(aabbMax, v.position);
+        }
+    }
+    model.boundsMin = aabbMin;
+    model.boundsMax = aabbMax;
 
     cgltf_free(data);
 

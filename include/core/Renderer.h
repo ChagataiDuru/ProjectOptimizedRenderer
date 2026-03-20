@@ -59,6 +59,9 @@ public:
     bool isWireframeEnabled()     const { return m_wireframe; }
     bool isNormalVisualization()  const { return m_showNormals; }
 
+    // Phase 4.1: shadow map resolution (power-of-two for clean texel mapping)
+    static constexpr uint32_t SHADOW_MAP_SIZE = 2048;
+
     // Phase 2.6: render statistics — populated each frame in render()
     struct RenderStats {
         uint32_t drawCalls          = 0;
@@ -164,6 +167,17 @@ private:
     Screenshot   m_screenshot;
     RenderStats  m_renderStats;
 
+    // Phase 4.1: shadow map resources
+    struct ShadowUBO {
+        glm::mat4 lightViewProj;
+    };
+    Image            m_shadowMap;           // D32_SFLOAT depth image, SHADOW_MAP_SIZE²
+    VkSampler        m_shadowSampler = VK_NULL_HANDLE;  // comparison sampler
+    Buffer           m_shadowUBOBuffer;     // host-visible ShadowUBO
+    VkPipeline       m_shadowPipeline   = VK_NULL_HANDLE;
+    VkShaderModule   m_shadowVertModule = VK_NULL_HANDLE;
+    glm::vec3        m_lightDirection   = glm::vec3(1.0f, 1.0f, 1.0f);
+
     bool        m_screenshotRequested = false;
     std::string m_screenshotFilename;
 
@@ -177,4 +191,6 @@ private:
     void createDescriptorPool();
     void createDescriptorSet();
     void createMaterialDescriptorSets();
+    void createShadowResources();
+    void updateShadowMatrices();
 };
