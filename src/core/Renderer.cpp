@@ -703,16 +703,60 @@ void Renderer::createMaterialDescriptorSets()
 
 // ── Frame loop ────────────────────────────────────────────────────────────────
 
-void Renderer::beginFrame()
+void Renderer::handleResize()
+{
+    const VkExtent2D oldExt = m_swapchain.getExtent();
+
+    // CRITICAL: drain the GPU before destroying any resources.
+    // The just-submitted command buffer may still reference the depth image.
+    // Swapchain::recreate() also calls vkDeviceWaitIdle() internally —
+    // the second call is a no-op since the device is already idle.
+    vkDeviceWaitIdle(m_ctx.getDevice());
+
+    m_depthImage.destroy();
+
+    // Recreate swapchain. Passing current extent as hint; Swapchain::createSwapchain()
+    // reads surface capabilities and uses cap.currentExtent when available (most platforms),
+    // falling back to clamped requested dimensions otherwise.
+    m_swapchain.recreate(oldExt.width, oldExt.height);
+
+    const VkExtent2D newExt = m_swapchain.getExtent();
+    if (newExt.width > 0 && newExt.height > 0) {
+        createDepthImage();
+    }
+
+    spdlog::info("Renderer resized: {}x{} -> {}x{}", oldExt.width, oldExt.height,
+                 newExt.width, newExt.height);
+}
+
+bool Renderer::beginFrame()
 {
     m_frameSync.waitForFrame();
     // Fence has signaled — previous frame's GPU work is complete; safe to read timestamps.
     m_gpuTimer.collectResults();
-    m_frameSync.resetFence();
+
+    // NOTE: fence is NOT reset here. It is reset in endFrame() immediately before submit.
+    // This prevents a deadlock if beginFrame() returns false (skip frame): the fence
+    // remains signaled, so the next waitForFrame() returns immediately.
+
     m_commandBuffer.resetFrame();
 
-    if (!m_swapchain.acquireNextImage(m_frameSync.getImageAvailableSemaphore()))
-        spdlog::warn("Swapchain out of date on acquire — resize handling in next phase");
+    if (!m_swapchain.acquireNextImage(m_frameSync.getImageAvailableSemaphore())) {
+        // Swapchain out of date — recreate and retry.
+        // The semaphore was NOT signaled by the failed acquire, so it's safe to reuse.
+        handleResize();
+
+        // After resize, check for zero-size extent (window minimized).
+        const VkExtent2D ext = m_swapchain.getExtent();
+        if (ext.width == 0 || ext.height == 0)
+            return false;
+
+        // Retry acquire with the new swapchain.
+        if (!m_swapchain.acquireNextImage(m_frameSync.getImageAvailableSemaphore()))
+            return false;
+    }
+
+    return true;
 }
 
 void Renderer::render()
@@ -884,6 +928,10 @@ void Renderer::endFrame()
 {
     render();
 
+    // Reset fence immediately before the submit that will signal it.
+    // (Moved from beginFrame to prevent deadlock on skipped frames.)
+    m_frameSync.resetFence();
+
     m_commandBuffer.submit(
         m_ctx.getGraphicsQueue(),
         m_frameSync.getImageAvailableSemaphore(),
@@ -904,9 +952,9 @@ void Renderer::endFrame()
     };
 
     const VkResult presentResult = vkQueuePresentKHR(m_ctx.getGraphicsQueue(), &presentInfo);
-    if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR)
-        spdlog::warn("Swapchain suboptimal/out-of-date on present — resize handling in next phase");
-    else if (presentResult != VK_SUCCESS)
+    if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR) {
+        handleResize();
+    } else if (presentResult != VK_SUCCESS)
         throw std::runtime_error("vkQueuePresentKHR failed: " +
                                  std::to_string(static_cast<int>(presentResult)));
 

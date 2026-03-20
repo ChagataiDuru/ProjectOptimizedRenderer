@@ -29,7 +29,9 @@ public:
     void shutdown();
 
     // Wait for frame slot, collect GPU timer results, reset command buffer, acquire image.
-    void beginFrame();
+    // Returns false if the frame should be skipped (e.g. window minimized).
+    // Caller must NOT call endFrame() when beginFrame() returns false.
+    bool beginFrame();
 
     // Record commands, submit, present, advance frame indices.
     void endFrame();
@@ -71,6 +73,7 @@ public:
 
 private:
     void render();
+    void handleResize();
     void createPbrPipeline();
     void loadModel(const std::string& modelPath);
     void destroyPipeline();

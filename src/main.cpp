@@ -434,11 +434,17 @@ int main() {
         }
 
         case SDL_EVENT_WINDOW_RESIZED: {
-          float newAspect = static_cast<float>(event.window.data1) /
-                            static_cast<float>(event.window.data2);
-          camera.setPerspective(45.0f, newAspect, 0.01f, 1000.0f);
-          spdlog::info("Window resized to {}x{}", event.window.data1,
-                       event.window.data2);
+          // Use pixel dimensions for correct aspect ratio on HiDPI displays.
+          // event.window.data1/data2 are logical points on macOS — the ratio
+          // is the same, but logging pixel dimensions is more accurate.
+          int pw, ph;
+          SDL_GetWindowSizeInPixels(
+              static_cast<SDL_Window*>(window.getHandle()), &pw, &ph);
+          if (pw > 0 && ph > 0) {
+              float newAspect = static_cast<float>(pw) / static_cast<float>(ph);
+              camera.setPerspective(45.0f, newAspect, 0.01f, 1000.0f);
+          }
+          spdlog::info("Window resized to {}x{} px", pw, ph);
           break;
         }
 
@@ -472,7 +478,8 @@ int main() {
       imguiManager.endFrame();   // Dockspace + panel drawing + ImGui::Render()
 
       // ── Render ────────────────────────────────────────────────────────
-      renderer.beginFrame();
+      if (!renderer.beginFrame())
+          continue;  // Frame skipped (e.g. window minimized) — do not call endFrame()
       renderer.endFrame();  // ImGui overlay is embedded inside endFrame → render()
     }
 
