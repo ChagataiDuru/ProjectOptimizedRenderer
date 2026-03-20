@@ -117,7 +117,8 @@ private:
         glm::vec4 baseColorFactor = glm::vec4(1.0f);
         float     metallicFactor  = 1.0f;
         float     roughnessFactor = 1.0f;
-        float     _pad[2]         = {};
+        float     alphaCutoff     = 0.0f;   // 0 = no cutoff (opaque); >0 = discard below this
+        float     _pad            = 0.0f;
     };
 
     // Camera UBO (host-visible, updated every frame)

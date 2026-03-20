@@ -32,6 +32,7 @@ layout(push_constant) uniform MaterialPC {
     layout(offset = 64) vec4  baseColorFactor;
     float metallicFactor;
     float roughnessFactor;
+    float alphaCutoff;
 } material;
 
 // ── Output ────────────────────────────────────────────────────────────────────
@@ -112,6 +113,12 @@ void main() {
     vec4  albedoSample = texture(texAlbedo, fs_in.uv) * material.baseColorFactor;
     vec3  baseColor    = albedoSample.rgb;
     float alpha        = albedoSample.a;
+
+    // Alpha masking: discard fragments below the cutoff.
+    // Without this, alpha-masked materials (vegetation, chains, curtain edges)
+    // write black pixels from their texture's masked regions, occluding geometry behind.
+    if (material.alphaCutoff > 0.0 && alpha < material.alphaCutoff)
+        discard;
 
     // Metallic-roughness: green = roughness, blue = metallic (glTF convention).
     // Texture is UNORM (linear data). Multiply by material factors.
