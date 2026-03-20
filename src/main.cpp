@@ -8,6 +8,7 @@
 #include "debug/LogSink.h"
 
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_dialog.h>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -63,6 +64,32 @@ int main() {
     renderToggles.wireframe   = &wireframeEnabled;
     renderToggles.showNormals = &showNormals;
     imguiManager.setRenderToggles(renderToggles);
+
+    // === Pending model load (set by file dialog callback, consumed by render loop) ===
+    std::string pendingModelPath;
+
+    imguiManager.setOpenModelCallback([&]() {
+        // SDL3 native file dialog — async with callback.
+        // Filter for glTF files (.gltf and .glb).
+        static const SDL_DialogFileFilter filters[] = {
+            { "glTF files", "gltf;glb" },
+            { "All files",  "*" },
+        };
+
+        SDL_ShowOpenFileDialog(
+            [](void* userdata, const char* const* filelist, int /*filter*/) {
+                if (filelist && filelist[0]) {
+                    *static_cast<std::string*>(userdata) = filelist[0];
+                }
+            },
+            &pendingModelPath,
+            static_cast<SDL_Window*>(window.getHandle()),
+            filters,
+            static_cast<int>(std::size(filters)),
+            nullptr,   // default directory
+            false      // single file, not multiple
+        );
+    });
 
     // === Camera Setup ===
     Camera camera;
@@ -456,6 +483,12 @@ int main() {
       // ── Quit via menu bar ─────────────────────────────────────────────
       if (imguiManager.shouldQuit()) {
         running = false;
+      }
+
+      // ── Deferred model reload (from file dialog) ─────────────────────
+      if (!pendingModelPath.empty()) {
+          renderer.reloadModel(pendingModelPath);
+          pendingModelPath.clear();
       }
 
       // ── Sync rendering toggles to renderer ────────────────────────────

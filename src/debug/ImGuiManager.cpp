@@ -280,8 +280,9 @@ void ImGuiManager::endFrame()
 
         // ── File ────────────────────────────────────────────────────────────
         if (ImGui::BeginMenu("File")) {
-            if (ImGui::MenuItem(ICON_FA_FOLDER_OPEN " Load glTF...", nullptr, false, false)) {
-                // Placeholder — file dialog in a future phase
+            if (ImGui::MenuItem(ICON_FA_FOLDER_OPEN " Load glTF...")) {
+                if (m_openModelCallback)
+                    m_openModelCallback();
             }
             ImGui::Separator();
             if (ImGui::MenuItem(ICON_FA_CAMERA " Screenshot", "F2")) {

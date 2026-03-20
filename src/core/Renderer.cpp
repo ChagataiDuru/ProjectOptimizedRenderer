@@ -107,6 +107,72 @@ void Renderer::init()
                  m_renderStats.textureMemoryBytes / (1024.0f * 1024.0f));
 }
 
+void Renderer::reloadModel(const std::string& modelPath)
+{
+    spdlog::info("Reloading model: {}", modelPath);
+
+    // ── Drain the GPU — no frame may reference resources we're about to destroy ──
+    vkDeviceWaitIdle(m_ctx.getDevice());
+
+    // ── Destroy model-dependent resources ────────────────────────────────────────
+    // Descriptor pool destruction implicitly frees m_descriptorSet and all m_materialSets.
+    if (m_descriptorPool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(m_ctx.getDevice(), m_descriptorPool, nullptr);
+        m_descriptorPool = VK_NULL_HANDLE;
+        m_descriptorSet  = VK_NULL_HANDLE;
+    }
+    m_materialSets.clear();
+
+    for (auto& tex : m_textures)
+        tex.destroy();
+    m_textures.clear();
+
+    // Fallback white is recreated by loadModel(); destroy old allocation first.
+    m_fallbackWhite.destroy();
+
+    m_indexBuffer.destroy();
+    m_vertexBuffer.destroy();
+
+    m_meshRenderData.clear();
+    m_model = Model{};
+
+    // ── Load new model and upload resources ──────────────────────────────────────
+    try {
+        loadModel(modelPath);
+    } catch (const std::exception& e) {
+        spdlog::error("Failed to load model '{}': {}", modelPath, e.what());
+        spdlog::info("Falling back to Sponza");
+        try {
+            loadModel(std::string(ASSET_DIR) + "/models/sponza/glTF/Sponza.gltf");
+        } catch (const std::exception& e2) {
+            spdlog::critical("Failed to load fallback model: {}", e2.what());
+            throw;  // Unrecoverable
+        }
+    }
+
+    // ── Recreate descriptors for the new model ───────────────────────────────────
+    createDescriptorPool();
+    createDescriptorSet();
+    createMaterialDescriptorSets();
+
+    // ── Update render stats ──────────────────────────────────────────────────────
+    m_renderStats.meshCount     = static_cast<uint32_t>(m_meshRenderData.size());
+    m_renderStats.materialCount = static_cast<uint32_t>(m_model.materials.size());
+    m_renderStats.textureCount  = static_cast<uint32_t>(m_textures.size());
+    m_renderStats.textureMemoryBytes = 0;
+    for (const auto& tex : m_textures) {
+        if (tex.isValid()) {
+            const VkExtent3D ext = tex.getExtent();
+            m_renderStats.textureMemoryBytes += static_cast<size_t>(ext.width) * ext.height * 4;
+        }
+    }
+
+    spdlog::info("Model reloaded: {} meshes, {} materials, {} textures ({:.1f} MB GPU tex)",
+                 m_renderStats.meshCount, m_renderStats.materialCount,
+                 m_renderStats.textureCount,
+                 m_renderStats.textureMemoryBytes / (1024.0f * 1024.0f));
+}
+
 void Renderer::shutdown()
 {
     if (m_ctx.getDevice() == VK_NULL_HANDLE) return;

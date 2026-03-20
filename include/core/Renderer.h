@@ -42,6 +42,11 @@ public:
     void setLightParameters(const glm::vec3& direction, const glm::vec3& color,
                             float intensity, float ambient);
 
+    // Unload current model and load a new glTF at the given path.
+    // Destroys model-dependent GPU resources, loads new model, recreates descriptors.
+    // Must be called on the main thread while no frames are in flight.
+    void reloadModel(const std::string& modelPath);
+
     // Phase 2.5: wire an ImGuiManager to receive an overlay render pass each frame
     void setImGuiManager(ImGuiManager* mgr) { m_imguiManager = mgr; }
 

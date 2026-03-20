@@ -86,6 +86,10 @@ public:
     };
     void setRenderToggles(RenderToggles toggles) { m_renderToggles = toggles; }
 
+    // Callback invoked when the user clicks File → Load glTF...
+    // main.cpp provides the implementation (SDL file dialog).
+    void setOpenModelCallback(std::function<void()> cb) { m_openModelCallback = std::move(cb); }
+
 private:
     VulkanContext& m_ctx;
     Swapchain&     m_swapchain;
@@ -101,6 +105,7 @@ private:
     bool          m_quitRequested  = false;
     bool          m_showFPSOverlay = true;
     RenderToggles m_renderToggles;
+    std::function<void()> m_openModelCallback;
 
     void buildDefaultLayout(ImGuiID dockspaceId);
     void applyTheme();
