@@ -874,11 +874,11 @@ void Renderer::createTonemapPipeline()
     };
     VK_CHECK(vkAllocateDescriptorSets(dev, &allocInfo, &m_tonemapSet));
 
-    // ── Push constant: TonemapPC (8 bytes: uint mode + float exposure) ────────
+    // ── Push constant: TonemapPC (16 bytes: mode + exposure + splitScreenMode + splitRightMode) ──
     const VkPushConstantRange pcRange{
         .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
         .offset     = 0,
-        .size       = sizeof(uint32_t) + sizeof(float),
+        .size       = 4 * sizeof(uint32_t),  // 16 bytes: aligns to vec4 boundary
     };
     const VkPipelineLayoutCreateInfo layoutCI{
         .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -2164,8 +2164,18 @@ void Renderer::render()
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             m_tonemapPipelineLayout, 0, 1, &m_tonemapSet, 0, nullptr);
 
-    struct TonemapPC { uint32_t mode; float exposure; };
-    const TonemapPC tonemapPC{ static_cast<uint32_t>(m_tonemapMode), m_exposure };
+    struct TonemapPC {
+        uint32_t mode;
+        float    exposure;
+        uint32_t splitScreenMode;
+        uint32_t splitRightMode;
+    };
+    const TonemapPC tonemapPC{
+        static_cast<uint32_t>(m_tonemapMode),
+        m_exposure,
+        static_cast<uint32_t>(m_splitScreenMode),
+        static_cast<uint32_t>(m_splitRightMode),
+    };
     vkCmdPushConstants(cmd, m_tonemapPipelineLayout,
                        VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(TonemapPC), &tonemapPC);
 

@@ -80,11 +80,18 @@ public:
     static constexpr uint32_t CASCADE_COUNT = 4;
     static constexpr uint32_t CASCADE_SIZE  = 2048;
 
-    // Phase 5: exposure and tone map mode (used by TonemapPC push constant)
-    void  setExposure(float ev)          { m_exposure = ev; }
-    void  setTonemapMode(int32_t mode)   { m_tonemapMode = mode; }
+    // Phase 5/6: tone mapping controls
+    void setExposure(float ev)           { m_exposure = ev; }
     float getExposure()   const          { return m_exposure; }
     int32_t getTonemapMode() const       { return m_tonemapMode; }
+
+    // Phase 6: unified setter for all tonemap params (pushed as one PC struct each frame)
+    void setTonemapParams(int32_t mode, float exposure, bool splitScreen, int32_t splitRightMode) {
+        m_tonemapMode      = mode;
+        m_exposure         = exposure;
+        m_splitScreenMode  = splitScreen ? 1 : 0;
+        m_splitRightMode   = splitRightMode;
+    }
 
     // Phase 2.6: render statistics — populated each frame in render()
     struct RenderStats {
@@ -196,9 +203,11 @@ private:
     VkPipelineLayout      m_tonemapPipelineLayout  = VK_NULL_HANDLE;
     VkPipeline            m_tonemapPipeline        = VK_NULL_HANDLE;
 
-    // Phase 5: tone map state (uploaded as push constant each frame)
-    float   m_exposure     = 0.0f;  // EV offset; 0 = no change
-    int32_t m_tonemapMode  = 0;     // 0=Reinhard (more added in Phase 6)
+    // Phase 5/6: tone map state (uploaded as TonemapPC push constant each frame)
+    float   m_exposure         = 0.0f;  // EV offset; 0 = no change
+    int32_t m_tonemapMode      = 0;     // 0=Reinhard, 1=AgX, 2=PBR Neutral
+    int32_t m_splitScreenMode  = 0;     // 0=off, 1=on
+    int32_t m_splitRightMode   = 1;     // comparison operator for right half (default AgX)
 
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet  m_descriptorSet  = VK_NULL_HANDLE;

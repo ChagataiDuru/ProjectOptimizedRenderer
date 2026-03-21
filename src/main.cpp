@@ -147,9 +147,13 @@ int main() {
     float pcfSpreadRadius   = 2.0f;
     float vsmBleedReduction = 0.2f;
 
-    // Phase 5: post-processing state
-    float exposure    = 0.0f;  // EV offset
-    int   tonemapMode = 0;     // 0=Reinhard (Phase 6 adds more)
+    // Phase 5/6: tone mapping state
+    struct TonemapState {
+        int   mode           = 0;     // 0=Reinhard, 1=AgX, 2=PBR Neutral
+        float exposure       = 0.0f;  // EV offset
+        bool  splitScreen    = false;
+        int   splitRightMode = 1;     // default comparison = AgX
+    } tonemapState;
 
     imguiManager.registerPanel(ICON_FA_SUN " Light", [&]() {
       bool changed = false;
@@ -199,14 +203,27 @@ int main() {
     }, DockLocation::Right);
 
     imguiManager.registerPanel(ICON_FA_WAND_MAGIC_SPARKLES " Post Processing", [&]() {
-      ImGui::Text(ICON_FA_CAMERA " Tone Mapping");
-      // Tone map mode — only Reinhard for Phase 5; Phase 6 extends this list.
-      const char* tonemapNames[] = { "Reinhard" };
-      ImGui::Combo("Tone Map", &tonemapMode, tonemapNames, 1);
-      if (ImGui::SliderFloat("Exposure (EV)", &exposure, -4.0f, 4.0f, "%.2f")) {
-        renderer.setExposure(exposure);
+      static const char* tonemapNames[] = { "Reinhard", "AgX", "PBR Neutral" };
+
+      bool changed = false;
+      changed |= ImGui::Combo("Operator", &tonemapState.mode, tonemapNames, 3);
+      changed |= ImGui::SliderFloat("Exposure (EV)", &tonemapState.exposure, -4.0f, 4.0f, "%.2f");
+      ImGui::TextDisabled("EV +1 = 2x brighter,  EV -1 = 2x darker");
+
+      ImGui::Separator();
+      changed |= ImGui::Checkbox("Split-Screen Compare", &tonemapState.splitScreen);
+      if (tonemapState.splitScreen) {
+        ImGui::Indent();
+        ImGui::Text("Left:  %s", tonemapNames[tonemapState.mode]);
+        changed |= ImGui::Combo("Right", &tonemapState.splitRightMode, tonemapNames, 3);
+        ImGui::Unindent();
+        ImGui::TextDisabled("White line = split center");
       }
-      ImGui::TextDisabled("EV +1 = 2× brighter,  EV -1 = 2× darker");
+
+      if (changed) {
+        renderer.setTonemapParams(tonemapState.mode, tonemapState.exposure,
+                                  tonemapState.splitScreen, tonemapState.splitRightMode);
+      }
     }, DockLocation::Right);
 
     imguiManager.registerPanel(ICON_FA_CUBES " Render Stats", [&]() {
