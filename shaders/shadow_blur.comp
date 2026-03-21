@@ -1,0 +1,42 @@
+#version 460 core
+
+// Separable Gaussian blur for VSM moment maps.
+// Two dispatches per frame: horizontal (direction=0) then vertical (direction=1).
+// Each dispatch processes all 4 cascade layers simultaneously via gl_GlobalInvocationID.z.
+// Workgroup: 16×16 threads, each processing one texel in one layer.
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rg32f) uniform readonly  image2DArray inputImg;
+layout(set = 0, binding = 1, rg32f) uniform writeonly image2DArray outputImg;
+
+layout(push_constant) uniform BlurPC {
+    int direction;  // 0 = horizontal, 1 = vertical
+    int radius;     // kernel half-width (3 for a 7-tap kernel)
+} blur;
+
+// Gaussian weights for radius=3 (7-tap, σ≈1.5), normalized to sum=1.0
+const float weights7[7] = float[](
+    0.00598, 0.06064, 0.24154, 0.38369, 0.24154, 0.06064, 0.00598
+);
+
+void main() {
+    ivec3 pos  = ivec3(gl_GlobalInvocationID);
+    ivec2 size = imageSize(inputImg).xy;
+
+    // Bounds check: guard threads outside the image or beyond CASCADE_COUNT layers
+    if (pos.x >= size.x || pos.y >= size.y || pos.z >= 4) return;
+
+    vec2 result = vec2(0.0);
+    for (int i = -blur.radius; i <= blur.radius; i++) {
+        ivec3 samplePos = pos;
+        if (blur.direction == 0)
+            samplePos.x = clamp(pos.x + i, 0, size.x - 1);
+        else
+            samplePos.y = clamp(pos.y + i, 0, size.y - 1);
+
+        result += imageLoad(inputImg, samplePos).rg * weights7[i + blur.radius];
+    }
+
+    imageStore(outputImg, pos, vec4(result, 0.0, 0.0));
+}

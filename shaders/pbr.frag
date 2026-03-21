@@ -19,14 +19,22 @@ layout(binding = 1, set = 0) uniform LightData {
     float lightIntensity;
     vec3  lightColor;
     float ambientIntensity;
+    uint  debugCascades;    // 0 = off, 1 = false-color cascade overlay
+    uint  shadowFilterMode; // 0=None, 1=PCF, 2=VSM
+    float pcfSpreadRadius;  // PCF kernel spread in texels
+    float vsmBleedReduction; // VSM light-bleeding reduction
 } light;
 
 layout(binding = 2, set = 0) uniform ShadowData {
-    mat4 lightViewProj;
+    mat4 lightViewProj[4];
+    vec4 splitDepths;       // view-space |Z| at cascade far planes: x=c0, y=c1, z=c2, w=c3
 } shadow;
 
-// Regular sampler: raw depth fetch; comparison is done manually in computeShadow().
-layout(binding = 3, set = 0) uniform sampler2D shadowMap;
+// Depth shadow map (D32_SFLOAT array, 4 layers) — used for None and PCF modes.
+layout(binding = 3, set = 0) uniform sampler2DArray shadowMap;
+
+// VSM moment map (RG32_SFLOAT array, 4 layers) — used for VSM mode.
+layout(binding = 4, set = 0) uniform sampler2DArray shadowMoments;
 
 // ── Material textures (set 1) ─────────────────────────────────────────────────
 layout(binding = 0, set = 1) uniform sampler2D texAlbedo;
@@ -112,39 +120,147 @@ vec3 tonemapReinhard(vec3 hdr) {
     return hdr / (hdr + vec3(1.0));
 }
 
-// ── Shadow factor ─────────────────────────────────────────────────────────────
-float computeShadow(vec3 worldPos) {
-    vec4 lightClip = shadow.lightViewProj * vec4(worldPos, 1.0);
+// ── 16-tap Poisson disk offsets (unit disk, golden-ratio rotated) ─────────────
+const vec2 POISSON_DISK[16] = vec2[16](
+    vec2(-0.94201624, -0.39906216),
+    vec2( 0.94558609, -0.76890725),
+    vec2(-0.09418410, -0.92938870),
+    vec2( 0.34495938,  0.29387760),
+    vec2(-0.91588581,  0.45771432),
+    vec2(-0.81544232, -0.87912464),
+    vec2(-0.38277543,  0.27676845),
+    vec2( 0.97484398,  0.75648379),
+    vec2( 0.44323325, -0.97511554),
+    vec2( 0.53742981, -0.47373420),
+    vec2(-0.26496911, -0.41893023),
+    vec2( 0.79197514,  0.19090188),
+    vec2(-0.24188840,  0.99706507),
+    vec2(-0.81409955,  0.91437590),
+    vec2( 0.19984126,  0.78641367),
+    vec2( 0.14383161, -0.14100790)
+);
+
+// ── Project worldPos into a cascade; return UV, currentDepth, and whether in range ──
+bool projectToCascade(vec3 worldPos, int cascadeIdx, out vec2 shadowUV, out float currentDepth) {
+    vec4 lightClip = shadow.lightViewProj[cascadeIdx] * vec4(worldPos, 1.0);
     vec3 ndc = lightClip.xyz / lightClip.w;
+    shadowUV = ndc.xy * 0.5 + 0.5;
+    currentDepth = ndc.z;
+    return (shadowUV.x >= 0.0 && shadowUV.x <= 1.0 &&
+            shadowUV.y >= 0.0 && shadowUV.y <= 1.0 &&
+            currentDepth >= 0.0 && currentDepth <= 1.0);
+}
 
-    // Map XY from [-1,1] NDC to [0,1] texture coordinates
-    vec2 shadowUV = ndc.xy * 0.5 + 0.5;
+// ── Hard shadow sample (single depth compare) ────────────────────────────────
+float sampleShadowHard(vec3 worldPos, int cascadeIdx) {
+    vec2 shadowUV;
+    float currentDepth;
+    if (!projectToCascade(worldPos, cascadeIdx, shadowUV, currentDepth))
+        return 1.0;  // outside cascade bounds → fully lit
 
-    // Outside the shadow map → fully lit
-    if (shadowUV.x < 0.0 || shadowUV.x > 1.0 ||
-        shadowUV.y < 0.0 || shadowUV.y > 1.0)
-        return 1.0;
+    ivec3 mapSize = textureSize(shadowMap, 0);
+    ivec2 texel   = clamp(ivec2(shadowUV * vec2(mapSize.xy)), ivec2(0), mapSize.xy - 1);
+    float storedDepth = texelFetch(shadowMap, ivec3(texel, cascadeIdx), 0).r;
 
-    // Fragment's depth in light space [0,1] (standard Z)
-    float currentDepth = ndc.z;
-
-    // Outside depth range → fully lit
-    if (currentDepth < 0.0 || currentDepth > 1.0)
-        return 1.0;
-
-    // Use texelFetch to read raw depth — bypasses sampler entirely.
-    // texture() with sampler2D on D32_SFLOAT returns 0.0 on MoltenVK;
-    // texelFetch reads the actual depth value reliably on all implementations.
-    ivec2 shadowMapSize = textureSize(shadowMap, 0);
-    ivec2 texCoord = ivec2(shadowUV * vec2(shadowMapSize));
-    texCoord = clamp(texCoord, ivec2(0), shadowMapSize - 1);
-    float storedDepth = texelFetch(shadowMap, texCoord, 0).r;
-
-    // Bias to reduce shadow acne
-    float bias = 0.005;
-
-    // Lit if fragment depth <= stored depth (standard Z: closer = smaller)
+    const float bias = 0.005;
     return (currentDepth - bias) <= storedDepth ? 1.0 : 0.0;
+}
+
+// ── PCF: 16-tap Poisson disk (soft shadow) ───────────────────────────────────
+float sampleShadowPCF(vec3 worldPos, int cascadeIdx) {
+    vec2 shadowUV;
+    float currentDepth;
+    if (!projectToCascade(worldPos, cascadeIdx, shadowUV, currentDepth))
+        return 1.0;
+
+    ivec3 mapSize = textureSize(shadowMap, 0);
+    vec2  texelSz = 1.0 / vec2(mapSize.xy);
+    float spread  = light.pcfSpreadRadius * texelSz.x;  // spread in UV space
+
+    const float bias = 0.005;
+    float lit = 0.0;
+    for (int i = 0; i < 16; ++i) {
+        vec2 sampleUV = shadowUV + POISSON_DISK[i] * spread;
+        sampleUV = clamp(sampleUV, vec2(0.0), vec2(1.0));
+        ivec2 texel = ivec2(sampleUV * vec2(mapSize.xy));
+        texel = clamp(texel, ivec2(0), mapSize.xy - 1);
+        float storedDepth = texelFetch(shadowMap, ivec3(texel, cascadeIdx), 0).r;
+        lit += (currentDepth - bias) <= storedDepth ? 1.0 : 0.0;
+    }
+    return lit / 16.0;
+}
+
+// ── VSM: Chebyshev upper bound on probability of being lit ───────────────────
+float sampleShadowVSM(vec3 worldPos, int cascadeIdx) {
+    vec2 shadowUV;
+    float currentDepth;
+    if (!projectToCascade(worldPos, cascadeIdx, shadowUV, currentDepth))
+        return 1.0;
+
+    // Bilinear sample of blurred moments (hardware LINEAR filter on RG32F)
+    vec2 moments = texture(shadowMoments, vec3(shadowUV, float(cascadeIdx))).rg;
+    float mean    = moments.x;
+    float mean2   = moments.y;
+
+    // Chebyshev: if receiver is clearly in front of all occluders, fully lit
+    if (currentDepth <= mean)
+        return 1.0;
+
+    // Variance (clamped to prevent numerical artifacts)
+    float variance = mean2 - mean * mean;
+    const float minVariance = 0.00002;
+    variance = max(variance, minVariance);
+
+    // Chebyshev upper bound
+    float d   = currentDepth - mean;
+    float pMax = variance / (variance + d * d);
+
+    // Light-bleeding reduction: remap pMax so regions deep in shadow stay dark.
+    // Subtract threshold and rescale — reduces bleeding at the cost of slightly
+    // harder shadow edges at grazing angles.
+    float bleed = light.vsmBleedReduction;
+    pMax = clamp((pMax - bleed) / (1.0 - bleed), 0.0, 1.0);
+
+    return pMax;
+}
+
+// ── Select cascade and sample shadow with optional cascade blending ──────────
+// The blend zone is the last 20% of each cascade's depth range.
+// In that zone we smoothly interpolate with the next cascade to hide seams.
+float sampleCascade(vec3 worldPos, int cascadeIdx) {
+    if (light.shadowFilterMode == 0u)
+        return sampleShadowHard(worldPos, cascadeIdx);
+    else if (light.shadowFilterMode == 1u)
+        return sampleShadowPCF(worldPos, cascadeIdx);
+    else
+        return sampleShadowVSM(worldPos, cascadeIdx);
+}
+
+float computeShadow(vec3 worldPos, out int cascadeIdx) {
+    // Select cascade by view-space Z magnitude
+    float viewZ = abs((camera.view * vec4(worldPos, 1.0)).z);
+    cascadeIdx = 3;
+    if      (viewZ < shadow.splitDepths.x) cascadeIdx = 0;
+    else if (viewZ < shadow.splitDepths.y) cascadeIdx = 1;
+    else if (viewZ < shadow.splitDepths.z) cascadeIdx = 2;
+
+    float shadow0 = sampleCascade(worldPos, cascadeIdx);
+
+    // Cascade blending: in the last 20% of this cascade, blend toward the next cascade
+    // to hide the hard seam where matrix changes discontinuously.
+    if (cascadeIdx < 3) {
+        float splitFar = (cascadeIdx == 0) ? shadow.splitDepths.x :
+                         (cascadeIdx == 1) ? shadow.splitDepths.y :
+                                              shadow.splitDepths.z;
+        float blendStart = splitFar * 0.8;
+        float blendT = smoothstep(blendStart, splitFar, viewZ);
+        if (blendT > 0.0) {
+            float shadow1 = sampleCascade(worldPos, cascadeIdx + 1);
+            return mix(shadow0, shadow1, blendT);
+        }
+    }
+
+    return shadow0;
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -205,7 +321,8 @@ void main() {
     vec3 Lo = cookTorrance(N, L, V, baseColor, metallic, roughness);
 
     // ── Shadow ───────────────────────────────────────────────────────────
-    float shadowFactor = computeShadow(fs_in.worldPos);
+    int cascadeIdx;
+    float shadowFactor = computeShadow(fs_in.worldPos, cascadeIdx);
     Lo *= shadowFactor;
 
     // ── Ambient ──────────────────────────────────────────────────────────
@@ -220,6 +337,29 @@ void main() {
     // The swapchain is VK_FORMAT_B8G8R8A8_SRGB — the hardware automatically applies
     // the linear→sRGB transfer function on framebuffer write.
     // The previous pow(color, vec3(1.0/2.2)) was double-gamma-correcting.
+
+    // ── Cascade debug overlay ─────────────────────────────────────────────
+    if (light.debugCascades != 0u) {
+        const vec3 cascadeColors[4] = vec3[4](
+            vec3(1.0, 0.3, 0.3),   // cascade 0 = red
+            vec3(0.3, 1.0, 0.3),   // cascade 1 = green
+            vec3(0.3, 0.3, 1.0),   // cascade 2 = blue
+            vec3(1.0, 1.0, 0.3)    // cascade 3 = yellow
+        );
+        // Show blend zone by brightening toward cascade+1 color at zone boundary
+        float viewZ    = abs((camera.view * vec4(fs_in.worldPos, 1.0)).z);
+        float splitFar = (cascadeIdx == 0) ? shadow.splitDepths.x :
+                         (cascadeIdx == 1) ? shadow.splitDepths.y :
+                         (cascadeIdx == 2) ? shadow.splitDepths.z :
+                                              shadow.splitDepths.w;
+        float blendT = (cascadeIdx < 3)
+            ? smoothstep(splitFar * 0.8, splitFar, viewZ)
+            : 0.0;
+        vec3 baseOverlay = cascadeColors[cascadeIdx];
+        vec3 nextOverlay = (cascadeIdx < 3) ? cascadeColors[cascadeIdx + 1] : baseOverlay;
+        vec3 overlay = mix(baseOverlay, nextOverlay, blendT);
+        color = mix(color, overlay, 0.4);
+    }
 
     outColor = vec4(color, alpha);
 }

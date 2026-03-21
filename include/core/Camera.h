@@ -22,10 +22,12 @@ public:
     void update(float deltaTime);
 
     // Getters
-    const glm::mat4& getViewMatrix() const { return viewMatrix; }
+    const glm::mat4& getViewMatrix()       const { return viewMatrix; }
     const glm::mat4& getProjectionMatrix() const { return projectionMatrix; }
-    const glm::vec3& getPosition() const { return position; }
-    const glm::quat& getOrientation() const { return orientation; }
+    const glm::vec3& getPosition()         const { return position; }
+    const glm::quat& getOrientation()      const { return orientation; }
+    float            getNearZ()            const { return nearZ; }
+    float            getFarZ()             const { return farZ; }
 
 private:
     // Position and orientation

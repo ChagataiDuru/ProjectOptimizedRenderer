@@ -54,12 +54,14 @@ Image::Image(Image&& other) noexcept
     , m_allocation(other.m_allocation)
     , m_format(other.m_format)
     , m_extent(other.m_extent)
+    , m_arrayLayers(other.m_arrayLayers)
     , m_stagingBuffer(other.m_stagingBuffer)
     , m_stagingAlloc(other.m_stagingAlloc)
 {
     other.m_image         = VK_NULL_HANDLE;
     other.m_imageView     = VK_NULL_HANDLE;
     other.m_allocation    = nullptr;
+    other.m_arrayLayers   = 1;
     other.m_stagingBuffer = VK_NULL_HANDLE;
     other.m_stagingAlloc  = nullptr;
 }
@@ -73,11 +75,13 @@ Image& Image::operator=(Image&& other) noexcept
         m_allocation    = other.m_allocation;
         m_format        = other.m_format;
         m_extent        = other.m_extent;
+        m_arrayLayers   = other.m_arrayLayers;
         m_stagingBuffer = other.m_stagingBuffer;
         m_stagingAlloc  = other.m_stagingAlloc;
         other.m_image         = VK_NULL_HANDLE;
         other.m_imageView     = VK_NULL_HANDLE;
         other.m_allocation    = nullptr;
+        other.m_arrayLayers   = 1;
         other.m_stagingBuffer = VK_NULL_HANDLE;
         other.m_stagingAlloc  = nullptr;
     }
@@ -88,10 +92,11 @@ Image& Image::operator=(Image&& other) noexcept
 
 void Image::create(uint32_t width, uint32_t height, uint32_t depth,
                    VkFormat format, VkImageUsageFlags usage,
-                   VkImageAspectFlags aspectFlags)
+                   VkImageAspectFlags aspectFlags, uint32_t arrayLayers)
 {
-    m_format = format;
-    m_extent = { width, height, depth };
+    m_format      = format;
+    m_extent      = { width, height, depth };
+    m_arrayLayers = arrayLayers;
 
     const VkImageCreateInfo imageCI{
         .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -99,7 +104,7 @@ void Image::create(uint32_t width, uint32_t height, uint32_t depth,
         .format        = format,
         .extent        = m_extent,
         .mipLevels     = 1,
-        .arrayLayers   = 1,
+        .arrayLayers   = arrayLayers,
         .samples       = VK_SAMPLE_COUNT_1_BIT,
         .tiling        = VK_IMAGE_TILING_OPTIMAL,
         .usage         = usage,
@@ -160,18 +165,45 @@ void Image::createFromData(uint32_t width, uint32_t height, VkFormat format,
 
 void Image::createView(VkImageAspectFlags aspectFlags)
 {
+    VkImageViewType viewType;
+    if (m_extent.depth > 1)
+        viewType = VK_IMAGE_VIEW_TYPE_3D;
+    else if (m_arrayLayers > 1)
+        viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    else
+        viewType = VK_IMAGE_VIEW_TYPE_2D;
+
     const VkImageViewCreateInfo viewCI{
         .sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
         .image    = m_image,
-        .viewType = m_extent.depth > 1 ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D,
+        .viewType = viewType,
         .format   = m_format,
         .components = {
             VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
             VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
         },
-        .subresourceRange = { aspectFlags, 0, 1, 0, 1 },
+        .subresourceRange = { aspectFlags, 0, 1, 0, m_arrayLayers },
     };
     VK_CHECK(vkCreateImageView(m_ctx.getDevice(), &viewCI, nullptr, &m_imageView));
+}
+
+VkImageView Image::createSingleLayerView(uint32_t layer,
+                                          VkImageAspectFlags aspectFlags) const
+{
+    const VkImageViewCreateInfo viewCI{
+        .sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image    = m_image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format   = m_format,
+        .components = {
+            VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+            VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+        },
+        .subresourceRange = { aspectFlags, 0, 1, layer, 1 },
+    };
+    VkImageView view = VK_NULL_HANDLE;
+    VK_CHECK(vkCreateImageView(m_ctx.getDevice(), &viewCI, nullptr, &view));
+    return view;
 }
 
 // ── Barriers ─────────────────────────────────────────────────────────────────

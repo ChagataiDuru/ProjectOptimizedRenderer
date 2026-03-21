@@ -97,6 +97,8 @@ int main() {
     camera.setPerspective(45.0f, aspectRatio, 0.01f, 1000.0f);
     // Phase 3.7: position camera to frame the normalized scene
     camera.fitToScene(renderer.getSceneInfo().normalizedRadius);
+    // Phase 4.3: pass frustum planes so CSM splits stay in sync
+    renderer.setCameraFrustum(camera.getNearZ(), camera.getFarZ());
 
     // === Light state (live-editable via the ImGui panel) ===
     struct LightState {
@@ -139,6 +141,12 @@ int main() {
       ImGui::TextDisabled("WASD: move  Mouse: look  F1: toggle cursor");
     }, DockLocation::Right);
 
+    float csmLambda       = 0.5f;
+    bool  showCascadeDebug = false;
+    int   shadowFilterMode = 0;    // 0=None, 1=PCF, 2=VSM
+    float pcfSpreadRadius  = 2.0f;
+    float vsmBleedReduction = 0.2f;
+
     imguiManager.registerPanel(ICON_FA_SUN " Light", [&]() {
       bool changed = false;
       changed |= ImGui::SliderFloat3("Direction", lightState.direction, -1.0f, 1.0f);
@@ -151,6 +159,38 @@ int main() {
           glm::vec3(lightState.color[0],     lightState.color[1],     lightState.color[2]),
           lightState.intensity,
           lightState.ambient);
+      }
+
+      ImGui::Separator();
+      ImGui::Text(ICON_FA_LAYER_GROUP " Cascaded Shadows");
+      if (ImGui::SliderFloat("CSM Lambda", &csmLambda, 0.0f, 1.0f,
+                             "%.2f", ImGuiSliderFlags_None)) {
+        renderer.setCsmLambda(csmLambda);
+      }
+      if (ImGui::Checkbox("Debug Cascades", &showCascadeDebug)) {
+        renderer.setCascadeDebugEnabled(showCascadeDebug);
+      }
+      if (showCascadeDebug) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(red/green/blue/yellow = cascades 0-3)");
+      }
+
+      ImGui::Separator();
+      ImGui::Text(ICON_FA_DROPLET " Shadow Filter");
+      const char* filterItems[] = { "None (hard)", "PCF (soft)", "VSM (variance)" };
+      if (ImGui::Combo("Mode", &shadowFilterMode, filterItems, 3)) {
+        renderer.setShadowFilterMode(shadowFilterMode);
+      }
+      if (shadowFilterMode == 1) {
+        if (ImGui::SliderFloat("PCF Spread (texels)", &pcfSpreadRadius, 0.5f, 8.0f, "%.1f")) {
+          renderer.setPcfSpreadRadius(pcfSpreadRadius);
+        }
+      }
+      if (shadowFilterMode == 2) {
+        if (ImGui::SliderFloat("VSM Bleed Reduction", &vsmBleedReduction, 0.0f, 0.9f, "%.2f")) {
+          renderer.setVsmBleedReduction(vsmBleedReduction);
+        }
+        ImGui::TextDisabled("Higher = less bleeding, harder edges");
       }
     }, DockLocation::Right);
 
@@ -177,9 +217,12 @@ int main() {
       }
 
       const float shadowMs = timer.getElapsedMs("ShadowPass_Begin", "ShadowPass_End");
+      const bool  hasBlur  = (renderer.getShadowFilterMode() == 2);
+      const float blurMs   = hasBlur
+          ? timer.getElapsedMs("BlurPass_Begin", "BlurPass_End") : 0.0f;
       const float sceneMs  = timer.getElapsedMs("ScenePass_Begin",  "ScenePass_End");
       const float imguiMs  = timer.getElapsedMs("ScenePass_End",    "ImGuiPass_End");
-      const float totalMs  = shadowMs + sceneMs + imguiMs;
+      const float totalMs  = shadowMs + blurMs + sceneMs + imguiMs;
       const float budget   = 16.67f;  // 60 Hz
 
       ImGui::Text("Budget: %.2f / %.2f ms (60 Hz)", totalMs, budget);
@@ -201,19 +244,30 @@ int main() {
           ImVec2(barStart.x + shadowW, barStart.y + barHeight),
           IM_COL32(255, 165, 0, 200), 4.0f);
 
-      // Scene pass — blue, stacked after shadow
-      const float sceneW = glm::min((sceneMs / budget) * barWidth, barWidth - shadowW);
+      // Blur pass — purple, stacked after shadow (VSM only)
+      const float blurW = hasBlur
+          ? glm::min((blurMs / budget) * barWidth, barWidth - shadowW) : 0.0f;
+      if (blurW > 0.0f) {
+          draw->AddRectFilled(
+              ImVec2(barStart.x + shadowW, barStart.y),
+              ImVec2(barStart.x + shadowW + blurW, barStart.y + barHeight),
+              IM_COL32(180, 80, 220, 200), 4.0f);
+      }
+
+      // Scene pass — blue, stacked after shadow (+blur)
+      const float usedW  = shadowW + blurW;
+      const float sceneW = glm::min((sceneMs / budget) * barWidth, barWidth - usedW);
       draw->AddRectFilled(
-          ImVec2(barStart.x + shadowW, barStart.y),
-          ImVec2(barStart.x + shadowW + sceneW, barStart.y + barHeight),
+          ImVec2(barStart.x + usedW, barStart.y),
+          ImVec2(barStart.x + usedW + sceneW, barStart.y + barHeight),
           IM_COL32(66, 150, 250, 200), 4.0f);
 
-      // ImGui pass — green, stacked after scene
+      // ImGui pass — green, stacked last
       const float imguiW = glm::min((imguiMs / budget) * barWidth,
-                                    barWidth - shadowW - sceneW);
+                                    barWidth - usedW - sceneW);
       draw->AddRectFilled(
-          ImVec2(barStart.x + shadowW + sceneW, barStart.y),
-          ImVec2(barStart.x + shadowW + sceneW + imguiW, barStart.y + barHeight),
+          ImVec2(barStart.x + usedW + sceneW, barStart.y),
+          ImVec2(barStart.x + usedW + sceneW + imguiW, barStart.y + barHeight),
           IM_COL32(80, 200, 120, 200), 4.0f);
 
       // 100% budget marker — red vertical line at right edge
@@ -230,6 +284,13 @@ int main() {
                          ImGuiColorEditFlags_NoTooltip, ImVec2(10.0f, 10.0f));
       ImGui::SameLine();
       ImGui::Text("Shadow: %.3f ms", shadowMs);
+
+      if (hasBlur) {
+          ImGui::ColorButton("##bl", ImVec4(0.71f, 0.31f, 0.86f, 1.0f),
+                             ImGuiColorEditFlags_NoTooltip, ImVec2(10.0f, 10.0f));
+          ImGui::SameLine();
+          ImGui::Text("Blur: %.3f ms", blurMs);
+      }
 
       ImGui::ColorButton("##sc", ImVec4(0.26f, 0.59f, 0.98f, 1.0f),
                          ImGuiColorEditFlags_NoTooltip, ImVec2(10.0f, 10.0f));
@@ -495,6 +556,7 @@ int main() {
           if (pw > 0 && ph > 0) {
               float newAspect = static_cast<float>(pw) / static_cast<float>(ph);
               camera.setPerspective(45.0f, newAspect, 0.01f, 1000.0f);
+              renderer.setCameraFrustum(camera.getNearZ(), camera.getFarZ());
           }
           spdlog::info("Window resized to {}x{} px", pw, ph);
           break;

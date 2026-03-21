@@ -13,6 +13,7 @@
 #include "resource/Texture.h"
 #include "resource/SamplerCache.h"
 #include <glm/glm.hpp>
+#include <array>
 #include <string>
 #include <vector>
 
@@ -40,8 +41,22 @@ public:
     void setCameraMatrices(const glm::mat4& view, const glm::mat4& projection,
                            const glm::vec3& cameraPos);
 
+    // Phase 4.3: expose camera frustum planes so CSM splits stay in sync
+    void setCameraFrustum(float nearZ, float farZ);
+
     void setLightParameters(const glm::vec3& direction, const glm::vec3& color,
                             float intensity, float ambient);
+
+    // Phase 4.3: CSM controls
+    void setCsmLambda(float lambda)            { m_csmLambda = lambda; }
+    void setCascadeDebugEnabled(bool enabled);
+    bool isCascadeDebugEnabled() const         { return m_showCascadeDebug; }
+
+    // Phase 4.4-4.6: shadow filter mode and per-mode settings
+    void setShadowFilterMode(int32_t mode);    // 0=None, 1=PCF, 2=VSM
+    void setPcfSpreadRadius(float radius);
+    void setVsmBleedReduction(float reduction);
+    int32_t getShadowFilterMode() const        { return m_shadowFilterMode; }
 
     // Unload current model and load a new glTF at the given path.
     // Destroys model-dependent GPU resources, loads new model, recreates descriptors.
@@ -61,8 +76,9 @@ public:
     bool isWireframeEnabled()     const { return m_wireframe; }
     bool isNormalVisualization()  const { return m_showNormals; }
 
-    // Phase 4.1: shadow map resolution (power-of-two for clean texel mapping)
-    static constexpr uint32_t SHADOW_MAP_SIZE = 2048;
+    // Phase 4.3: cascade shadow map constants
+    static constexpr uint32_t CASCADE_COUNT = 4;
+    static constexpr uint32_t CASCADE_SIZE  = 2048;
 
     // Phase 2.6: render statistics — populated each frame in render()
     struct RenderStats {
@@ -140,13 +156,17 @@ private:
         float     _pad = 0.0f;  // std140: vec3 pads to 16 bytes
     };
 
-    // Directional light UBO (host-visible)
+    // Directional light UBO (host-visible, std140: 48 bytes = 3×vec4)
     struct LightUBO {
         glm::vec3 lightDirection;
         float     lightIntensity;
         glm::vec3 lightColor;
         float     ambientIntensity;
-    };
+        uint32_t  debugCascades;     // 0 = off, 1 = false-color overlay
+        uint32_t  shadowFilterMode;  // 0=None, 1=PCF, 2=VSM
+        float     pcfSpreadRadius;   // PCF sample spread in texels
+        float     vsmBleedReduction; // VSM light bleeding reduction factor
+    };  // 48 bytes: 2×(vec3+float) + 4×uint32/float
 
     Buffer           m_cameraUBOBuffer;
     Buffer           m_lightUBOBuffer;
@@ -170,16 +190,53 @@ private:
     Screenshot   m_screenshot;
     RenderStats  m_renderStats;
 
-    // Phase 4.1: shadow map resources
-    struct ShadowUBO {
-        glm::mat4 lightViewProj;
+    // Phase 4.3: cascaded shadow map resources
+    struct ShadowCascadeUBO {
+        glm::mat4 lightViewProj[CASCADE_COUNT];
+        glm::vec4 splitDepths;   // x=c0, y=c1, z=c2, w=c3 (view-space |Z|)
     };
-    Image            m_shadowMap;           // D32_SFLOAT depth image, SHADOW_MAP_SIZE²
-    VkSampler        m_shadowSampler = VK_NULL_HANDLE;  // comparison sampler
-    Buffer           m_shadowUBOBuffer;     // host-visible ShadowUBO
+    Image            m_shadowMap;           // D32_SFLOAT 2D_ARRAY, CASCADE_COUNT layers
+    std::array<VkImageView, CASCADE_COUNT> m_shadowLayerViews = {};  // per-layer attachment views
+    VkSampler        m_shadowSampler    = VK_NULL_HANDLE;
+    Buffer           m_shadowUBOBuffer;
     VkPipeline       m_shadowPipeline   = VK_NULL_HANDLE;
     VkShaderModule   m_shadowVertModule = VK_NULL_HANDLE;
     glm::vec3        m_lightDirection   = glm::vec3(1.0f, 1.0f, 1.0f);
+
+    // Stored to re-upload LightUBO when debug toggle changes
+    glm::vec3 m_lightColor        = glm::vec3(1.0f);
+    float     m_lightIntensity    = 1.0f;
+    float     m_ambientIntensity  = 0.1f;
+
+    // Camera frustum — updated by setCameraFrustum() for CSM split computation
+    glm::mat4 m_viewMatrix  = glm::mat4(1.0f);
+    glm::mat4 m_projMatrix  = glm::mat4(1.0f);
+    float     m_cameraNearZ = 0.01f;
+    float     m_cameraFarZ  = 1000.0f;
+
+    // CSM UI state
+    float m_csmLambda        = 0.5f;
+    bool  m_showCascadeDebug = false;
+
+    // Phase 4.4-4.6: VSM moment images (RG32_SFLOAT, CASCADE_COUNT layers each)
+    Image m_shadowMoments;       // color attachment (shadow pass) + sampled (PBR pass)
+    Image m_shadowMomentsTemp;   // blur intermediate (compute only)
+    std::array<VkImageView, CASCADE_COUNT> m_momentsLayerViews = {};  // per-cascade color attach
+    VkSampler  m_momentsSampler    = VK_NULL_HANDLE;  // LINEAR filter for bilinear VSM
+    VkPipeline m_shadowVsmPipeline = VK_NULL_HANDLE;  // shadow pass: depth + moments output
+
+    // Separable Gaussian blur (compute)
+    VkPipeline            m_blurPipeline       = VK_NULL_HANDLE;
+    VkPipelineLayout      m_blurPipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_blurSetLayout      = VK_NULL_HANDLE;
+    VkDescriptorPool      m_blurDescriptorPool = VK_NULL_HANDLE;
+    VkDescriptorSet       m_blurSetHorizontal  = VK_NULL_HANDLE;  // moments→temp
+    VkDescriptorSet       m_blurSetVertical    = VK_NULL_HANDLE;  // temp→moments
+
+    // Shadow filter state (uploaded to LightUBO, used by pbr.frag)
+    int32_t m_shadowFilterMode    = 0;    // 0=None, 1=PCF, 2=VSM
+    float   m_pcfSpreadRadius     = 2.0f; // PCF sample spread in texels
+    float   m_vsmBleedReduction   = 0.2f; // VSM light bleeding reduction
 
     bool        m_screenshotRequested = false;
     std::string m_screenshotFilename;
@@ -192,6 +249,7 @@ private:
 
     void createCameraUBO();
     void createLightUBO();
+    void uploadLightUBO();   // re-upload m_lightUBOBuffer from stored params
     void createDepthImage();
     void createDescriptorPool();
     void createDescriptorSet();

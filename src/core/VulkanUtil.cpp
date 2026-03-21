@@ -21,7 +21,7 @@ void transitionImage(
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .image               = image,
-        .subresourceRange    = { aspectMask, 0, 1, 0, 1 },
+        .subresourceRange    = { aspectMask, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS },
     };
     const VkDependencyInfo dep{
         .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
