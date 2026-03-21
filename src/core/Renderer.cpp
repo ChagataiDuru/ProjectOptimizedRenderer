@@ -67,6 +67,7 @@ Renderer::Renderer(VulkanContext& ctx, Swapchain& swapchain)
     , m_samplerCache(ctx)
     , m_fallbackWhite(ctx)
     , m_depthImage(ctx)
+    , m_hdrTarget(ctx)
     , m_shadowMap(ctx)
     , m_shadowUBOBuffer(ctx)
     , m_shadowMoments(ctx)
@@ -90,6 +91,8 @@ void Renderer::init()
     m_frameSync.init(3);
     m_commandBuffer.init(m_ctx.getGraphicsQueueFamily(), 3);
     createDepthImage();
+    createHdrTarget();
+    createTonemapPipeline();
     createPbrPipeline();
     createShadowResources();
     createCameraUBO();
@@ -195,6 +198,18 @@ void Renderer::shutdown()
     vkDeviceWaitIdle(m_ctx.getDevice());
 
     m_gpuTimer.shutdown();
+
+    // Phase 5: tone map pass resources (model-independent; destroy before PBR pipeline)
+    {
+        const VkDevice dev = m_ctx.getDevice();
+        if (m_tonemapPipeline       != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_tonemapPipeline, nullptr);              m_tonemapPipeline       = VK_NULL_HANDLE; }
+        if (m_tonemapPipelineLayout != VK_NULL_HANDLE) { vkDestroyPipelineLayout(dev, m_tonemapPipelineLayout, nullptr);   m_tonemapPipelineLayout = VK_NULL_HANDLE; }
+        if (m_tonemapPool           != VK_NULL_HANDLE) { vkDestroyDescriptorPool(dev, m_tonemapPool, nullptr);             m_tonemapPool           = VK_NULL_HANDLE; m_tonemapSet = VK_NULL_HANDLE; }
+        if (m_tonemapSetLayout      != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(dev, m_tonemapSetLayout, nullptr);   m_tonemapSetLayout      = VK_NULL_HANDLE; }
+        if (m_hdrSampler            != VK_NULL_HANDLE) { vkDestroySampler(dev, m_hdrSampler, nullptr);                     m_hdrSampler            = VK_NULL_HANDLE; }
+        m_hdrTarget.destroy();
+    }
+
     destroyPipeline();
 
     // Destroy textures before VMA teardown (textures hold VmaAllocations)
@@ -607,8 +622,8 @@ void Renderer::createPbrPipeline()
     VK_CHECK(vkCreatePipelineLayout(m_ctx.getDevice(), &layoutInfo, nullptr, &m_pipelineLayout));
 
     // VkPipelineRenderingCreateInfo replaces VkRenderPass for dynamic rendering (core in 1.3/1.4)
-    // Must declare the depth format here so the pipeline is compatible with the render attachment.
-    const VkFormat colorFormat = m_swapchain.getFormat();
+    // Phase 5: PBR pipelines now render into the HDR float target, not directly to the swapchain.
+    const VkFormat colorFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
     const VkPipelineRenderingCreateInfo renderingInfo{
         .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
         .colorAttachmentCount    = 1,
@@ -781,6 +796,212 @@ void Renderer::createDepthImage()
                         VK_IMAGE_ASPECT_DEPTH_BIT);
 
     spdlog::info("Depth image created: {}x{} D32_SFLOAT (reverse-Z)", ext.width, ext.height);
+}
+
+// Phase 5: HDR offscreen target ──────────────────────────────────────────────
+
+void Renderer::createHdrTarget()
+{
+    const VkExtent2D ext = m_swapchain.getExtent();
+
+    m_hdrTarget.create(ext.width, ext.height, 1,
+                       VK_FORMAT_R16G16B16A16_SFLOAT,
+                       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                       VK_IMAGE_ASPECT_COLOR_BIT);
+
+    // Create the sampler once (on first call); reuse on resize — the sampler itself
+    // doesn't reference the image view, so no need to destroy+recreate it.
+    if (m_hdrSampler == VK_NULL_HANDLE) {
+        const VkSamplerCreateInfo samplerCI{
+            .sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            .magFilter    = VK_FILTER_LINEAR,
+            .minFilter    = VK_FILTER_LINEAR,
+            .mipmapMode   = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+            .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .maxLod       = VK_LOD_CLAMP_NONE,
+        };
+        VK_CHECK(vkCreateSampler(m_ctx.getDevice(), &samplerCI, nullptr, &m_hdrSampler));
+    }
+
+    // Update the descriptor set to point at the new image view (also handles first-time setup
+    // after the descriptor pool+set are created by createTonemapPipeline()).
+    if (m_tonemapSet != VK_NULL_HANDLE)
+        updateTonemapDescriptorSet();
+
+    spdlog::info("HDR target created: {}x{} R16G16B16A16_SFLOAT", ext.width, ext.height);
+}
+
+void Renderer::createTonemapPipeline()
+{
+    const VkDevice dev = m_ctx.getDevice();
+    const std::string dir = SHADER_DIR;
+
+    // ── Descriptor set layout: one combined image sampler (HDR input) ─────────
+    const VkDescriptorSetLayoutBinding binding{
+        .binding         = 0,
+        .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = 1,
+        .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
+    };
+    const VkDescriptorSetLayoutCreateInfo setLayoutCI{
+        .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 1,
+        .pBindings    = &binding,
+    };
+    VK_CHECK(vkCreateDescriptorSetLayout(dev, &setLayoutCI, nullptr, &m_tonemapSetLayout));
+
+    // ── Descriptor pool: 1 set, 1 sampler ─────────────────────────────────────
+    const VkDescriptorPoolSize poolSize{
+        .type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = 1,
+    };
+    const VkDescriptorPoolCreateInfo poolCI{
+        .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets       = 1,
+        .poolSizeCount = 1,
+        .pPoolSizes    = &poolSize,
+    };
+    VK_CHECK(vkCreateDescriptorPool(dev, &poolCI, nullptr, &m_tonemapPool));
+
+    // ── Allocate descriptor set ────────────────────────────────────────────────
+    const VkDescriptorSetAllocateInfo allocInfo{
+        .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool     = m_tonemapPool,
+        .descriptorSetCount = 1,
+        .pSetLayouts        = &m_tonemapSetLayout,
+    };
+    VK_CHECK(vkAllocateDescriptorSets(dev, &allocInfo, &m_tonemapSet));
+
+    // ── Push constant: TonemapPC (8 bytes: uint mode + float exposure) ────────
+    const VkPushConstantRange pcRange{
+        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .offset     = 0,
+        .size       = sizeof(uint32_t) + sizeof(float),
+    };
+    const VkPipelineLayoutCreateInfo layoutCI{
+        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount         = 1,
+        .pSetLayouts            = &m_tonemapSetLayout,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges    = &pcRange,
+    };
+    VK_CHECK(vkCreatePipelineLayout(dev, &layoutCI, nullptr, &m_tonemapPipelineLayout));
+
+    // ── Shader modules ─────────────────────────────────────────────────────────
+    VkShaderModule vertMod = makeShaderModule(dev, loadSpv(dir + "/tonemap.vert.spv"));
+    VkShaderModule fragMod = makeShaderModule(dev, loadSpv(dir + "/tonemap.frag.spv"));
+
+    const std::array<VkPipelineShaderStageCreateInfo, 2> stages{{
+        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_VERTEX_BIT,   .module = vertMod, .pName = "main" },
+        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fragMod, .pName = "main" },
+    }};
+
+    // ── No vertex input — fullscreen triangle is generated entirely in the vertex shader ──
+    const VkPipelineVertexInputStateCreateInfo vertexInput{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+    };
+    const VkPipelineInputAssemblyStateCreateInfo inputAssembly{
+        .sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+    };
+    const VkPipelineViewportStateCreateInfo viewportState{
+        .sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1,
+        .scissorCount  = 1,
+    };
+    const VkPipelineRasterizationStateCreateInfo rasterization{
+        .sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .cullMode    = VK_CULL_MODE_NONE,
+        .frontFace   = VK_FRONT_FACE_CLOCKWISE,
+        .lineWidth   = 1.0f,
+    };
+    const VkPipelineMultisampleStateCreateInfo multisample{
+        .sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+    };
+    // No depth test: fullscreen blit always overwrites
+    const VkPipelineDepthStencilStateCreateInfo depthStencil{
+        .sType             = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable   = VK_FALSE,
+        .depthWriteEnable  = VK_FALSE,
+    };
+    const VkPipelineColorBlendAttachmentState blendAtt{
+        .blendEnable    = VK_FALSE,
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+    const VkPipelineColorBlendStateCreateInfo colorBlend{
+        .sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .attachmentCount = 1,
+        .pAttachments    = &blendAtt,
+    };
+    const std::array<VkDynamicState, 2> dynStates = {
+        VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    const VkPipelineDynamicStateCreateInfo dynamicState{
+        .sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .dynamicStateCount = static_cast<uint32_t>(dynStates.size()),
+        .pDynamicStates    = dynStates.data(),
+    };
+
+    // Output to swapchain SRGB format
+    const VkFormat swapchainFormat = m_swapchain.getFormat();
+    const VkPipelineRenderingCreateInfo renderingInfo{
+        .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .colorAttachmentCount    = 1,
+        .pColorAttachmentFormats = &swapchainFormat,
+        // No depth attachment — blit doesn't use depth
+    };
+
+    const VkGraphicsPipelineCreateInfo pipelineCI{
+        .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .pNext               = &renderingInfo,
+        .stageCount          = static_cast<uint32_t>(stages.size()),
+        .pStages             = stages.data(),
+        .pVertexInputState   = &vertexInput,
+        .pInputAssemblyState = &inputAssembly,
+        .pViewportState      = &viewportState,
+        .pRasterizationState = &rasterization,
+        .pMultisampleState   = &multisample,
+        .pDepthStencilState  = &depthStencil,
+        .pColorBlendState    = &colorBlend,
+        .pDynamicState       = &dynamicState,
+        .layout              = m_tonemapPipelineLayout,
+        .renderPass          = VK_NULL_HANDLE,
+    };
+    VK_CHECK(vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &pipelineCI, nullptr,
+                                       &m_tonemapPipeline));
+
+    vkDestroyShaderModule(dev, vertMod, nullptr);
+    vkDestroyShaderModule(dev, fragMod, nullptr);
+
+    // Now that pool+set+layout exist, write the HDR image into the descriptor
+    // (m_hdrTarget was already created before createTonemapPipeline() is called)
+    updateTonemapDescriptorSet();
+
+    spdlog::info("Tone map pipeline created (fullscreen triangle → swapchain SRGB)");
+}
+
+void Renderer::updateTonemapDescriptorSet()
+{
+    const VkDescriptorImageInfo imgInfo{
+        .sampler     = m_hdrSampler,
+        .imageView   = m_hdrTarget.getImageView(),
+        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
+    const VkWriteDescriptorSet write{
+        .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet          = m_tonemapSet,
+        .dstBinding      = 0,
+        .descriptorCount = 1,
+        .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .pImageInfo      = &imgInfo,
+    };
+    vkUpdateDescriptorSets(m_ctx.getDevice(), 1, &write, 0, nullptr);
 }
 
 void Renderer::createDescriptorPool()
@@ -1551,6 +1772,7 @@ void Renderer::handleResize()
     vkDeviceWaitIdle(m_ctx.getDevice());
 
     m_depthImage.destroy();
+    m_hdrTarget.destroy();
 
     // Recreate swapchain. Passing current extent as hint; Swapchain::createSwapchain()
     // reads surface capabilities and uses cap.currentExtent when available (most platforms),
@@ -1560,6 +1782,7 @@ void Renderer::handleResize()
     const VkExtent2D newExt = m_swapchain.getExtent();
     if (newExt.width > 0 && newExt.height > 0) {
         createDepthImage();
+        createHdrTarget();  // also calls updateTonemapDescriptorSet() to rebind new image view
     }
 
     spdlog::info("Renderer resized: {}x{} -> {}x{}", oldExt.width, oldExt.height,
@@ -1773,12 +1996,11 @@ void Renderer::render()
             VK_IMAGE_LAYOUT_GENERAL,                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
 
-    // Swapchain images start in UNDEFINED layout each frame — transition to writable attachment.
-    // UNDEFINED oldLayout means the driver is free to discard contents (correct, we clear anyway).
-    vkutil::transitionImage(cmd, m_swapchain.getCurrentImage(),
-        VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,             0,
-        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,  VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-        VK_IMAGE_LAYOUT_UNDEFINED,                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    // Phase 5: HDR target transitions from UNDEFINED every frame (LOAD_OP_CLEAR discards contents).
+    vkutil::transitionImage(cmd, m_hdrTarget.getImage(),
+        VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,              0,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,   VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_IMAGE_LAYOUT_UNDEFINED,                          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
     // Depth image transitions from UNDEFINED each frame — LOAD_OP_CLEAR discards previous
     // contents anyway, so UNDEFINED→DEPTH_ATTACHMENT_OPTIMAL is valid and avoids layout tracking.
@@ -1789,13 +2011,15 @@ void Renderer::render()
         VK_IMAGE_LAYOUT_UNDEFINED,                         VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
         VK_IMAGE_ASPECT_DEPTH_BIT);
 
+    // ── Scene pass → HDR offscreen target ────────────────────────────────────
+    // Clear to black in linear space (sRGB 0.01 ≈ linear ~0.001; using 0 is visually identical).
     const VkRenderingAttachmentInfo colorAttachment{
         .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView   = m_swapchain.getCurrentImageView(),
+        .imageView   = m_hdrTarget.getImageView(),
         .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
         .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
-        .clearValue  = { .color = { .float32 = { 0.01f, 0.01f, 0.01f, 1.0f } } },
+        .clearValue  = { .color = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } } },
     };
 
     // Reverse-Z: clear depth to 0.0 (far plane); closer fragments have larger depth values
@@ -1893,7 +2117,65 @@ void Renderer::render()
 
     m_gpuTimer.writeTimestamp(cmd, "ScenePass_End");
 
-    // Phase 2.5: ImGui overlay pass (LOAD_OP_LOAD preserves the PBR scene).
+    // ── Transition HDR target: attachment write → fragment shader read ────────
+    vkutil::transitionImage(cmd, m_hdrTarget.getImage(),
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,   VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,            VK_ACCESS_2_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    // ── Transition swapchain: UNDEFINED → COLOR_ATTACHMENT (for tonemap blit) ─
+    vkutil::transitionImage(cmd, m_swapchain.getCurrentImage(),
+        VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,              0,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,   VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_IMAGE_LAYOUT_UNDEFINED,                          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+
+    // ── Tone map pass: fullscreen triangle HDR→LDR → swapchain SRGB ──────────
+    m_gpuTimer.writeTimestamp(cmd, "TonemapPass_Begin");
+
+    const VkRenderingAttachmentInfo tonemapColorAtt{
+        .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView   = m_swapchain.getCurrentImageView(),
+        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .loadOp      = VK_ATTACHMENT_LOAD_OP_DONT_CARE,  // fullscreen overwrite; no need to load
+        .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
+    };
+    const VkRenderingInfo tonemapRenderInfo{
+        .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
+        .renderArea           = { .offset = { 0, 0 }, .extent = ext },
+        .layerCount           = 1,
+        .colorAttachmentCount = 1,
+        .pColorAttachments    = &tonemapColorAtt,
+        // No depth attachment — fullscreen blit doesn't depth-test
+    };
+
+    vkCmdBeginRendering(cmd, &tonemapRenderInfo);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_tonemapPipeline);
+
+    const VkViewport tonemapVP{
+        .x = 0.0f, .y = 0.0f,
+        .width  = static_cast<float>(ext.width),
+        .height = static_cast<float>(ext.height),
+        .minDepth = 0.0f, .maxDepth = 1.0f,
+    };
+    vkCmdSetViewport(cmd, 0, 1, &tonemapVP);
+    const VkRect2D tonemapScissor{ .offset = { 0, 0 }, .extent = ext };
+    vkCmdSetScissor(cmd, 0, 1, &tonemapScissor);
+
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            m_tonemapPipelineLayout, 0, 1, &m_tonemapSet, 0, nullptr);
+
+    struct TonemapPC { uint32_t mode; float exposure; };
+    const TonemapPC tonemapPC{ static_cast<uint32_t>(m_tonemapMode), m_exposure };
+    vkCmdPushConstants(cmd, m_tonemapPipelineLayout,
+                       VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(TonemapPC), &tonemapPC);
+
+    vkCmdDraw(cmd, 3, 1, 0, 0);  // 3 vertices; fullscreen triangle generated in tonemap.vert
+
+    vkCmdEndRendering(cmd);
+
+    m_gpuTimer.writeTimestamp(cmd, "TonemapPass_End");
+
+    // Phase 2.5: ImGui overlay pass (LOAD_OP_LOAD preserves the tone-mapped image).
     if (m_imguiManager) {
         m_imguiManager->recordRenderPass(
             cmd,

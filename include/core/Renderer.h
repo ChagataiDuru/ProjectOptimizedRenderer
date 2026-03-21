@@ -80,6 +80,12 @@ public:
     static constexpr uint32_t CASCADE_COUNT = 4;
     static constexpr uint32_t CASCADE_SIZE  = 2048;
 
+    // Phase 5: exposure and tone map mode (used by TonemapPC push constant)
+    void  setExposure(float ev)          { m_exposure = ev; }
+    void  setTonemapMode(int32_t mode)   { m_tonemapMode = mode; }
+    float getExposure()   const          { return m_exposure; }
+    int32_t getTonemapMode() const       { return m_tonemapMode; }
+
     // Phase 2.6: render statistics — populated each frame in render()
     struct RenderStats {
         uint32_t drawCalls          = 0;
@@ -179,6 +185,21 @@ private:
     // Depth buffer (D32_SFLOAT, reverse-Z)
     Image            m_depthImage;
 
+    // Phase 5: HDR offscreen target (R16G16B16A16_SFLOAT, swapchain-sized)
+    Image            m_hdrTarget;
+    VkSampler        m_hdrSampler           = VK_NULL_HANDLE;
+
+    // Phase 5: Tone map pass resources
+    VkDescriptorSetLayout m_tonemapSetLayout      = VK_NULL_HANDLE;
+    VkDescriptorPool      m_tonemapPool            = VK_NULL_HANDLE;
+    VkDescriptorSet       m_tonemapSet             = VK_NULL_HANDLE;
+    VkPipelineLayout      m_tonemapPipelineLayout  = VK_NULL_HANDLE;
+    VkPipeline            m_tonemapPipeline        = VK_NULL_HANDLE;
+
+    // Phase 5: tone map state (uploaded as push constant each frame)
+    float   m_exposure     = 0.0f;  // EV offset; 0 = no change
+    int32_t m_tonemapMode  = 0;     // 0=Reinhard (more added in Phase 6)
+
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet  m_descriptorSet  = VK_NULL_HANDLE;
 
@@ -251,6 +272,9 @@ private:
     void createLightUBO();
     void uploadLightUBO();   // re-upload m_lightUBOBuffer from stored params
     void createDepthImage();
+    void createHdrTarget();  // Phase 5: create/recreate HDR offscreen target + update tonemap set
+    void createTonemapPipeline();
+    void updateTonemapDescriptorSet();  // called by createHdrTarget() after image (re)creation
     void createDescriptorPool();
     void createDescriptorSet();
     void createMaterialDescriptorSets();

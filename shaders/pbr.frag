@@ -115,11 +115,6 @@ vec3 cookTorrance(vec3 N, vec3 L, vec3 V,
     return (kD * baseColor / PI + specular) * radiance * NdotL;
 }
 
-// ── Reinhard Tone Mapping ────────────────────────────────────────────────────
-vec3 tonemapReinhard(vec3 hdr) {
-    return hdr / (hdr + vec3(1.0));
-}
-
 // ── 16-tap Poisson disk offsets (unit disk, golden-ratio rotated) ─────────────
 const vec2 POISSON_DISK[16] = vec2[16](
     vec2(-0.94201624, -0.39906216),
@@ -330,13 +325,9 @@ void main() {
 
     vec3 color = ambient + Lo;
 
-    // ── Tone mapping (HDR → LDR) ─────────────────────────────────────────
-    color = tonemapReinhard(color);
-
-    // NOTE: No manual gamma correction here.
-    // The swapchain is VK_FORMAT_B8G8R8A8_SRGB — the hardware automatically applies
-    // the linear→sRGB transfer function on framebuffer write.
-    // The previous pow(color, vec3(1.0/2.2)) was double-gamma-correcting.
+    // NOTE: No tone mapping here — pbr.frag outputs linear HDR to R16G16B16A16_SFLOAT.
+    // tonemap.frag reads that target, applies exposure + Reinhard (Phase 6: AgX/PBR Neutral),
+    // and writes LDR to the SRGB swapchain where hardware applies the linear→sRGB transfer.
 
     // ── Cascade debug overlay ─────────────────────────────────────────────
     if (light.debugCascades != 0u) {

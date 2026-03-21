@@ -229,6 +229,16 @@ shader_compile_glsl(
     SOURCE "${CMAKE_SOURCE_DIR}/shaders/shadow_blur.comp"
     OUTPUT "shadow_blur.comp.spv"
 )
+shader_compile_glsl(
+    TARGET ProjectOptimizedRenderer
+    SOURCE "${CMAKE_SOURCE_DIR}/shaders/tonemap.vert"
+    OUTPUT "tonemap.vert.spv"
+)
+shader_compile_glsl(
+    TARGET ProjectOptimizedRenderer
+    SOURCE "${CMAKE_SOURCE_DIR}/shaders/tonemap.frag"
+    OUTPUT "tonemap.frag.spv"
+)
 
 target_link_libraries(ProjectOptimizedRenderer PRIVATE
     volk::volk

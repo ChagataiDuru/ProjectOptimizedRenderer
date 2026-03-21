@@ -141,11 +141,15 @@ int main() {
       ImGui::TextDisabled("WASD: move  Mouse: look  F1: toggle cursor");
     }, DockLocation::Right);
 
-    float csmLambda       = 0.5f;
-    bool  showCascadeDebug = false;
-    int   shadowFilterMode = 0;    // 0=None, 1=PCF, 2=VSM
-    float pcfSpreadRadius  = 2.0f;
+    float csmLambda        = 0.5f;
+    bool  showCascadeDebug  = false;
+    int   shadowFilterMode  = 0;    // 0=None, 1=PCF, 2=VSM
+    float pcfSpreadRadius   = 2.0f;
     float vsmBleedReduction = 0.2f;
+
+    // Phase 5: post-processing state
+    float exposure    = 0.0f;  // EV offset
+    int   tonemapMode = 0;     // 0=Reinhard (Phase 6 adds more)
 
     imguiManager.registerPanel(ICON_FA_SUN " Light", [&]() {
       bool changed = false;
@@ -194,6 +198,17 @@ int main() {
       }
     }, DockLocation::Right);
 
+    imguiManager.registerPanel(ICON_FA_WAND_MAGIC_SPARKLES " Post Processing", [&]() {
+      ImGui::Text(ICON_FA_CAMERA " Tone Mapping");
+      // Tone map mode — only Reinhard for Phase 5; Phase 6 extends this list.
+      const char* tonemapNames[] = { "Reinhard" };
+      ImGui::Combo("Tone Map", &tonemapMode, tonemapNames, 1);
+      if (ImGui::SliderFloat("Exposure (EV)", &exposure, -4.0f, 4.0f, "%.2f")) {
+        renderer.setExposure(exposure);
+      }
+      ImGui::TextDisabled("EV +1 = 2× brighter,  EV -1 = 2× darker");
+    }, DockLocation::Right);
+
     imguiManager.registerPanel(ICON_FA_CUBES " Render Stats", [&]() {
       const auto& stats = renderer.getRenderStats();
       ImGui::Text("Draw calls:  %u",   stats.drawCalls);
@@ -216,14 +231,15 @@ int main() {
         return;
       }
 
-      const float shadowMs = timer.getElapsedMs("ShadowPass_Begin", "ShadowPass_End");
-      const bool  hasBlur  = (renderer.getShadowFilterMode() == 2);
-      const float blurMs   = hasBlur
+      const float shadowMs  = timer.getElapsedMs("ShadowPass_Begin", "ShadowPass_End");
+      const bool  hasBlur   = (renderer.getShadowFilterMode() == 2);
+      const float blurMs    = hasBlur
           ? timer.getElapsedMs("BlurPass_Begin", "BlurPass_End") : 0.0f;
-      const float sceneMs  = timer.getElapsedMs("ScenePass_Begin",  "ScenePass_End");
-      const float imguiMs  = timer.getElapsedMs("ScenePass_End",    "ImGuiPass_End");
-      const float totalMs  = shadowMs + blurMs + sceneMs + imguiMs;
-      const float budget   = 16.67f;  // 60 Hz
+      const float sceneMs   = timer.getElapsedMs("ScenePass_Begin",  "ScenePass_End");
+      const float tonemapMs = timer.getElapsedMs("TonemapPass_Begin", "TonemapPass_End");
+      const float imguiMs   = timer.getElapsedMs("TonemapPass_End",   "ImGuiPass_End");
+      const float totalMs   = shadowMs + blurMs + sceneMs + tonemapMs + imguiMs;
+      const float budget    = 16.67f;  // 60 Hz
 
       ImGui::Text("Budget: %.2f / %.2f ms (60 Hz)", totalMs, budget);
 
@@ -244,7 +260,7 @@ int main() {
           ImVec2(barStart.x + shadowW, barStart.y + barHeight),
           IM_COL32(255, 165, 0, 200), 4.0f);
 
-      // Blur pass — purple, stacked after shadow (VSM only)
+      // Blur pass — purple, after shadow (VSM only)
       const float blurW = hasBlur
           ? glm::min((blurMs / budget) * barWidth, barWidth - shadowW) : 0.0f;
       if (blurW > 0.0f) {
@@ -254,7 +270,7 @@ int main() {
               IM_COL32(180, 80, 220, 200), 4.0f);
       }
 
-      // Scene pass — blue, stacked after shadow (+blur)
+      // Scene pass — blue, after shadow (+blur)
       const float usedW  = shadowW + blurW;
       const float sceneW = glm::min((sceneMs / budget) * barWidth, barWidth - usedW);
       draw->AddRectFilled(
@@ -262,12 +278,20 @@ int main() {
           ImVec2(barStart.x + usedW + sceneW, barStart.y + barHeight),
           IM_COL32(66, 150, 250, 200), 4.0f);
 
-      // ImGui pass — green, stacked last
-      const float imguiW = glm::min((imguiMs / budget) * barWidth,
-                                    barWidth - usedW - sceneW);
+      // Tonemap pass — yellow, after scene
+      const float usedW2    = usedW + sceneW;
+      const float tonemapW  = glm::min((tonemapMs / budget) * barWidth, barWidth - usedW2);
       draw->AddRectFilled(
-          ImVec2(barStart.x + usedW + sceneW, barStart.y),
-          ImVec2(barStart.x + usedW + sceneW + imguiW, barStart.y + barHeight),
+          ImVec2(barStart.x + usedW2, barStart.y),
+          ImVec2(barStart.x + usedW2 + tonemapW, barStart.y + barHeight),
+          IM_COL32(230, 210, 60, 200), 4.0f);
+
+      // ImGui pass — green, stacked last
+      const float usedW3 = usedW2 + tonemapW;
+      const float imguiW = glm::min((imguiMs / budget) * barWidth, barWidth - usedW3);
+      draw->AddRectFilled(
+          ImVec2(barStart.x + usedW3, barStart.y),
+          ImVec2(barStart.x + usedW3 + imguiW, barStart.y + barHeight),
           IM_COL32(80, 200, 120, 200), 4.0f);
 
       // 100% budget marker — red vertical line at right edge
@@ -296,6 +320,11 @@ int main() {
                          ImGuiColorEditFlags_NoTooltip, ImVec2(10.0f, 10.0f));
       ImGui::SameLine();
       ImGui::Text("Scene: %.3f ms", sceneMs);
+
+      ImGui::ColorButton("##tm", ImVec4(0.90f, 0.82f, 0.23f, 1.0f),
+                         ImGuiColorEditFlags_NoTooltip, ImVec2(10.0f, 10.0f));
+      ImGui::SameLine();
+      ImGui::Text("Tonemap: %.3f ms", tonemapMs);
 
       ImGui::ColorButton("##im", ImVec4(0.31f, 0.78f, 0.47f, 1.0f),
                          ImGuiColorEditFlags_NoTooltip, ImVec2(10.0f, 10.0f));
