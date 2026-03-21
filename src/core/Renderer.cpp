@@ -2,6 +2,7 @@
 #include "core/VulkanUtil.h"
 #include "debug/ImGuiManager.h"
 #include "resource/GLTFLoader.h"
+#include "resource/SceneInfo.h"
 #include "resource/Vertex.h"
 
 #include <spdlog/spdlog.h>
@@ -80,6 +81,9 @@ Renderer::~Renderer()
 void Renderer::init()
 {
     loadModel(std::string(ASSET_DIR) + "/models/sponza/glTF/Sponza.gltf");
+    m_sceneInfo = computeSceneInfo(m_model.boundsMin, m_model.boundsMax);
+    spdlog::info("Scene normalized: scale={:.4f}, radius={:.2f}",
+                 m_sceneInfo.scaleFactor, m_sceneInfo.normalizedRadius);
     m_frameSync.init(3);
     m_commandBuffer.init(m_ctx.getGraphicsQueueFamily(), 3);
     createDepthImage();
@@ -153,6 +157,11 @@ void Renderer::reloadModel(const std::string& modelPath)
             throw;  // Unrecoverable
         }
     }
+
+    // ── Compute normalization transform for the new model ────────────────────────
+    m_sceneInfo = computeSceneInfo(m_model.boundsMin, m_model.boundsMax);
+    spdlog::info("Scene normalized: scale={:.4f}, radius={:.2f}",
+                 m_sceneInfo.scaleFactor, m_sceneInfo.normalizedRadius);
 
     // ── Recreate descriptors for the new model ───────────────────────────────────
     createDescriptorPool();
@@ -1048,10 +1057,10 @@ void Renderer::updateShadowMatrices()
 {
     const glm::vec3 lightDir = glm::normalize(m_lightDirection);
 
-    // Camera-centric: shadow map covers a fixed radius around the camera.
-    // This gives much higher shadow resolution than fitting the entire scene AABB.
-    const float shadowRadius = 30.0f;  // world units around camera to shadow
-    const float shadowDepth  = 200.0f; // how far behind + ahead of center to include
+    // Camera-centric: shadow map covers a radius proportional to the normalized scene.
+    // Phase 3.7: use normalizedRadius so these values are consistent across all models.
+    const float shadowRadius = m_sceneInfo.normalizedRadius * 3.0f;
+    const float shadowDepth  = m_sceneInfo.normalizedRadius * 20.0f;
 
     // Use camera position as shadow focus (projected onto ground if desired)
     const glm::vec3 focusPoint = m_cameraPos;
@@ -1149,6 +1158,10 @@ void Renderer::render()
     m_renderStats.drawCalls = 0;
     m_renderStats.triangles = 0;
 
+    // Phase 3.7: update shadow matrices each frame so the shadow follows the camera.
+    // Also recalculates shadowRadius/shadowDepth from m_sceneInfo.normalizedRadius.
+    updateShadowMatrices();
+
     // ── Shadow pass ───────────────────────────────────────────────────────────
     // Transition shadow map from its previous state to DEPTH_ATTACHMENT_OPTIMAL.
     // First frame layout is UNDEFINED (no previous contents to preserve).
@@ -1203,10 +1216,9 @@ void Renderer::render()
     vkCmdBindIndexBuffer(cmd, m_indexBuffer.getBuffer(), 0, VK_INDEX_TYPE_UINT32);
 
     for (const auto& meshData : m_meshRenderData) {
-        // Push model matrix (bytes 0–63). Identity for non-instanced geometry.
-        const glm::mat4 modelMatrix = glm::mat4(1.0f);
+        // Push normalization model matrix (bytes 0–63): centers + scales the model.
         vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
-                           0, sizeof(glm::mat4), &modelMatrix);
+                           0, sizeof(glm::mat4), &m_sceneInfo.modelMatrix);
         vkCmdDrawIndexed(cmd, meshData.indexCount, 1, meshData.firstIndex, 0, 0);
     }
 
@@ -1301,10 +1313,9 @@ void Renderer::render()
     vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuf, &vertexOffset);
     vkCmdBindIndexBuffer(cmd, m_indexBuffer.getBuffer(), 0, VK_INDEX_TYPE_UINT32);
 
-    // Push model matrix once — identity for the whole scene (per-instance transform in Phase 3+).
-    const glm::mat4 modelMatrix(1.0f);
+    // Push normalization model matrix (bytes 0–63): same transform as shadow pass.
     vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
-                       0, sizeof(glm::mat4), &modelMatrix);
+                       0, sizeof(glm::mat4), &m_sceneInfo.modelMatrix);
 
     for (const auto& mesh : m_meshRenderData) {
         if (mesh.materialIndex >= 0 &&

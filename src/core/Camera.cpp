@@ -61,23 +61,31 @@ glm::mat4 Camera::perspectiveReverseZ(float fovY_, float aspect, float n,
 void Camera::processKeyboard(const bool *keys) {
   velocity = glm::vec3(0);
 
-  if (keys[SDL_SCANCODE_W])
-    velocity.z -= 500000.0f; // forward  (-Z)
-  if (keys[SDL_SCANCODE_S])
-    velocity.z += 500000.0f; // backward (+Z)
-  if (keys[SDL_SCANCODE_A])
-    velocity.x -= 500000.0f; // left
-  if (keys[SDL_SCANCODE_D])
-    velocity.x += 500000.0f; // right
-  if (keys[SDL_SCANCODE_SPACE])
-    velocity.y += 500000.0f; // up
-  if (keys[SDL_SCANCODE_LCTRL])
-    velocity.y -= 500000.0f; // down
+  if (keys[SDL_SCANCODE_W])   velocity.z -= 1.0f; // forward  (-Z)
+  if (keys[SDL_SCANCODE_S])   velocity.z += 1.0f; // backward (+Z)
+  if (keys[SDL_SCANCODE_A])   velocity.x -= 1.0f; // left
+  if (keys[SDL_SCANCODE_D])   velocity.x += 1.0f; // right
+  if (keys[SDL_SCANCODE_SPACE]) velocity.y += 1.0f; // up
+  if (keys[SDL_SCANCODE_LCTRL]) velocity.y -= 1.0f; // down
 
   // Normalize to prevent diagonal movement from being faster than axis-aligned.
   if (glm::length(velocity) > 0.01f) {
     velocity = glm::normalize(velocity);
   }
+}
+
+void Camera::fitToScene(float sceneRadius) {
+  // Place the camera outside the scene, looking toward the origin with a slight downward tilt.
+  position = glm::vec3(0.0f, sceneRadius * 0.5f, sceneRadius * 2.0f);
+  yaw   = 0.0f;
+  pitch = -10.0f;
+
+  // Rebuild orientation from the new yaw/pitch immediately (same as update()).
+  glm::quat quatYaw   = glm::angleAxis(glm::radians(yaw),   glm::vec3(0, 1, 0));
+  glm::quat quatPitch = glm::angleAxis(glm::radians(pitch), glm::vec3(1, 0, 0));
+  orientation = glm::normalize(quatYaw * quatPitch);
+
+  updateViewMatrix();
 }
 
 void Camera::processMouseMovement(float xoffset, float yoffset) {

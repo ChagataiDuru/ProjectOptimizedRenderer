@@ -9,6 +9,7 @@
 #include "resource/Buffer.h"
 #include "resource/Image.h"
 #include "resource/Model.h"
+#include "resource/SceneInfo.h"
 #include "resource/Texture.h"
 #include "resource/SamplerCache.h"
 #include <glm/glm.hpp>
@@ -51,7 +52,8 @@ public:
     void setImGuiManager(ImGuiManager* mgr) { m_imguiManager = mgr; }
 
     // Read-only access for UI panels
-    const Model& getModel() const { return m_model; }
+    const Model&     getModel()     const { return m_model; }
+    const SceneInfo& getSceneInfo() const { return m_sceneInfo; }
 
     // Rendering toggles — stored here, applied when pipeline variants are added
     void setWireframeEnabled(bool enabled) { m_wireframe   = enabled; }
@@ -104,6 +106,7 @@ private:
         int32_t  materialIndex = -1;
     };
     Model                       m_model;
+    SceneInfo                   m_sceneInfo;    // Phase 3.7: normalization transform
     std::vector<MeshRenderData> m_meshRenderData;
 
     // Pipeline resources

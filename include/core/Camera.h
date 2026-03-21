@@ -14,6 +14,10 @@ public:
     void setMouseSensitivity(float sensitivity);
     void setPerspective(float fovYDegrees, float aspectRatio, float nearZ, float farZ);
 
+    // Phase 3.7: position and orient the camera to frame a normalized scene.
+    // Call after loading a model — places the camera at 2× sceneRadius, looking toward origin.
+    void fitToScene(float sceneRadius);
+
     // Update (called once per frame)
     void update(float deltaTime);
 

@@ -95,6 +95,8 @@ int main() {
     Camera camera;
     float aspectRatio = static_cast<float>(w) / static_cast<float>(h);
     camera.setPerspective(45.0f, aspectRatio, 0.01f, 1000.0f);
+    // Phase 3.7: position camera to frame the normalized scene
+    camera.fitToScene(renderer.getSceneInfo().normalizedRadius);
 
     // === Light state (live-editable via the ImGui panel) ===
     struct LightState {
@@ -278,7 +280,17 @@ int main() {
 
     // ── Properties ───────────────────────────────────────────────────────────
     imguiManager.registerPanel(ICON_FA_SLIDERS " Properties", [&]() {
-      const auto& model = renderer.getModel();
+      const auto& model     = renderer.getModel();
+      const auto& sceneInfo = renderer.getSceneInfo();
+
+      // ── Scene normalization info (always visible) ────────────────────────────
+      ImGui::Text(ICON_FA_CUBE " Scene Bounds");
+      ImGui::Separator();
+      ImGui::Text("Original: (%.1f, %.1f, %.1f)", model.boundsMin.x, model.boundsMin.y, model.boundsMin.z);
+      ImGui::Text("       to (%.1f, %.1f, %.1f)", model.boundsMax.x, model.boundsMax.y, model.boundsMax.z);
+      ImGui::Text("Scale factor:      %.4f", sceneInfo.scaleFactor);
+      ImGui::Text("Normalized radius: %.2f", sceneInfo.normalizedRadius);
+      ImGui::Spacing();
 
       if (selectedMeshIndex < 0 ||
           selectedMeshIndex >= static_cast<int>(model.meshes.size())) {
@@ -501,6 +513,7 @@ int main() {
       // ── Deferred model reload (from file dialog) ─────────────────────
       if (!pendingModelPath.empty()) {
           renderer.reloadModel(pendingModelPath);
+          camera.fitToScene(renderer.getSceneInfo().normalizedRadius);
           pendingModelPath.clear();
       }
 

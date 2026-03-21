@@ -100,6 +100,7 @@ add_executable(ProjectOptimizedRenderer
     src/resource/StbImageImpl.cpp
     src/resource/Texture.cpp
     src/resource/SamplerCache.cpp
+    src/resource/SceneInfo.cpp
     src/debug/ImGuiManager.cpp
     src/debug/GPUTimer.cpp
     src/debug/Screenshot.cpp
