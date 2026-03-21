@@ -185,6 +185,8 @@ private:
     bool m_wireframe   = false;
     bool m_showNormals = false;
 
+    glm::vec3 m_cameraPos = glm::vec3(0.0f);
+
     void createCameraUBO();
     void createLightUBO();
     void createDepthImage();

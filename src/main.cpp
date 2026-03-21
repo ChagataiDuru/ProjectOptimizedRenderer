@@ -521,6 +521,56 @@ int main() {
 
       // ── Build ImGui frame ─────────────────────────────────────────────
       imguiManager.beginFrame();
+      // ── Sun direction indicator (3D projected into viewport) ──────────
+      {
+          // Project light direction onto screen to draw a sun disc.
+          // The sun is "infinitely far away" — we project a point along the light direction
+          // from the camera position, far enough to be in front of the near plane.
+          const glm::vec3 camPos = camera.getPosition();
+          const glm::vec3 lightDir = glm::normalize(glm::vec3(
+              lightState.direction[0], lightState.direction[1], lightState.direction[2]));
+
+          // Sun position: far along the light direction from camera
+          const glm::vec3 sunWorldPos = camPos + lightDir * 500.0f;
+
+          // Project to clip space
+          const glm::vec4 clipPos = camera.getProjectionMatrix() * camera.getViewMatrix()
+                                    * glm::vec4(sunWorldPos, 1.0f);
+
+          // Only draw if sun is in front of camera (w > 0)
+          if (clipPos.w > 0.0f) {
+              const glm::vec3 ndc = glm::vec3(clipPos) / clipPos.w;
+
+              // Convert NDC [-1,1] to screen pixels
+              // Note: Vulkan NDC has Y flipped, but ImGui uses top-left origin
+              uint32_t fbW, fbH;
+              window.getExtent(fbW, fbH);
+              const float screenX = (ndc.x * 0.5f + 0.5f) * static_cast<float>(fbW);
+              const float screenY = (0.5f - ndc.y * 0.5f) * static_cast<float>(fbH);
+
+              // Draw sun disc on the foreground overlay (renders above the viewport)
+              ImDrawList* fg = ImGui::GetForegroundDrawList();
+
+              // Outer glow
+              fg->AddCircleFilled(
+                  ImVec2(screenX, screenY), 24.0f,
+                  IM_COL32(255, 220, 100, 60), 32);
+              fg->AddCircleFilled(
+                  ImVec2(screenX, screenY), 16.0f,
+                  IM_COL32(255, 220, 100, 120), 32);
+
+              // Inner bright core
+              fg->AddCircleFilled(
+                  ImVec2(screenX, screenY), 8.0f,
+                  IM_COL32(255, 255, 200, 255), 32);
+
+              // Direction label
+              fg->AddText(
+                  ImVec2(screenX + 14.0f, screenY - 8.0f),
+                  IM_COL32(255, 255, 200, 180),
+                  ICON_FA_SUN);
+          }
+      }
       imguiManager.endFrame();   // Dockspace + panel drawing + ImGui::Render()
 
       // ── Render ────────────────────────────────────────────────────────

@@ -1046,25 +1046,28 @@ void Renderer::createShadowResources()
 
 void Renderer::updateShadowMatrices()
 {
-    // Frame the entire scene AABB with a light-space ortho projection.
-    // The light's view matrix looks from above along the light direction toward the scene center.
-    const glm::vec3 sceneCenter = (m_model.boundsMin + m_model.boundsMax) * 0.5f;
-    const glm::vec3 sceneExtent = m_model.boundsMax - m_model.boundsMin;
-    const float     sceneRadius = glm::length(sceneExtent) * 0.5f;
+    const glm::vec3 lightDir = glm::normalize(m_lightDirection);
 
-    // Pull the light eye back by sceneRadius so the whole scene fits in the frustum.
-    const glm::vec3 lightEye = sceneCenter + m_lightDirection * sceneRadius;
+    // Camera-centric: shadow map covers a fixed radius around the camera.
+    // This gives much higher shadow resolution than fitting the entire scene AABB.
+    const float shadowRadius = 30.0f;  // world units around camera to shadow
+    const float shadowDepth  = 200.0f; // how far behind + ahead of center to include
 
-    // glm::lookAt builds a right-handed view matrix (Y-up, Z toward viewer).
-    const glm::mat4 lightView = glm::lookAt(lightEye, sceneCenter, glm::vec3(0.0f, 1.0f, 0.0f));
+    // Use camera position as shadow focus (projected onto ground if desired)
+    const glm::vec3 focusPoint = m_cameraPos;
 
-    // Orthographic frustum just large enough to cover the scene radius.
-    // glm::orthoRH_ZO: right-handed, Vulkan NDC Z in [0,1].
-    const glm::mat4 lightProj = glm::orthoRH_ZO(
-        -sceneRadius, sceneRadius,   // left, right
-        -sceneRadius, sceneRadius,   // bottom, top
-        0.0f, sceneRadius * 2.0f     // near, far
-    );
+    // Light eye: pull back along light direction from focus
+    const glm::vec3 lightEye = focusPoint + lightDir * (shadowDepth * 0.5f);
+
+    const glm::mat4 lightView = glm::lookAt(lightEye, focusPoint, glm::vec3(0.0f, 1.0f, 0.0f));
+
+    glm::mat4 lightProj = glm::orthoRH_ZO(
+        -shadowRadius, shadowRadius,
+        -shadowRadius, shadowRadius,
+        0.1f, shadowDepth);
+
+    // Y-flip for Vulkan coordinate system
+    lightProj[1][1] *= -1.0f;
 
     const ShadowUBO shadowUBO{ lightProj * lightView };
     m_shadowUBOBuffer.upload(&shadowUBO, sizeof(ShadowUBO));
@@ -1369,6 +1372,7 @@ void Renderer::requestScreenshot(const std::string& filename)
 void Renderer::setCameraMatrices(const glm::mat4& view, const glm::mat4& projection,
                                   const glm::vec3& cameraPos)
 {
+    m_cameraPos = cameraPos;
     const CameraUBO ubo{ view, projection, cameraPos, 0.0f };
     m_cameraUBOBuffer.upload(&ubo, sizeof(CameraUBO));
 }
