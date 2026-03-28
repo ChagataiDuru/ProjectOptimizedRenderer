@@ -11,6 +11,7 @@ layout(location = 0) in VS_OUT {
 layout(binding = 0, set = 0) uniform CameraData {
     mat4 view;
     mat4 projection;
+    mat4 inverseVP;     // inverse(projection * view) — needed by sky shader; declared here for layout match
     vec3 cameraPos;
 } camera;
 

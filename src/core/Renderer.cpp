@@ -8,6 +8,7 @@
 #include <spdlog/spdlog.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <stb_image.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -72,6 +73,7 @@ Renderer::Renderer(VulkanContext& ctx, Swapchain& swapchain)
     , m_shadowUBOBuffer(ctx)
     , m_shadowMoments(ctx)
     , m_shadowMomentsTemp(ctx)
+    , m_skyPanorama(ctx)
     , m_gpuTimer(ctx)
     , m_screenshot(ctx)
 {
@@ -94,6 +96,7 @@ void Renderer::init()
     createHdrTarget();
     createTonemapPipeline();
     createPbrPipeline();
+    createSkyPipeline();
     createShadowResources();
     createCameraUBO();
     createLightUBO();
@@ -208,6 +211,17 @@ void Renderer::shutdown()
         if (m_tonemapSetLayout      != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(dev, m_tonemapSetLayout, nullptr);   m_tonemapSetLayout      = VK_NULL_HANDLE; }
         if (m_hdrSampler            != VK_NULL_HANDLE) { vkDestroySampler(dev, m_hdrSampler, nullptr);                     m_hdrSampler            = VK_NULL_HANDLE; }
         m_hdrTarget.destroy();
+    }
+
+    // Phase 6.5: sky resources (model-independent; destroy before PBR pipeline)
+    {
+        const VkDevice dev = m_ctx.getDevice();
+        if (m_skyPipeline          != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_skyPipeline, nullptr);                      m_skyPipeline          = VK_NULL_HANDLE; }
+        if (m_skyPipelineLayout    != VK_NULL_HANDLE) { vkDestroyPipelineLayout(dev, m_skyPipelineLayout, nullptr);           m_skyPipelineLayout    = VK_NULL_HANDLE; }
+        if (m_skyPanoramaPool      != VK_NULL_HANDLE) { vkDestroyDescriptorPool(dev, m_skyPanoramaPool, nullptr);             m_skyPanoramaPool      = VK_NULL_HANDLE; m_skyPanoramaSet = VK_NULL_HANDLE; }
+        if (m_skyPanoramaSetLayout != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(dev, m_skyPanoramaSetLayout, nullptr);   m_skyPanoramaSetLayout = VK_NULL_HANDLE; }
+        if (m_skyPanoramaSampler   != VK_NULL_HANDLE) { vkDestroySampler(dev, m_skyPanoramaSampler, nullptr);                 m_skyPanoramaSampler   = VK_NULL_HANDLE; }
+        m_skyPanorama.destroy();
     }
 
     destroyPipeline();
@@ -714,7 +728,7 @@ void Renderer::createCameraUBO()
     // UBOs change every frame so device-local + staging would be needlessly expensive.
     m_cameraUBOBuffer.createHostVisible(sizeof(CameraUBO), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
 
-    const CameraUBO initial{ glm::mat4(1.0f), glm::mat4(1.0f), glm::vec3(0.0f), 0.0f };
+    const CameraUBO initial{ glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f), glm::vec3(0.0f), 0.0f };
     m_cameraUBOBuffer.upload(&initial, sizeof(CameraUBO));
 
     spdlog::info("Camera UBO created ({} bytes, host-visible)", sizeof(CameraUBO));
@@ -1002,6 +1016,287 @@ void Renderer::updateTonemapDescriptorSet()
         .pImageInfo      = &imgInfo,
     };
     vkUpdateDescriptorSets(m_ctx.getDevice(), 1, &write, 0, nullptr);
+}
+
+// ── Sky pipeline ──────────────────────────────────────────────────────────────
+
+void Renderer::createSkyPipeline()
+{
+    const VkDevice     dev = m_ctx.getDevice();
+    const std::string  dir = SHADER_DIR;
+
+    // ── Panorama descriptor set layout: 1 combined image sampler (set=1, binding=0) ──
+    const VkDescriptorSetLayoutBinding panoramaBinding{
+        .binding         = 0,
+        .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = 1,
+        .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
+    };
+    const VkDescriptorSetLayoutCreateInfo setLayoutCI{
+        .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 1,
+        .pBindings    = &panoramaBinding,
+    };
+    VK_CHECK(vkCreateDescriptorSetLayout(dev, &setLayoutCI, nullptr, &m_skyPanoramaSetLayout));
+
+    // ── Descriptor pool: 1 set ─────────────────────────────────────────────────
+    const VkDescriptorPoolSize poolSize{
+        .type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = 1,
+    };
+    const VkDescriptorPoolCreateInfo poolCI{
+        .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets       = 1,
+        .poolSizeCount = 1,
+        .pPoolSizes    = &poolSize,
+    };
+    VK_CHECK(vkCreateDescriptorPool(dev, &poolCI, nullptr, &m_skyPanoramaPool));
+
+    // ── Allocate descriptor set ────────────────────────────────────────────────
+    const VkDescriptorSetAllocateInfo allocInfo{
+        .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool     = m_skyPanoramaPool,
+        .descriptorSetCount = 1,
+        .pSetLayouts        = &m_skyPanoramaSetLayout,
+    };
+    VK_CHECK(vkAllocateDescriptorSets(dev, &allocInfo, &m_skyPanoramaSet));
+
+    // ── Panorama sampler: linear filter, clamp to edge ────────────────────────
+    const VkSamplerCreateInfo samplerCI{
+        .sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter    = VK_FILTER_LINEAR,
+        .minFilter    = VK_FILTER_LINEAR,
+        .mipmapMode   = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .maxAnisotropy = 1.0f,
+        .minLod        = 0.0f,
+        .maxLod        = 1.0f,
+    };
+    VK_CHECK(vkCreateSampler(dev, &samplerCI, nullptr, &m_skyPanoramaSampler));
+
+    // ── Bind fallback white as the initial panorama placeholder ───────────────
+    // In procedural mode the sampler is never accessed; in panorama mode the user
+    // calls loadHdrPanorama() which updates this binding to the real image.
+    {
+        const VkDescriptorImageInfo imgInfo{
+            .sampler     = m_skyPanoramaSampler,
+            .imageView   = m_fallbackWhite.getImageView(),
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        const VkWriteDescriptorSet write{
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet          = m_skyPanoramaSet,
+            .dstBinding      = 0,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo      = &imgInfo,
+        };
+        vkUpdateDescriptorSets(dev, 1, &write, 0, nullptr);
+    }
+
+    // ── Pipeline layout ────────────────────────────────────────────────────────
+    // Set 0: m_cameraSetLayout (shared with PBR — sky uses bindings 0=camera, 1=light)
+    // Set 1: m_skyPanoramaSetLayout (equirectangular HDR or dummy white)
+    // Push constant: 4 bytes (skyMode) in fragment stage only
+    const VkPushConstantRange pcRange{
+        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .offset     = 0,
+        .size       = sizeof(uint32_t),
+    };
+    const std::array<VkDescriptorSetLayout, 2> skyLayouts = {
+        m_cameraSetLayout,      // set 0
+        m_skyPanoramaSetLayout, // set 1
+    };
+    const VkPipelineLayoutCreateInfo layoutCI{
+        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount         = static_cast<uint32_t>(skyLayouts.size()),
+        .pSetLayouts            = skyLayouts.data(),
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges    = &pcRange,
+    };
+    VK_CHECK(vkCreatePipelineLayout(dev, &layoutCI, nullptr, &m_skyPipelineLayout));
+
+    // ── Shader modules ─────────────────────────────────────────────────────────
+    VkShaderModule vertMod = makeShaderModule(dev, loadSpv(dir + "/sky.vert.spv"));
+    VkShaderModule fragMod = makeShaderModule(dev, loadSpv(dir + "/sky.frag.spv"));
+
+    const std::array<VkPipelineShaderStageCreateInfo, 2> stages{{
+        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_VERTEX_BIT,   .module = vertMod, .pName = "main" },
+        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fragMod, .pName = "main" },
+    }};
+
+    // No vertex input — fullscreen triangle from gl_VertexIndex
+    const VkPipelineVertexInputStateCreateInfo vertexInput{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+    };
+    const VkPipelineInputAssemblyStateCreateInfo inputAssembly{
+        .sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+    };
+    const VkPipelineViewportStateCreateInfo viewportState{
+        .sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1,
+        .scissorCount  = 1,
+    };
+    const VkPipelineRasterizationStateCreateInfo rasterization{
+        .sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .cullMode    = VK_CULL_MODE_NONE,
+        .frontFace   = VK_FRONT_FACE_CLOCKWISE,
+        .lineWidth   = 1.0f,
+    };
+    const VkPipelineMultisampleStateCreateInfo multisample{
+        .sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+    };
+    // Reverse-Z: sky at z=0 (far plane). GREATER_OR_EQUAL passes the cleared value (0.0 ≥ 0.0).
+    // Write depth=0 so geometry (GREATER at z>0) can overwrite sky on covered pixels.
+    const VkPipelineDepthStencilStateCreateInfo depthStencil{
+        .sType             = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable   = VK_TRUE,
+        .depthWriteEnable  = VK_TRUE,
+        .depthCompareOp    = VK_COMPARE_OP_GREATER_OR_EQUAL,
+    };
+    const VkPipelineColorBlendAttachmentState blendAtt{
+        .blendEnable    = VK_FALSE,
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+    const VkPipelineColorBlendStateCreateInfo colorBlend{
+        .sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .attachmentCount = 1,
+        .pAttachments    = &blendAtt,
+    };
+    const std::array<VkDynamicState, 2> dynStates = {
+        VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    const VkPipelineDynamicStateCreateInfo dynamicState{
+        .sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .dynamicStateCount = static_cast<uint32_t>(dynStates.size()),
+        .pDynamicStates    = dynStates.data(),
+    };
+
+    // Sky renders into the same HDR offscreen target as the PBR scene pass
+    const VkFormat colorFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+    const VkPipelineRenderingCreateInfo renderingCI{
+        .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .colorAttachmentCount    = 1,
+        .pColorAttachmentFormats = &colorFormat,
+        .depthAttachmentFormat   = VK_FORMAT_D32_SFLOAT,
+    };
+
+    const VkGraphicsPipelineCreateInfo pipelineCI{
+        .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .pNext               = &renderingCI,
+        .stageCount          = static_cast<uint32_t>(stages.size()),
+        .pStages             = stages.data(),
+        .pVertexInputState   = &vertexInput,
+        .pInputAssemblyState = &inputAssembly,
+        .pViewportState      = &viewportState,
+        .pRasterizationState = &rasterization,
+        .pMultisampleState   = &multisample,
+        .pDepthStencilState  = &depthStencil,
+        .pColorBlendState    = &colorBlend,
+        .pDynamicState       = &dynamicState,
+        .layout              = m_skyPipelineLayout,
+        .renderPass          = VK_NULL_HANDLE,
+    };
+    VK_CHECK(vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &pipelineCI, nullptr,
+                                       &m_skyPipeline));
+
+    vkDestroyShaderModule(dev, vertMod, nullptr);
+    vkDestroyShaderModule(dev, fragMod, nullptr);
+
+    spdlog::info("Sky pipeline created (procedural Rayleigh+Mie + HDR equirectangular panorama)");
+}
+
+// ── Sky HDR panorama loader ────────────────────────────────────────────────────
+
+void Renderer::loadHdrPanorama(const std::string& path)
+{
+    // Drain GPU before modifying the descriptor
+    vkDeviceWaitIdle(m_ctx.getDevice());
+
+    // Load float RGBA data from an equirectangular .hdr file
+    int   w = 0, h = 0, channels = 0;
+    float* pixels = stbi_loadf(path.c_str(), &w, &h, &channels, 4);
+    if (!pixels) {
+        spdlog::error("HDR panorama load failed '{}': {}", path, stbi_failure_reason());
+        return;
+    }
+
+    const VkDeviceSize dataSize = static_cast<VkDeviceSize>(w) * h * 4 * sizeof(float);
+
+    // One-shot command buffer for the GPU upload
+    const VkCommandPoolCreateInfo poolCI{
+        .sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+        .queueFamilyIndex = m_ctx.getGraphicsQueueFamily(),
+    };
+    VkCommandPool uploadPool;
+    VK_CHECK(vkCreateCommandPool(m_ctx.getDevice(), &poolCI, nullptr, &uploadPool));
+
+    const VkCommandBufferAllocateInfo allocInfo{
+        .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool        = uploadPool,
+        .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+    VkCommandBuffer cmd;
+    VK_CHECK(vkAllocateCommandBuffers(m_ctx.getDevice(), &allocInfo, &cmd));
+
+    const VkCommandBufferBeginInfo beginInfo{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+    VK_CHECK(vkBeginCommandBuffer(cmd, &beginInfo));
+
+    // Destroy previous panorama image (if any) and create the new one
+    m_skyPanorama.destroy();
+    m_skyPanorama.createFromData(static_cast<uint32_t>(w), static_cast<uint32_t>(h),
+                                  VK_FORMAT_R32G32B32A32_SFLOAT, pixels, dataSize, cmd);
+
+    // Staging buffer holds the data — safe to free host pixels now
+    stbi_image_free(pixels);
+
+    VK_CHECK(vkEndCommandBuffer(cmd));
+
+    VkFence fence;
+    const VkFenceCreateInfo fenceCI{ .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    VK_CHECK(vkCreateFence(m_ctx.getDevice(), &fenceCI, nullptr, &fence));
+
+    const VkSubmitInfo submitInfo{
+        .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers    = &cmd,
+    };
+    VK_CHECK(vkQueueSubmit(m_ctx.getGraphicsQueue(), 1, &submitInfo, fence));
+    VK_CHECK(vkWaitForFences(m_ctx.getDevice(), 1, &fence, VK_TRUE, UINT64_MAX));
+
+    m_skyPanorama.releaseStaging();
+    vkDestroyFence(m_ctx.getDevice(), fence, nullptr);
+    vkDestroyCommandPool(m_ctx.getDevice(), uploadPool, nullptr);
+
+    // Point the panorama descriptor at the newly uploaded image
+    const VkDescriptorImageInfo imgInfo{
+        .sampler     = m_skyPanoramaSampler,
+        .imageView   = m_skyPanorama.getImageView(),
+        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
+    const VkWriteDescriptorSet write{
+        .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet          = m_skyPanoramaSet,
+        .dstBinding      = 0,
+        .descriptorCount = 1,
+        .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .pImageInfo      = &imgInfo,
+    };
+    vkUpdateDescriptorSets(m_ctx.getDevice(), 1, &write, 0, nullptr);
+
+    spdlog::info("HDR panorama loaded: {}×{} from '{}'", w, h, path);
 }
 
 void Renderer::createDescriptorPool()
@@ -2045,13 +2340,7 @@ void Renderer::render()
 
     vkCmdBeginRendering(cmd, &renderingInfo);
 
-    VkPipeline activePipeline = m_pipeline;
-    if (m_showNormals)
-        activePipeline = m_normalsPipeline;
-    else if (m_wireframe)
-        activePipeline = m_wireframePipeline;
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activePipeline);
-
+    // Viewport and scissor are shared by sky and PBR geometry passes
     const VkExtent2D ext = m_swapchain.getExtent();
     const VkViewport viewport{
         .x        = 0.0f,
@@ -2065,6 +2354,31 @@ void Renderer::render()
 
     const VkRect2D scissor{ .offset = { 0, 0 }, .extent = ext };
     vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    // ── Sky pass: fullscreen triangle at reverse-Z far plane (z = 0) ─────────
+    // GREATER_OR_EQUAL depth: passes where depth == 0.0 (clear value, no geometry yet).
+    // Drawn first — PBR geometry (GREATER at z > 0) overwrites sky on covered pixels.
+    if (m_skyEnabled && m_skyPipeline != VK_NULL_HANDLE) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyPipeline);
+        // Set 0: camera + light UBOs (same descriptor set used by PBR)
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyPipelineLayout,
+                                0, 1, &m_descriptorSet, 0, nullptr);
+        // Set 1: equirectangular panorama (fallback white in procedural mode)
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyPipelineLayout,
+                                1, 1, &m_skyPanoramaSet, 0, nullptr);
+        const uint32_t skyMode = static_cast<uint32_t>(m_skyMode);
+        vkCmdPushConstants(cmd, m_skyPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(uint32_t), &skyMode);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+    }
+
+    // ── PBR geometry pass ─────────────────────────────────────────────────────
+    VkPipeline activePipeline = m_pipeline;
+    if (m_showNormals)
+        activePipeline = m_normalsPipeline;
+    else if (m_wireframe)
+        activePipeline = m_wireframePipeline;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activePipeline);
 
     // Bind camera UBO descriptor set (set=0, binding=0 — view/projection matrices)
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout,
@@ -2217,7 +2531,8 @@ void Renderer::setCameraMatrices(const glm::mat4& view, const glm::mat4& project
     m_cameraPos  = cameraPos;
     m_viewMatrix = view;
     m_projMatrix = projection;
-    const CameraUBO ubo{ view, projection, cameraPos, 0.0f };
+    // inverseVP used by sky.vert to reconstruct world-space ray directions from clip space.
+    const CameraUBO ubo{ view, projection, glm::inverse(projection * view), cameraPos, 0.0f };
     m_cameraUBOBuffer.upload(&ubo, sizeof(CameraUBO));
 }
 

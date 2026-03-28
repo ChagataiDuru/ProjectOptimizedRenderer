@@ -93,6 +93,13 @@ public:
         m_splitRightMode   = splitRightMode;
     }
 
+    // Phase 6.5: sky controls
+    void setSkyEnabled(bool enabled)     { m_skyEnabled = enabled; }
+    bool isSkyEnabled()     const        { return m_skyEnabled; }
+    void setSkyMode(int32_t mode)        { m_skyMode = mode; }
+    int32_t getSkyMode()    const        { return m_skyMode; }
+    void loadHdrPanorama(const std::string& path);
+
     // Phase 2.6: render statistics — populated each frame in render()
     struct RenderStats {
         uint32_t drawCalls          = 0;
@@ -162,12 +169,14 @@ private:
     };
 
     // Camera UBO (host-visible, updated every frame)
+    // Phase 6.5: added inverseVP between projection and cameraPos for sky ray reconstruction.
     struct CameraUBO {
         glm::mat4 view;
         glm::mat4 projection;
+        glm::mat4 inverseVP;    // inverse(projection * view) — sky shader needs this
         glm::vec3 cameraPos;
-        float     _pad = 0.0f;  // std140: vec3 pads to 16 bytes
-    };
+        float     _pad = 0.0f;  // std140: vec3 rounds up to 16 bytes
+    };  // 208 bytes (was 144)
 
     // Directional light UBO (host-visible, std140: 48 bytes = 3×vec4)
     struct LightUBO {
@@ -268,6 +277,18 @@ private:
     float   m_pcfSpreadRadius     = 2.0f; // PCF sample spread in texels
     float   m_vsmBleedReduction   = 0.2f; // VSM light bleeding reduction
 
+    // Phase 6.5: sky pipeline resources
+    Image                 m_skyPanorama;                               // HDR equirectangular (optional)
+    VkSampler             m_skyPanoramaSampler    = VK_NULL_HANDLE;   // linear clamp
+    VkDescriptorSetLayout m_skyPanoramaSetLayout  = VK_NULL_HANDLE;
+    VkDescriptorPool      m_skyPanoramaPool       = VK_NULL_HANDLE;
+    VkDescriptorSet       m_skyPanoramaSet        = VK_NULL_HANDLE;   // set 1: panorama
+    VkPipelineLayout      m_skyPipelineLayout     = VK_NULL_HANDLE;
+    VkPipeline            m_skyPipeline           = VK_NULL_HANDLE;
+
+    bool    m_skyEnabled = true;   // sky drawn by default
+    int32_t m_skyMode    = 0;      // 0 = Procedural (Rayleigh+Mie),  1 = HDR Panorama
+
     bool        m_screenshotRequested = false;
     std::string m_screenshotFilename;
 
@@ -277,6 +298,7 @@ private:
 
     glm::vec3 m_cameraPos = glm::vec3(0.0f);
 
+    void createSkyPipeline();
     void createCameraUBO();
     void createLightUBO();
     void uploadLightUBO();   // re-upload m_lightUBOBuffer from stored params

@@ -68,6 +68,9 @@ int main() {
     // === Pending model load (set by file dialog callback, consumed by render loop) ===
     std::string pendingModelPath;
 
+    // === Pending HDR panorama load (Phase 6.5) ===
+    std::string pendingPanoramaPath;
+
     imguiManager.setOpenModelCallback([&]() {
         // SDL3 native file dialog — async with callback.
         // Filter for glTF files (.gltf and .glb).
@@ -199,6 +202,42 @@ int main() {
           renderer.setVsmBleedReduction(vsmBleedReduction);
         }
         ImGui::TextDisabled("Higher = less bleeding, harder edges");
+      }
+
+      ImGui::Separator();
+      ImGui::Text(ICON_FA_CLOUD " Sky");
+
+      bool skyEnabled = renderer.isSkyEnabled();
+      if (ImGui::Checkbox("Enable Sky", &skyEnabled))
+        renderer.setSkyEnabled(skyEnabled);
+
+      if (skyEnabled) {
+        const char* skyModeNames[] = { "Procedural (Rayleigh+Mie)", "HDR Panorama" };
+        int skyMode = renderer.getSkyMode();
+        if (ImGui::Combo("Sky Mode", &skyMode, skyModeNames, 2))
+          renderer.setSkyMode(skyMode);
+
+        if (skyMode == 1) {
+          if (ImGui::Button("Load HDR Panorama...")) {
+            static const SDL_DialogFileFilter hdrFilters[] = {
+                { "HDR images",  "hdr" },
+                { "All files",   "*"   },
+            };
+            SDL_ShowOpenFileDialog(
+                [](void* userdata, const char* const* filelist, int /*filter*/) {
+                    if (filelist && filelist[0])
+                        *static_cast<std::string*>(userdata) = filelist[0];
+                },
+                &pendingPanoramaPath,
+                static_cast<SDL_Window*>(window.getHandle()),
+                hdrFilters,
+                static_cast<int>(std::size(hdrFilters)),
+                nullptr,  // default directory
+                false     // single file
+            );
+          }
+          ImGui::TextDisabled("Expects an equirectangular .hdr file");
+        }
       }
     }, DockLocation::Right);
 
@@ -623,6 +662,12 @@ int main() {
           renderer.reloadModel(pendingModelPath);
           camera.fitToScene(renderer.getSceneInfo().normalizedRadius);
           pendingModelPath.clear();
+      }
+
+      // ── Deferred HDR panorama load (Phase 6.5) ───────────────────────
+      if (!pendingPanoramaPath.empty()) {
+          renderer.loadHdrPanorama(pendingPanoramaPath);
+          pendingPanoramaPath.clear();
       }
 
       // ── Sync rendering toggles to renderer ────────────────────────────

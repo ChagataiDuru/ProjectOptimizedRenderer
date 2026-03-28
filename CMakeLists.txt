@@ -239,6 +239,16 @@ shader_compile_glsl(
     SOURCE "${CMAKE_SOURCE_DIR}/shaders/tonemap.frag"
     OUTPUT "tonemap.frag.spv"
 )
+shader_compile_glsl(
+    TARGET ProjectOptimizedRenderer
+    SOURCE "${CMAKE_SOURCE_DIR}/shaders/sky.vert"
+    OUTPUT "sky.vert.spv"
+)
+shader_compile_glsl(
+    TARGET ProjectOptimizedRenderer
+    SOURCE "${CMAKE_SOURCE_DIR}/shaders/sky.frag"
+    OUTPUT "sky.frag.spv"
+)
 
 target_link_libraries(ProjectOptimizedRenderer PRIVATE
     volk::volk

@@ -15,6 +15,7 @@ layout(push_constant) uniform PushConstants {
 layout(binding = 0, set = 0) uniform CameraData {
     mat4 view;
     mat4 projection;
+    mat4 inverseVP;     // inverse(projection * view) — used by sky shader; declared here for layout compatibility
     vec3 cameraPos;     // World-space camera position
 } camera;
 
