@@ -1,4 +1,5 @@
 #include "resource/Image.h"
+#include "core/VulkanUtil.h"
 
 #include <spdlog/spdlog.h>
 #include <cstring>
@@ -213,26 +214,11 @@ void Image::transitionLayout(VkCommandBuffer cmd,
 {
     auto [srcStage, srcAccess] = layoutToStageAccess(oldLayout);
     auto [dstStage, dstAccess] = layoutToStageAccess(newLayout);
-
-    const VkImageMemoryBarrier2 barrier{
-        .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .srcStageMask        = srcStage,
-        .srcAccessMask       = srcAccess,
-        .dstStageMask        = dstStage,
-        .dstAccessMask       = dstAccess,
-        .oldLayout           = oldLayout,
-        .newLayout           = newLayout,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image               = m_image,
-        .subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
-    };
-    const VkDependencyInfo dep{
-        .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .imageMemoryBarrierCount = 1,
-        .pImageMemoryBarriers    = &barrier,
-    };
-    vkCmdPipelineBarrier2(cmd, &dep);
+    vkutil::transitionImage(cmd, m_image,
+                            srcStage, srcAccess,
+                            dstStage, dstAccess,
+                            oldLayout, newLayout,
+                            VK_IMAGE_ASPECT_COLOR_BIT);
 }
 
 // ── Cleanup ───────────────────────────────────────────────────────────────────
@@ -248,11 +234,7 @@ void Image::releaseStaging()
 
 void Image::destroy()
 {
-    if (m_stagingBuffer != VK_NULL_HANDLE) {
-        vmaDestroyBuffer(m_ctx.getAllocator(), m_stagingBuffer, m_stagingAlloc);
-        m_stagingBuffer = VK_NULL_HANDLE;
-        m_stagingAlloc  = nullptr;
-    }
+    releaseStaging();
     if (m_imageView != VK_NULL_HANDLE) {
         vkDestroyImageView(m_ctx.getDevice(), m_imageView, nullptr);
         m_imageView = VK_NULL_HANDLE;

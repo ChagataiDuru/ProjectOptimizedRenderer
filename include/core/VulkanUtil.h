@@ -17,4 +17,11 @@ void transitionImage(
     VkImageLayout         oldLayout, VkImageLayout  newLayout,
     VkImageAspectFlags    aspectMask = VK_IMAGE_ASPECT_COLOR_BIT);
 
+/// Allocate and begin a one-time primary command buffer from a transient pool.
+/// Returns the begun command buffer and writes the owning pool into outPool.
+VkCommandBuffer beginSingleUseCommands(VulkanContext& ctx, VkCommandPool& outPool);
+
+/// End, submit, wait, and destroy a one-time command buffer created by beginSingleUseCommands().
+void endSingleUseCommands(VulkanContext& ctx, VkCommandPool pool, VkCommandBuffer cmd);
+
 } // namespace vkutil

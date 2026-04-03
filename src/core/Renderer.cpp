@@ -54,6 +54,190 @@ static VkShaderModule makeShaderModule(VkDevice device, const std::vector<uint32
     return mod;
 }
 
+struct SingleSamplerDescriptorResources {
+    VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+    VkDescriptorPool      pool   = VK_NULL_HANDLE;
+    VkDescriptorSet       set    = VK_NULL_HANDLE;
+};
+
+static SingleSamplerDescriptorResources createSingleSamplerDescriptorResources(
+    VkDevice dev, VkShaderStageFlags stageFlags)
+{
+    const VkDescriptorSetLayoutBinding binding{
+        .binding         = 0,
+        .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = 1,
+        .stageFlags      = stageFlags,
+    };
+    const VkDescriptorSetLayoutCreateInfo setLayoutCI{
+        .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 1,
+        .pBindings    = &binding,
+    };
+
+    SingleSamplerDescriptorResources out{};
+    VK_CHECK(vkCreateDescriptorSetLayout(dev, &setLayoutCI, nullptr, &out.layout));
+
+    const VkDescriptorPoolSize poolSize{
+        .type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = 1,
+    };
+    const VkDescriptorPoolCreateInfo poolCI{
+        .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets       = 1,
+        .poolSizeCount = 1,
+        .pPoolSizes    = &poolSize,
+    };
+    VK_CHECK(vkCreateDescriptorPool(dev, &poolCI, nullptr, &out.pool));
+
+    const VkDescriptorSetAllocateInfo allocInfo{
+        .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool     = out.pool,
+        .descriptorSetCount = 1,
+        .pSetLayouts        = &out.layout,
+    };
+    VK_CHECK(vkAllocateDescriptorSets(dev, &allocInfo, &out.set));
+    return out;
+}
+
+static void writeCombinedImageSamplerDescriptor(
+    VkDevice dev,
+    VkDescriptorSet set,
+    uint32_t binding,
+    VkSampler sampler,
+    VkImageView imageView,
+    VkImageLayout imageLayout)
+{
+    const VkDescriptorImageInfo imgInfo{
+        .sampler     = sampler,
+        .imageView   = imageView,
+        .imageLayout = imageLayout,
+    };
+    const VkWriteDescriptorSet write{
+        .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet          = set,
+        .dstBinding      = binding,
+        .descriptorCount = 1,
+        .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .pImageInfo      = &imgInfo,
+    };
+    vkUpdateDescriptorSets(dev, 1, &write, 0, nullptr);
+}
+
+static VkGraphicsPipelineCreateInfo makeGraphicsPipelineCreateInfo(
+    const VkPipelineRenderingCreateInfo& renderingInfo,
+    const VkPipelineShaderStageCreateInfo* stages,
+    uint32_t stageCount,
+    const VkPipelineVertexInputStateCreateInfo& vertexInput,
+    const VkPipelineInputAssemblyStateCreateInfo& inputAssembly,
+    const VkPipelineViewportStateCreateInfo& viewportState,
+    const VkPipelineRasterizationStateCreateInfo& rasterization,
+    const VkPipelineMultisampleStateCreateInfo& multisample,
+    const VkPipelineDepthStencilStateCreateInfo& depthStencil,
+    const VkPipelineColorBlendStateCreateInfo& colorBlend,
+    const VkPipelineDynamicStateCreateInfo& dynamicState,
+    VkPipelineLayout layout)
+{
+    return VkGraphicsPipelineCreateInfo{
+        .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .pNext               = &renderingInfo,
+        .stageCount          = stageCount,
+        .pStages             = stages,
+        .pVertexInputState   = &vertexInput,
+        .pInputAssemblyState = &inputAssembly,
+        .pViewportState      = &viewportState,
+        .pRasterizationState = &rasterization,
+        .pMultisampleState   = &multisample,
+        .pDepthStencilState  = &depthStencil,
+        .pColorBlendState    = &colorBlend,
+        .pDynamicState       = &dynamicState,
+        .layout              = layout,
+        .renderPass          = VK_NULL_HANDLE,
+    };
+}
+
+struct FullscreenPipelineConfig {
+    VkPipelineLayout                     layout      = VK_NULL_HANDLE;
+    VkFormat                             colorFormat = VK_FORMAT_UNDEFINED;
+    VkFormat                             depthFormat = VK_FORMAT_UNDEFINED;
+    VkPipelineDepthStencilStateCreateInfo depthStencil{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+    };
+};
+
+static VkPipeline createFullscreenPipeline(
+    VkDevice dev,
+    const std::array<VkPipelineShaderStageCreateInfo, 2>& stages,
+    const FullscreenPipelineConfig& cfg)
+{
+    const VkPipelineVertexInputStateCreateInfo vertexInput{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+    };
+    const VkPipelineInputAssemblyStateCreateInfo inputAssembly{
+        .sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+    };
+    const VkPipelineViewportStateCreateInfo viewportState{
+        .sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1,
+        .scissorCount  = 1,
+    };
+    const VkPipelineRasterizationStateCreateInfo rasterization{
+        .sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .cullMode    = VK_CULL_MODE_NONE,
+        .frontFace   = VK_FRONT_FACE_CLOCKWISE,
+        .lineWidth   = 1.0f,
+    };
+    const VkPipelineMultisampleStateCreateInfo multisample{
+        .sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+    };
+    const VkPipelineColorBlendAttachmentState blendAtt{
+        .blendEnable    = VK_FALSE,
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+    const VkPipelineColorBlendStateCreateInfo colorBlend{
+        .sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .attachmentCount = 1,
+        .pAttachments    = &blendAtt,
+    };
+    const std::array<VkDynamicState, 2> dynStates = {
+        VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    const VkPipelineDynamicStateCreateInfo dynamicState{
+        .sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .dynamicStateCount = static_cast<uint32_t>(dynStates.size()),
+        .pDynamicStates    = dynStates.data(),
+    };
+
+    const VkPipelineRenderingCreateInfo renderingInfo{
+        .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .colorAttachmentCount    = 1,
+        .pColorAttachmentFormats = &cfg.colorFormat,
+        .depthAttachmentFormat   = cfg.depthFormat,
+        .stencilAttachmentFormat = VK_FORMAT_UNDEFINED,
+    };
+
+    const VkGraphicsPipelineCreateInfo pipelineCI = makeGraphicsPipelineCreateInfo(
+        renderingInfo,
+        stages.data(),
+        static_cast<uint32_t>(stages.size()),
+        vertexInput,
+        inputAssembly,
+        viewportState,
+        rasterization,
+        multisample,
+        cfg.depthStencil,
+        colorBlend,
+        dynamicState,
+        cfg.layout);
+
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VK_CHECK(vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &pipelineCI, nullptr, &pipeline));
+    return pipeline;
+}
+
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 Renderer::Renderer(VulkanContext& ctx, Swapchain& swapchain)
@@ -106,17 +290,7 @@ void Renderer::init()
     m_gpuTimer.init(16);
 
     // Populate static render stats (counts that don't change after load)
-    m_renderStats.meshCount     = static_cast<uint32_t>(m_meshRenderData.size());
-    m_renderStats.materialCount = static_cast<uint32_t>(m_model.materials.size());
-    m_renderStats.textureCount  = static_cast<uint32_t>(m_textures.size());
-    m_renderStats.textureMemoryBytes = 0;
-    for (const auto& tex : m_textures) {
-        if (tex.isValid()) {
-            const VkExtent3D ext = tex.getExtent();
-            // Each texel is 4 bytes (RGBA8); depth = 1 for 2D textures.
-            m_renderStats.textureMemoryBytes += static_cast<size_t>(ext.width) * ext.height * 4;
-        }
-    }
+    refreshRenderStats();
 
     spdlog::info("Renderer initialized: {} meshes, {} materials, {} textures ({:.1f} MB GPU tex)",
                  m_renderStats.meshCount, m_renderStats.materialCount,
@@ -178,16 +352,7 @@ void Renderer::reloadModel(const std::string& modelPath)
     createMaterialDescriptorSets();
 
     // ── Update render stats ──────────────────────────────────────────────────────
-    m_renderStats.meshCount     = static_cast<uint32_t>(m_meshRenderData.size());
-    m_renderStats.materialCount = static_cast<uint32_t>(m_model.materials.size());
-    m_renderStats.textureCount  = static_cast<uint32_t>(m_textures.size());
-    m_renderStats.textureMemoryBytes = 0;
-    for (const auto& tex : m_textures) {
-        if (tex.isValid()) {
-            const VkExtent3D ext = tex.getExtent();
-            m_renderStats.textureMemoryBytes += static_cast<size_t>(ext.width) * ext.height * 4;
-        }
-    }
+    refreshRenderStats();
 
     spdlog::info("Model reloaded: {} meshes, {} materials, {} textures ({:.1f} MB GPU tex)",
                  m_renderStats.meshCount, m_renderStats.materialCount,
@@ -301,6 +466,21 @@ void Renderer::shutdown()
     m_frameSync.shutdown();
 }
 
+void Renderer::refreshRenderStats()
+{
+    m_renderStats.meshCount          = static_cast<uint32_t>(m_meshRenderData.size());
+    m_renderStats.materialCount      = static_cast<uint32_t>(m_model.materials.size());
+    m_renderStats.textureCount       = static_cast<uint32_t>(m_textures.size());
+    m_renderStats.textureMemoryBytes = 0;
+    for (const auto& tex : m_textures) {
+        if (tex.isValid()) {
+            const VkExtent3D ext = tex.getExtent();
+            // Each texel is 4 bytes (RGBA8); depth = 1 for 2D textures.
+            m_renderStats.textureMemoryBytes += static_cast<size_t>(ext.width) * ext.height * 4;
+        }
+    }
+}
+
 // ── Geometry ──────────────────────────────────────────────────────────────────
 
 void Renderer::loadModel(const std::string& modelPath)
@@ -338,28 +518,8 @@ void Renderer::loadModel(const std::string& modelPath)
     m_indexBuffer.createDeviceLocal(idxSize,   VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
 
     // Staged upload: use a dedicated transient pool so frame command buffers are not disturbed.
-    const VkCommandPoolCreateInfo poolCI{
-        .sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-        .flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
-        .queueFamilyIndex = m_ctx.getGraphicsQueueFamily(),
-    };
-    VkCommandPool transferPool;
-    VK_CHECK(vkCreateCommandPool(m_ctx.getDevice(), &poolCI, nullptr, &transferPool));
-
-    const VkCommandBufferAllocateInfo allocInfo{
-        .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        .commandPool        = transferPool,
-        .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = 1,
-    };
-    VkCommandBuffer transferCmd;
-    VK_CHECK(vkAllocateCommandBuffers(m_ctx.getDevice(), &allocInfo, &transferCmd));
-
-    const VkCommandBufferBeginInfo beginInfo{
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-    };
-    VK_CHECK(vkBeginCommandBuffer(transferCmd, &beginInfo));
+    VkCommandPool   transferPool = VK_NULL_HANDLE;
+    VkCommandBuffer transferCmd  = vkutil::beginSingleUseCommands(m_ctx, transferPool);
 
     m_vertexBuffer.uploadStaged(allVertices.data(), vertSize, transferCmd);
     m_indexBuffer.uploadStaged(allIndices.data(),   idxSize,  transferCmd);
@@ -392,28 +552,13 @@ void Renderer::loadModel(const std::string& modelPath)
         }
     }
 
-    VK_CHECK(vkEndCommandBuffer(transferCmd));
-
-    VkFence fence;
-    const VkFenceCreateInfo fenceCI{ .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
-    VK_CHECK(vkCreateFence(m_ctx.getDevice(), &fenceCI, nullptr, &fence));
-
-    const VkSubmitInfo submitInfo{
-        .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        .commandBufferCount = 1,
-        .pCommandBuffers    = &transferCmd,
-    };
-    VK_CHECK(vkQueueSubmit(m_ctx.getGraphicsQueue(), 1, &submitInfo, fence));
-    VK_CHECK(vkWaitForFences(m_ctx.getDevice(), 1, &fence, VK_TRUE, UINT64_MAX));
+    vkutil::endSingleUseCommands(m_ctx, transferPool, transferCmd);
 
     m_vertexBuffer.releaseStaging();
     m_indexBuffer.releaseStaging();
     m_fallbackWhite.releaseStaging();
     for (auto& tex : m_textures)
         tex.releaseStaging();
-
-    vkDestroyFence(m_ctx.getDevice(), fence, nullptr);
-    vkDestroyCommandPool(m_ctx.getDevice(), transferPool, nullptr);
 
     spdlog::info("Model uploaded: {} meshes, {} vertices, {} indices",
                  m_model.meshes.size(), allVertices.size(), allIndices.size());
@@ -651,22 +796,19 @@ void Renderer::createPbrPipeline()
     VkPipelineRasterizationStateCreateInfo wireframeRasterization = rasterization;
     wireframeRasterization.polygonMode = VK_POLYGON_MODE_LINE;
 
-    const VkGraphicsPipelineCreateInfo pipelineInfo{
-        .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        .pNext               = &renderingInfo,
-        .stageCount          = static_cast<uint32_t>(stages.size()),
-        .pStages             = stages.data(),
-        .pVertexInputState   = &vertexInput,
-        .pInputAssemblyState = &inputAssembly,
-        .pViewportState      = &viewportState,
-        .pRasterizationState = &rasterization,
-        .pMultisampleState   = &multisample,
-        .pDepthStencilState  = &depthStencil,
-        .pColorBlendState    = &colorBlend,
-        .pDynamicState       = &dynamicState,
-        .layout              = m_pipelineLayout,
-        .renderPass          = VK_NULL_HANDLE,  // Dynamic rendering: no render pass object
-    };
+    const VkGraphicsPipelineCreateInfo pipelineInfo = makeGraphicsPipelineCreateInfo(
+        renderingInfo,
+        stages.data(),
+        static_cast<uint32_t>(stages.size()),
+        vertexInput,
+        inputAssembly,
+        viewportState,
+        rasterization,
+        multisample,
+        depthStencil,
+        colorBlend,
+        dynamicState,
+        m_pipelineLayout);
 
     VkGraphicsPipelineCreateInfo wireframePipelineInfo = pipelineInfo;
     wireframePipelineInfo.pRasterizationState = &wireframeRasterization;
@@ -852,43 +994,14 @@ void Renderer::createTonemapPipeline()
     const VkDevice dev = m_ctx.getDevice();
     const std::string dir = SHADER_DIR;
 
-    // ── Descriptor set layout: one combined image sampler (HDR input) ─────────
-    const VkDescriptorSetLayoutBinding binding{
-        .binding         = 0,
-        .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .descriptorCount = 1,
-        .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
-    };
-    const VkDescriptorSetLayoutCreateInfo setLayoutCI{
-        .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 1,
-        .pBindings    = &binding,
-    };
-    VK_CHECK(vkCreateDescriptorSetLayout(dev, &setLayoutCI, nullptr, &m_tonemapSetLayout));
+    // Descriptor resources: one combined image sampler (HDR input).
+    const SingleSamplerDescriptorResources tonemapDesc =
+        createSingleSamplerDescriptorResources(dev, VK_SHADER_STAGE_FRAGMENT_BIT);
+    m_tonemapSetLayout = tonemapDesc.layout;
+    m_tonemapPool      = tonemapDesc.pool;
+    m_tonemapSet       = tonemapDesc.set;
 
-    // ── Descriptor pool: 1 set, 1 sampler ─────────────────────────────────────
-    const VkDescriptorPoolSize poolSize{
-        .type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .descriptorCount = 1,
-    };
-    const VkDescriptorPoolCreateInfo poolCI{
-        .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets       = 1,
-        .poolSizeCount = 1,
-        .pPoolSizes    = &poolSize,
-    };
-    VK_CHECK(vkCreateDescriptorPool(dev, &poolCI, nullptr, &m_tonemapPool));
-
-    // ── Allocate descriptor set ────────────────────────────────────────────────
-    const VkDescriptorSetAllocateInfo allocInfo{
-        .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-        .descriptorPool     = m_tonemapPool,
-        .descriptorSetCount = 1,
-        .pSetLayouts        = &m_tonemapSetLayout,
-    };
-    VK_CHECK(vkAllocateDescriptorSets(dev, &allocInfo, &m_tonemapSet));
-
-    // ── Push constant: TonemapPC (16 bytes: mode + exposure + splitScreenMode + splitRightMode) ──
+    // Push constant: TonemapPC (16 bytes: mode + exposure + splitScreenMode + splitRightMode)
     const VkPushConstantRange pcRange{
         .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
         .offset     = 0,
@@ -903,7 +1016,6 @@ void Renderer::createTonemapPipeline()
     };
     VK_CHECK(vkCreatePipelineLayout(dev, &layoutCI, nullptr, &m_tonemapPipelineLayout));
 
-    // ── Shader modules ─────────────────────────────────────────────────────────
     VkShaderModule vertMod = makeShaderModule(dev, loadSpv(dir + "/tonemap.vert.spv"));
     VkShaderModule fragMod = makeShaderModule(dev, loadSpv(dir + "/tonemap.frag.spv"));
 
@@ -914,81 +1026,19 @@ void Renderer::createTonemapPipeline()
           .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fragMod, .pName = "main" },
     }};
 
-    // ── No vertex input — fullscreen triangle is generated entirely in the vertex shader ──
-    const VkPipelineVertexInputStateCreateInfo vertexInput{
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-    };
-    const VkPipelineInputAssemblyStateCreateInfo inputAssembly{
-        .sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-    };
-    const VkPipelineViewportStateCreateInfo viewportState{
-        .sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-        .viewportCount = 1,
-        .scissorCount  = 1,
-    };
-    const VkPipelineRasterizationStateCreateInfo rasterization{
-        .sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-        .polygonMode = VK_POLYGON_MODE_FILL,
-        .cullMode    = VK_CULL_MODE_NONE,
-        .frontFace   = VK_FRONT_FACE_CLOCKWISE,
-        .lineWidth   = 1.0f,
-    };
-    const VkPipelineMultisampleStateCreateInfo multisample{
-        .sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
-    };
-    // No depth test: fullscreen blit always overwrites
+    // No depth test: fullscreen blit always overwrites.
     const VkPipelineDepthStencilStateCreateInfo depthStencil{
         .sType             = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
         .depthTestEnable   = VK_FALSE,
         .depthWriteEnable  = VK_FALSE,
     };
-    const VkPipelineColorBlendAttachmentState blendAtt{
-        .blendEnable    = VK_FALSE,
-        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
-    };
-    const VkPipelineColorBlendStateCreateInfo colorBlend{
-        .sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-        .attachmentCount = 1,
-        .pAttachments    = &blendAtt,
-    };
-    const std::array<VkDynamicState, 2> dynStates = {
-        VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
-    const VkPipelineDynamicStateCreateInfo dynamicState{
-        .sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-        .dynamicStateCount = static_cast<uint32_t>(dynStates.size()),
-        .pDynamicStates    = dynStates.data(),
-    };
 
-    // Output to swapchain SRGB format
-    const VkFormat swapchainFormat = m_swapchain.getFormat();
-    const VkPipelineRenderingCreateInfo renderingInfo{
-        .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-        .colorAttachmentCount    = 1,
-        .pColorAttachmentFormats = &swapchainFormat,
-        // No depth attachment — blit doesn't use depth
-    };
-
-    const VkGraphicsPipelineCreateInfo pipelineCI{
-        .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        .pNext               = &renderingInfo,
-        .stageCount          = static_cast<uint32_t>(stages.size()),
-        .pStages             = stages.data(),
-        .pVertexInputState   = &vertexInput,
-        .pInputAssemblyState = &inputAssembly,
-        .pViewportState      = &viewportState,
-        .pRasterizationState = &rasterization,
-        .pMultisampleState   = &multisample,
-        .pDepthStencilState  = &depthStencil,
-        .pColorBlendState    = &colorBlend,
-        .pDynamicState       = &dynamicState,
-        .layout              = m_tonemapPipelineLayout,
-        .renderPass          = VK_NULL_HANDLE,
-    };
-    VK_CHECK(vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &pipelineCI, nullptr,
-                                       &m_tonemapPipeline));
+    m_tonemapPipeline = createFullscreenPipeline(dev, stages, FullscreenPipelineConfig{
+        .layout       = m_tonemapPipelineLayout,
+        .colorFormat  = m_swapchain.getFormat(),
+        .depthFormat  = VK_FORMAT_UNDEFINED,
+        .depthStencil = depthStencil,
+    });
 
     vkDestroyShaderModule(dev, vertMod, nullptr);
     vkDestroyShaderModule(dev, fragMod, nullptr);
@@ -997,27 +1047,15 @@ void Renderer::createTonemapPipeline()
     // (m_hdrTarget was already created before createTonemapPipeline() is called)
     updateTonemapDescriptorSet();
 
-    spdlog::info("Tone map pipeline created (fullscreen triangle → swapchain SRGB)");
+    spdlog::info("Tone map pipeline created (fullscreen triangle -> swapchain SRGB)");
 }
 
 void Renderer::updateTonemapDescriptorSet()
 {
-    const VkDescriptorImageInfo imgInfo{
-        .sampler     = m_hdrSampler,
-        .imageView   = m_hdrTarget.getImageView(),
-        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-    };
-    const VkWriteDescriptorSet write{
-        .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .dstSet          = m_tonemapSet,
-        .dstBinding      = 0,
-        .descriptorCount = 1,
-        .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .pImageInfo      = &imgInfo,
-    };
-    vkUpdateDescriptorSets(m_ctx.getDevice(), 1, &write, 0, nullptr);
+    writeCombinedImageSamplerDescriptor(m_ctx.getDevice(), m_tonemapSet, 0,
+                                        m_hdrSampler, m_hdrTarget.getImageView(),
+                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
-
 // ── Sky pipeline ──────────────────────────────────────────────────────────────
 
 void Renderer::createSkyPipeline()
@@ -1025,79 +1063,37 @@ void Renderer::createSkyPipeline()
     const VkDevice     dev = m_ctx.getDevice();
     const std::string  dir = SHADER_DIR;
 
-    // ── Panorama descriptor set layout: 1 combined image sampler (set=1, binding=0) ──
-    const VkDescriptorSetLayoutBinding panoramaBinding{
-        .binding         = 0,
-        .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .descriptorCount = 1,
-        .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
-    };
-    const VkDescriptorSetLayoutCreateInfo setLayoutCI{
-        .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 1,
-        .pBindings    = &panoramaBinding,
-    };
-    VK_CHECK(vkCreateDescriptorSetLayout(dev, &setLayoutCI, nullptr, &m_skyPanoramaSetLayout));
+    // Panorama descriptor resources: one combined image sampler (set=1, binding=0).
+    const SingleSamplerDescriptorResources skyPanoramaDesc =
+        createSingleSamplerDescriptorResources(dev, VK_SHADER_STAGE_FRAGMENT_BIT);
+    m_skyPanoramaSetLayout = skyPanoramaDesc.layout;
+    m_skyPanoramaPool      = skyPanoramaDesc.pool;
+    m_skyPanoramaSet       = skyPanoramaDesc.set;
 
-    // ── Descriptor pool: 1 set ─────────────────────────────────────────────────
-    const VkDescriptorPoolSize poolSize{
-        .type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .descriptorCount = 1,
-    };
-    const VkDescriptorPoolCreateInfo poolCI{
-        .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets       = 1,
-        .poolSizeCount = 1,
-        .pPoolSizes    = &poolSize,
-    };
-    VK_CHECK(vkCreateDescriptorPool(dev, &poolCI, nullptr, &m_skyPanoramaPool));
-
-    // ── Allocate descriptor set ────────────────────────────────────────────────
-    const VkDescriptorSetAllocateInfo allocInfo{
-        .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-        .descriptorPool     = m_skyPanoramaPool,
-        .descriptorSetCount = 1,
-        .pSetLayouts        = &m_skyPanoramaSetLayout,
-    };
-    VK_CHECK(vkAllocateDescriptorSets(dev, &allocInfo, &m_skyPanoramaSet));
-
-    // ── Panorama sampler: linear filter, clamp to edge ────────────────────────
+    // Panorama sampler: linear filter, clamp to edge.
     const VkSamplerCreateInfo samplerCI{
-        .sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-        .magFilter    = VK_FILTER_LINEAR,
-        .minFilter    = VK_FILTER_LINEAR,
-        .mipmapMode   = VK_SAMPLER_MIPMAP_MODE_LINEAR,
-        .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-        .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-        .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .sType         = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter     = VK_FILTER_LINEAR,
+        .minFilter     = VK_FILTER_LINEAR,
+        .mipmapMode    = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+        .addressModeU  = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeV  = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeW  = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
         .maxAnisotropy = 1.0f,
         .minLod        = 0.0f,
         .maxLod        = 1.0f,
     };
     VK_CHECK(vkCreateSampler(dev, &samplerCI, nullptr, &m_skyPanoramaSampler));
 
-    // ── Bind fallback white as the initial panorama placeholder ───────────────
-    // In procedural mode the sampler is never accessed; in panorama mode the user
-    // calls loadHdrPanorama() which updates this binding to the real image.
-    {
-        const VkDescriptorImageInfo imgInfo{
-            .sampler     = m_skyPanoramaSampler,
-            .imageView   = m_fallbackWhite.getImageView(),
-            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        };
-        const VkWriteDescriptorSet write{
-            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet          = m_skyPanoramaSet,
-            .dstBinding      = 0,
-            .descriptorCount = 1,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .pImageInfo      = &imgInfo,
-        };
-        vkUpdateDescriptorSets(dev, 1, &write, 0, nullptr);
-    }
+    // Bind fallback white as the initial panorama placeholder.
+    // In procedural mode the sampler is never accessed; in panorama mode
+    // loadHdrPanorama() updates this binding to the real image.
+    writeCombinedImageSamplerDescriptor(dev, m_skyPanoramaSet, 0,
+                                        m_skyPanoramaSampler, m_fallbackWhite.getImageView(),
+                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
-    // ── Pipeline layout ────────────────────────────────────────────────────────
-    // Set 0: m_cameraSetLayout (shared with PBR — sky uses bindings 0=camera, 1=light)
+    // Pipeline layout
+    // Set 0: m_cameraSetLayout (shared with PBR - sky uses bindings 0=camera, 1=light)
     // Set 1: m_skyPanoramaSetLayout (equirectangular HDR or dummy white)
     // Push constant: 4 bytes (skyMode) in fragment stage only
     const VkPushConstantRange pcRange{
@@ -1106,8 +1102,8 @@ void Renderer::createSkyPipeline()
         .size       = sizeof(uint32_t),
     };
     const std::array<VkDescriptorSetLayout, 2> skyLayouts = {
-        m_cameraSetLayout,      // set 0
-        m_skyPanoramaSetLayout, // set 1
+        m_cameraSetLayout,
+        m_skyPanoramaSetLayout,
     };
     const VkPipelineLayoutCreateInfo layoutCI{
         .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -1118,7 +1114,6 @@ void Renderer::createSkyPipeline()
     };
     VK_CHECK(vkCreatePipelineLayout(dev, &layoutCI, nullptr, &m_skyPipelineLayout));
 
-    // ── Shader modules ─────────────────────────────────────────────────────────
     VkShaderModule vertMod = makeShaderModule(dev, loadSpv(dir + "/sky.vert.spv"));
     VkShaderModule fragMod = makeShaderModule(dev, loadSpv(dir + "/sky.frag.spv"));
 
@@ -1129,31 +1124,7 @@ void Renderer::createSkyPipeline()
           .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fragMod, .pName = "main" },
     }};
 
-    // No vertex input — fullscreen triangle from gl_VertexIndex
-    const VkPipelineVertexInputStateCreateInfo vertexInput{
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-    };
-    const VkPipelineInputAssemblyStateCreateInfo inputAssembly{
-        .sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-    };
-    const VkPipelineViewportStateCreateInfo viewportState{
-        .sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-        .viewportCount = 1,
-        .scissorCount  = 1,
-    };
-    const VkPipelineRasterizationStateCreateInfo rasterization{
-        .sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-        .polygonMode = VK_POLYGON_MODE_FILL,
-        .cullMode    = VK_CULL_MODE_NONE,
-        .frontFace   = VK_FRONT_FACE_CLOCKWISE,
-        .lineWidth   = 1.0f,
-    };
-    const VkPipelineMultisampleStateCreateInfo multisample{
-        .sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
-    };
-    // Reverse-Z: sky at z=0 (far plane). GREATER_OR_EQUAL passes the cleared value (0.0 ≥ 0.0).
+    // Reverse-Z: sky at z=0 (far plane). GREATER_OR_EQUAL passes the cleared value (0.0 >= 0.0).
     // Write depth=0 so geometry (GREATER at z>0) can overwrite sky on covered pixels.
     const VkPipelineDepthStencilStateCreateInfo depthStencil{
         .sType             = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
@@ -1161,58 +1132,20 @@ void Renderer::createSkyPipeline()
         .depthWriteEnable  = VK_TRUE,
         .depthCompareOp    = VK_COMPARE_OP_GREATER_OR_EQUAL,
     };
-    const VkPipelineColorBlendAttachmentState blendAtt{
-        .blendEnable    = VK_FALSE,
-        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
-    };
-    const VkPipelineColorBlendStateCreateInfo colorBlend{
-        .sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-        .attachmentCount = 1,
-        .pAttachments    = &blendAtt,
-    };
-    const std::array<VkDynamicState, 2> dynStates = {
-        VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
-    const VkPipelineDynamicStateCreateInfo dynamicState{
-        .sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-        .dynamicStateCount = static_cast<uint32_t>(dynStates.size()),
-        .pDynamicStates    = dynStates.data(),
-    };
 
-    // Sky renders into the same HDR offscreen target as the PBR scene pass
-    const VkFormat colorFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
-    const VkPipelineRenderingCreateInfo renderingCI{
-        .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-        .colorAttachmentCount    = 1,
-        .pColorAttachmentFormats = &colorFormat,
-        .depthAttachmentFormat   = VK_FORMAT_D32_SFLOAT,
-    };
-
-    const VkGraphicsPipelineCreateInfo pipelineCI{
-        .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        .pNext               = &renderingCI,
-        .stageCount          = static_cast<uint32_t>(stages.size()),
-        .pStages             = stages.data(),
-        .pVertexInputState   = &vertexInput,
-        .pInputAssemblyState = &inputAssembly,
-        .pViewportState      = &viewportState,
-        .pRasterizationState = &rasterization,
-        .pMultisampleState   = &multisample,
-        .pDepthStencilState  = &depthStencil,
-        .pColorBlendState    = &colorBlend,
-        .pDynamicState       = &dynamicState,
-        .layout              = m_skyPipelineLayout,
-        .renderPass          = VK_NULL_HANDLE,
-    };
-    VK_CHECK(vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &pipelineCI, nullptr,
-                                       &m_skyPipeline));
+    // Sky renders into the same HDR offscreen target as the PBR scene pass.
+    m_skyPipeline = createFullscreenPipeline(dev, stages, FullscreenPipelineConfig{
+        .layout       = m_skyPipelineLayout,
+        .colorFormat  = VK_FORMAT_R16G16B16A16_SFLOAT,
+        .depthFormat  = VK_FORMAT_D32_SFLOAT,
+        .depthStencil = depthStencil,
+    });
 
     vkDestroyShaderModule(dev, vertMod, nullptr);
     vkDestroyShaderModule(dev, fragMod, nullptr);
 
     spdlog::info("Sky pipeline created (procedural Rayleigh+Mie + HDR equirectangular panorama)");
 }
-
 // ── Sky HDR panorama loader ────────────────────────────────────────────────────
 
 void Renderer::loadHdrPanorama(const std::string& path)
@@ -1230,75 +1163,28 @@ void Renderer::loadHdrPanorama(const std::string& path)
 
     const VkDeviceSize dataSize = static_cast<VkDeviceSize>(w) * h * 4 * sizeof(float);
 
-    // One-shot command buffer for the GPU upload
-    const VkCommandPoolCreateInfo poolCI{
-        .sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-        .flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
-        .queueFamilyIndex = m_ctx.getGraphicsQueueFamily(),
-    };
-    VkCommandPool uploadPool;
-    VK_CHECK(vkCreateCommandPool(m_ctx.getDevice(), &poolCI, nullptr, &uploadPool));
-
-    const VkCommandBufferAllocateInfo allocInfo{
-        .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        .commandPool        = uploadPool,
-        .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = 1,
-    };
-    VkCommandBuffer cmd;
-    VK_CHECK(vkAllocateCommandBuffers(m_ctx.getDevice(), &allocInfo, &cmd));
-
-    const VkCommandBufferBeginInfo beginInfo{
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-    };
-    VK_CHECK(vkBeginCommandBuffer(cmd, &beginInfo));
+    VkCommandPool   uploadPool = VK_NULL_HANDLE;
+    VkCommandBuffer cmd        = vkutil::beginSingleUseCommands(m_ctx, uploadPool);
 
     // Destroy previous panorama image (if any) and create the new one
     m_skyPanorama.destroy();
     m_skyPanorama.createFromData(static_cast<uint32_t>(w), static_cast<uint32_t>(h),
-                                  VK_FORMAT_R32G32B32A32_SFLOAT, pixels, dataSize, cmd);
+                                 VK_FORMAT_R32G32B32A32_SFLOAT, pixels, dataSize, cmd);
 
-    // Staging buffer holds the data — safe to free host pixels now
+    // Staging buffer holds the data - safe to free host pixels now
     stbi_image_free(pixels);
 
-    VK_CHECK(vkEndCommandBuffer(cmd));
-
-    VkFence fence;
-    const VkFenceCreateInfo fenceCI{ .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
-    VK_CHECK(vkCreateFence(m_ctx.getDevice(), &fenceCI, nullptr, &fence));
-
-    const VkSubmitInfo submitInfo{
-        .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        .commandBufferCount = 1,
-        .pCommandBuffers    = &cmd,
-    };
-    VK_CHECK(vkQueueSubmit(m_ctx.getGraphicsQueue(), 1, &submitInfo, fence));
-    VK_CHECK(vkWaitForFences(m_ctx.getDevice(), 1, &fence, VK_TRUE, UINT64_MAX));
+    vkutil::endSingleUseCommands(m_ctx, uploadPool, cmd);
 
     m_skyPanorama.releaseStaging();
-    vkDestroyFence(m_ctx.getDevice(), fence, nullptr);
-    vkDestroyCommandPool(m_ctx.getDevice(), uploadPool, nullptr);
 
     // Point the panorama descriptor at the newly uploaded image
-    const VkDescriptorImageInfo imgInfo{
-        .sampler     = m_skyPanoramaSampler,
-        .imageView   = m_skyPanorama.getImageView(),
-        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-    };
-    const VkWriteDescriptorSet write{
-        .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .dstSet          = m_skyPanoramaSet,
-        .dstBinding      = 0,
-        .descriptorCount = 1,
-        .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .pImageInfo      = &imgInfo,
-    };
-    vkUpdateDescriptorSets(m_ctx.getDevice(), 1, &write, 0, nullptr);
+    writeCombinedImageSamplerDescriptor(m_ctx.getDevice(), m_skyPanoramaSet, 0,
+                                        m_skyPanoramaSampler, m_skyPanorama.getImageView(),
+                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
-    spdlog::info("HDR panorama loaded: {}×{} from '{}'", w, h, path);
+    spdlog::info("HDR panorama loaded: {}x{} from '{}'", w, h, path);
 }
-
 void Renderer::createDescriptorPool()
 {
     // Pool must hold:
@@ -2588,3 +2474,4 @@ void Renderer::endFrame()
     m_frameSync.advanceFrame();
     m_commandBuffer.beginFrame();
 }
+

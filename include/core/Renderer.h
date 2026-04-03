@@ -123,6 +123,7 @@ private:
     void createPbrPipeline();
     void loadModel(const std::string& modelPath);
     void destroyPipeline();
+    void refreshRenderStats();
 
     static std::vector<uint32_t> loadSpv(const std::string& path);
 
