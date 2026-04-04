@@ -277,6 +277,16 @@ int main() {
                     stats.textureMemoryBytes / (1024.0f * 1024.0f));
       }
       ImGui::Separator();
+      if (ImGui::TreeNode("Shadow Culling")) {
+        const auto& culled = renderer.getShadowCulledMeshes();
+        const auto& total  = renderer.getShadowTotalMeshes();
+        for (uint32_t c = 0; c < Renderer::CASCADE_COUNT; ++c) {
+          const uint32_t drawn = total[c] - culled[c];
+          ImGui::Text("Cascade %u: %u / %u drawn (-%u culled)", c, drawn, total[c], culled[c]);
+        }
+        ImGui::TreePop();
+      }
+      ImGui::Separator();
       ImGui::TextDisabled("F2: save screenshot");
     }, DockLocation::Bottom);
 

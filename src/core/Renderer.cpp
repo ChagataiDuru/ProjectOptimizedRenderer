@@ -274,6 +274,26 @@ void Renderer::init()
     m_sceneInfo = computeSceneInfo(m_model.boundsMin, m_model.boundsMax);
     spdlog::info("Scene normalized: scale={:.4f}, radius={:.2f}",
                  m_sceneInfo.scaleFactor, m_sceneInfo.normalizedRadius);
+
+    // Phase 4.2.5: transform per-mesh model-space AABBs to world space
+    for (size_t i = 0; i < m_model.meshes.size(); ++i) {
+        const glm::vec3& lo = m_model.meshes[i].boundsMin;
+        const glm::vec3& hi = m_model.meshes[i].boundsMax;
+        const glm::mat4& M  = m_sceneInfo.modelMatrix;
+        glm::vec3 wMin( std::numeric_limits<float>::max());
+        glm::vec3 wMax(-std::numeric_limits<float>::max());
+        for (int j = 0; j < 8; ++j) {
+            glm::vec3 corner((j & 1) ? hi.x : lo.x,
+                             (j & 2) ? hi.y : lo.y,
+                             (j & 4) ? hi.z : lo.z);
+            glm::vec3 w = glm::vec3(M * glm::vec4(corner, 1.0f));
+            wMin = glm::min(wMin, w);
+            wMax = glm::max(wMax, w);
+        }
+        m_meshRenderData[i].worldBoundsMin = wMin;
+        m_meshRenderData[i].worldBoundsMax = wMax;
+    }
+
     m_frameSync.init(3);
     m_commandBuffer.init(m_ctx.getGraphicsQueueFamily(), 3);
     createDepthImage();
@@ -345,6 +365,25 @@ void Renderer::reloadModel(const std::string& modelPath)
     m_sceneInfo = computeSceneInfo(m_model.boundsMin, m_model.boundsMax);
     spdlog::info("Scene normalized: scale={:.4f}, radius={:.2f}",
                  m_sceneInfo.scaleFactor, m_sceneInfo.normalizedRadius);
+
+    // Phase 4.2.5: transform per-mesh model-space AABBs to world space
+    for (size_t i = 0; i < m_model.meshes.size(); ++i) {
+        const glm::vec3& lo = m_model.meshes[i].boundsMin;
+        const glm::vec3& hi = m_model.meshes[i].boundsMax;
+        const glm::mat4& M  = m_sceneInfo.modelMatrix;
+        glm::vec3 wMin( std::numeric_limits<float>::max());
+        glm::vec3 wMax(-std::numeric_limits<float>::max());
+        for (int j = 0; j < 8; ++j) {
+            glm::vec3 corner((j & 1) ? hi.x : lo.x,
+                             (j & 2) ? hi.y : lo.y,
+                             (j & 4) ? hi.z : lo.z);
+            glm::vec3 w = glm::vec3(M * glm::vec4(corner, 1.0f));
+            wMin = glm::min(wMin, w);
+            wMax = glm::max(wMax, w);
+        }
+        m_meshRenderData[i].worldBoundsMin = wMin;
+        m_meshRenderData[i].worldBoundsMax = wMax;
+    }
 
     // ── Recreate descriptors for the new model ───────────────────────────────────
     createDescriptorPool();
@@ -1430,6 +1469,143 @@ static std::pair<glm::vec3, float> boundingSphere(const std::array<glm::vec3, 8>
     return { center, r };
 }
 
+// ── Phase 4.2.5: Shadow-caster culling planes (Aaltonen technique) ───────────
+// Given 6 frustum planes and a light direction, compute the tightest culling
+// planes that can reject meshes whose shadows cannot reach the visible frustum.
+
+struct FrustumPlane {
+    glm::vec3 normal;
+    float     d;   // dot(normal, X) + d >= 0 → inside
+};
+
+// Extract 6 frustum planes from a VP matrix using Gribb-Hartmann.
+// Assumes NDC Z ∈ [-1,1] (perspectiveRH_NO convention).
+// Order: Left, Right, Bottom, Top, Near, Far.
+static std::array<FrustumPlane, 6> extractFrustumPlanes(const glm::mat4& vp)
+{
+    auto row = [&](int i) -> glm::vec4 {
+        return { vp[0][i], vp[1][i], vp[2][i], vp[3][i] };
+    };
+    const glm::vec4 r0 = row(0), r1 = row(1), r2 = row(2), r3 = row(3);
+
+    std::array<FrustumPlane, 6> planes;
+    auto set = [&](int idx, glm::vec4 v) {
+        float len = glm::length(glm::vec3(v));
+        if (len > 1e-8f) v /= len;
+        planes[idx] = { glm::vec3(v), v.w };
+    };
+    set(0, r3 + r0);  // Left
+    set(1, r3 - r0);  // Right
+    set(2, r3 + r1);  // Bottom
+    set(3, r3 - r1);  // Top
+    set(4, r3 + r2);  // Near
+    set(5, r3 - r2);  // Far
+    return planes;
+}
+
+// Frustum topology: 12 edges, each shared by exactly two faces.
+// Face indices: 0=Left, 1=Right, 2=Bottom, 3=Top, 4=Near, 5=Far
+static constexpr std::array<std::pair<int,int>, 12> kFrustumEdges = {{
+    {0, 2}, {0, 3}, {0, 4}, {0, 5},  // left edges
+    {1, 2}, {1, 3}, {1, 4}, {1, 5},  // right edges
+    {2, 4}, {2, 5},                   // bottom edges
+    {3, 4}, {3, 5},                   // top edges
+}};
+
+using CullingPlane = Renderer::CullingPlane;
+
+static std::vector<CullingPlane> computeShadowCullPlanes(
+    const glm::mat4& cascadeVP,
+    const glm::vec3& lightDir)
+{
+    const auto frustum = extractFrustumPlanes(cascadeVP);
+
+    // Classify faces: front-facing if light enters from that side.
+    std::array<bool, 6> isFrontFacing;
+    for (int i = 0; i < 6; ++i)
+        isFrontFacing[i] = glm::dot(frustum[i].normal, lightDir) > 0.0f;
+
+    std::vector<CullingPlane> planes;
+    planes.reserve(8);
+
+    // Keep back-facing frustum planes: they bound the shadow volume's extent.
+    for (int i = 0; i < 6; ++i) {
+        if (!isFrontFacing[i])
+            planes.push_back({ frustum[i].normal, frustum[i].d });
+    }
+
+    // Build one culling plane per silhouette edge (front-facing meets back-facing).
+    for (const auto& [fA, fB] : kFrustumEdges) {
+        if (isFrontFacing[fA] == isFrontFacing[fB])
+            continue;
+
+        // Edge direction = cross product of the two adjacent face normals.
+        glm::vec3 edgeDir = glm::cross(frustum[fA].normal, frustum[fB].normal);
+        float edgeLen = glm::length(edgeDir);
+        if (edgeLen < 1e-8f) continue;
+        edgeDir /= edgeLen;
+
+        // New plane contains the edge and is parallel to lightDir.
+        glm::vec3 planeNormal = glm::cross(edgeDir, lightDir);
+        float pnLen = glm::length(planeNormal);
+        if (pnLen < 1e-8f) continue;
+        planeNormal /= pnLen;
+
+        // Find a point on the edge by solving the two-plane intersection.
+        // Drop the axis most aligned with edgeDir to form a 2×2 system.
+        int bestAxis = 0;
+        float bestDot = 0.0f;
+        for (int a = 0; a < 3; ++a) {
+            float ad = std::abs(edgeDir[a]);
+            if (ad > bestDot) { bestDot = ad; bestAxis = a; }
+        }
+        const int c0 = (bestAxis + 1) % 3;
+        const int c1 = (bestAxis + 2) % 3;
+        const glm::vec3& nA = frustum[fA].normal;
+        const glm::vec3& nB = frustum[fB].normal;
+        float a00 = nA[c0], a01 = nA[c1], b0 = -frustum[fA].d;
+        float a10 = nB[c0], a11 = nB[c1], b1 = -frustum[fB].d;
+        glm::vec3 Q(0.0f);
+        const float det = a00 * a11 - a01 * a10;
+        if (std::abs(det) > 1e-10f) {
+            Q[c0] = (b0 * a11 - b1 * a01) / det;
+            Q[c1] = (a00 * b1 - a10 * b0) / det;
+        }
+
+        // Orient normal so it points toward the front-facing face's side
+        // (where shadow casters live relative to the silhouette edge).
+        const int frontFace = isFrontFacing[fA] ? fA : fB;
+        if (glm::dot(planeNormal, frustum[frontFace].normal) < 0.0f)
+            planeNormal = -planeNormal;
+
+        planes.push_back({ planeNormal, -glm::dot(planeNormal, Q) });
+    }
+
+    return planes;
+}
+
+// AABB vs half-plane test: returns true if the AABB is entirely outside the plane.
+static bool aabbOutsidePlane(const glm::vec3& bmin, const glm::vec3& bmax,
+                              const glm::vec3& normal, float d)
+{
+    glm::vec3 pVertex(
+        (normal.x >= 0.0f) ? bmax.x : bmin.x,
+        (normal.y >= 0.0f) ? bmax.y : bmin.y,
+        (normal.z >= 0.0f) ? bmax.z : bmin.z
+    );
+    return (glm::dot(normal, pVertex) + d) < 0.0f;
+}
+
+static bool aabbSurvivesCulling(const glm::vec3& bmin, const glm::vec3& bmax,
+                                 const std::vector<CullingPlane>& planes)
+{
+    for (const auto& p : planes) {
+        if (aabbOutsidePlane(bmin, bmax, p.normal, p.d))
+            return false;
+    }
+    return true;
+}
+
 void Renderer::createShadowResources()
 {
     const VkDevice dev = m_ctx.getDevice();
@@ -1935,6 +2111,19 @@ void Renderer::updateShadowMatrices()
         lightProj[1][1] *= -1.0f;  // Y-flip for Vulkan
 
         ubo.lightViewProj[c] = lightProj * finalLightView;
+
+        // Phase 4.2.5: build a standard-Z (non-reverse) camera VP for this cascade
+        // slice and extract shadow-caster culling planes from it.
+        // perspectiveRH_NO maps Z to [-1,1] (OpenGL), matching the Gribb-Hartmann
+        // r3±r2 formulas used in extractFrustumPlanes().
+        {
+            const float tanHalfFov = 1.0f / std::abs(m_projMatrix[1][1]);
+            const float aspect     = std::abs(m_projMatrix[1][1]) / std::abs(m_projMatrix[0][0]);
+            glm::mat4 stdProj = glm::perspectiveRH_NO(
+                2.0f * std::atan(tanHalfFov), aspect, cNear, cFar);
+            stdProj[1][1] *= -1.0f;  // Vulkan Y-flip
+            m_shadowCullPlanes[c] = computeShadowCullPlanes(stdProj * m_viewMatrix, lightDir);
+        }
     }
 
     m_shadowUBOBuffer.upload(&ubo, sizeof(ShadowCascadeUBO));
@@ -2098,11 +2287,24 @@ void Renderer::render()
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            96, sizeof(uint32_t), &c);
 
+        // Phase 4.2.5: per-mesh shadow-caster culling
+        uint32_t culledCount = 0;
+        const auto& cullPlanes = m_shadowCullPlanes[c];
+
         for (const auto& meshData : m_meshRenderData) {
+            if (!cullPlanes.empty() &&
+                !aabbSurvivesCulling(meshData.worldBoundsMin, meshData.worldBoundsMax, cullPlanes))
+            {
+                ++culledCount;
+                continue;
+            }
             vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
                                0, sizeof(glm::mat4), &m_sceneInfo.modelMatrix);
             vkCmdDrawIndexed(cmd, meshData.indexCount, 1, meshData.firstIndex, 0, 0);
         }
+
+        m_shadowCulledMeshes[c] = culledCount;
+        m_shadowTotalMeshes[c]  = static_cast<uint32_t>(m_meshRenderData.size());
 
         vkCmdEndRendering(cmd);
     }

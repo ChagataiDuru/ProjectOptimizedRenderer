@@ -176,8 +176,19 @@ Model GLTFLoader::loadGLTF(const std::string& filepath)
                 }
             }
 
-            if (!mesh.vertices.empty())
+            if (!mesh.vertices.empty()) {
+                // Compute per-mesh AABB in model space
+                glm::vec3 meshMin( std::numeric_limits<float>::max());
+                glm::vec3 meshMax(-std::numeric_limits<float>::max());
+                for (const auto& v : mesh.vertices) {
+                    meshMin = glm::min(meshMin, v.position);
+                    meshMax = glm::max(meshMax, v.position);
+                }
+                mesh.boundsMin = meshMin;
+                mesh.boundsMax = meshMax;
+
                 model.meshes.push_back(std::move(mesh));
+            }
         }
     }
 

@@ -80,6 +80,16 @@ public:
     static constexpr uint32_t CASCADE_COUNT = 4;
     static constexpr uint32_t CASCADE_SIZE  = 2048;
 
+    // Phase 4.2.5: shadow culling stats
+    const std::array<uint32_t, CASCADE_COUNT>& getShadowCulledMeshes() const { return m_shadowCulledMeshes; }
+    const std::array<uint32_t, CASCADE_COUNT>& getShadowTotalMeshes()  const { return m_shadowTotalMeshes; }
+
+    // Phase 4.2.5: culling plane type (public so static helpers in Renderer.cpp can alias it)
+    struct CullingPlane {
+        glm::vec3 normal;   // inward-pointing
+        float     d;        // dot(normal, X) + d >= 0 means inside
+    };
+
     // Phase 5/6: tone mapping controls
     void setExposure(float ev)           { m_exposure = ev; }
     float getExposure()   const          { return m_exposure; }
@@ -141,6 +151,10 @@ private:
         uint32_t firstIndex;
         uint32_t indexCount;
         int32_t  materialIndex = -1;
+
+        // World-space AABB (model-space AABB transformed by m_sceneInfo.modelMatrix)
+        glm::vec3 worldBoundsMin = glm::vec3(0.0f);
+        glm::vec3 worldBoundsMax = glm::vec3(0.0f);
     };
     Model                       m_model;
     SceneInfo                   m_sceneInfo;    // Phase 3.7: normalization transform
@@ -277,6 +291,14 @@ private:
     int32_t m_shadowFilterMode    = 0;    // 0=None, 1=PCF, 2=VSM
     float   m_pcfSpreadRadius     = 2.0f; // PCF sample spread in texels
     float   m_vsmBleedReduction   = 0.2f; // VSM light bleeding reduction
+
+    // Phase 4.2.5: shadow-caster culling planes (Aaltonen technique)
+    // Per-cascade culling plane set (back-facing frustum planes + silhouette edge planes)
+    std::array<std::vector<CullingPlane>, CASCADE_COUNT> m_shadowCullPlanes;
+
+    // Stats: meshes culled per cascade (for ImGui display)
+    std::array<uint32_t, CASCADE_COUNT> m_shadowCulledMeshes = {};
+    std::array<uint32_t, CASCADE_COUNT> m_shadowTotalMeshes  = {};
 
     // Phase 6.5: sky pipeline resources
     Image                 m_skyPanorama;                               // HDR equirectangular (optional)
