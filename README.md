@@ -133,10 +133,12 @@ From the repository root:
 # 1. Fetch submodules
 git submodule update --init --recursive
 
-# 2. Install Conan dependencies
-conan install . --output-folder=build --build=missing
+# 2. Install Conan dependencies and generate the CMake toolchain
+conan profile detect --force
+conan install . --output-folder=build/conan --build=missing -s build_type=Debug
 
 # 3. Configure with CMake
+# The presets inherit build/conan/conan_toolchain.cmake from the Conan install step.
 cmake --preset debug
 
 # 4. Build
@@ -146,19 +148,24 @@ cmake --build --preset debug
 For Windows presets:
 
 ```bash
-conan install . --output-folder=build --build=missing
+conan profile detect --force
+conan install . --output-folder=build/conan --build=missing -s build_type=Debug
 cmake --preset win-debug
 cmake --build --preset win-debug
 ```
 
 Available presets are defined in [`CMakePresets.json`](CMakePresets.json), including:
 
+- `linux-debug`
 - `debug`
+- `macos-debug`
 - `relwithdebinfo`
 - `release`
 - `win-debug`
 - `win-relwithdebinfo`
 - `win-release`
+
+The documented Conan output folder is `build/conan`; CMake presets expect the generated toolchain at `build/conan/conan_toolchain.cmake`. If you configure a non-Debug preset, rerun `conan install` with the matching `-s build_type=<BuildType>`.
 
 ## Shader Compilation
 
