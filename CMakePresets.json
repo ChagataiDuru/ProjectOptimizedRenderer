@@ -26,6 +26,21 @@
       }
     },
     {
+      "name": "base-linux",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_CXX_STANDARD": "20",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
       "name": "base-windows",
       "hidden": true,
       "generator": "Ninja",
@@ -131,6 +146,11 @@
     {
       "name": "debug",
       "configurePreset": "debug",
+      "jobs": 0
+    },
+    {
+      "name": "macos-debug",
+      "configurePreset": "macos-debug",
       "jobs": 0
     },
     {
