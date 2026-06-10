@@ -43,6 +43,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install Conan
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install "conan>=2,<3"
+          conan --version
+
       # Linux dependencies (adjust package list as your project needs)
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -76,11 +83,19 @@ jobs:
           # Ensure tools/libs are discoverable during configure/build
           "PATH=$($vulkanRoot.FullName)\Bin;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      - name: Install Conan dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          conan profile detect --force
+          conan install . --output-folder=build/conan --build=missing -s build_type=Debug
+
       - name: Show tool versions
         shell: bash
         run: |
           cmake --version
           ninja --version
+          conan --version
           c++ --version || true
           gcc --version || true
           clang --version || true
