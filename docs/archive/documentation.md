@@ -1,3 +1,9 @@
+# Archived Documentation Notes
+
+This file is archived historical scratch material captured during earlier renderer design and implementation discussions. It is retained for context only; use the README, AGENTS.md, and docs/analysis documents for current project guidance.
+
+---
+
 For Vertex.H:
 
 ⏺ ★ Insight ─────────────────────────────────────
