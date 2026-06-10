@@ -12,9 +12,11 @@ This project uses **CMake + Conan 2**. The typical workflow:
 
 ```bash
 # Install dependencies via Conan (run from repo root)
-conan install . --output-folder=build --build=missing
+conan profile detect --force
+conan install . --output-folder=build/conan --build=missing -s build_type=Debug
 
-# Configure with CMake (using a preset defined in CMakePresets.json)
+# Configure with CMake (using a preset defined in CMakePresets.json).
+# Presets inherit build/conan/conan_toolchain.cmake from the Conan install step.
 cmake --preset <preset-name>
 
 # Build
