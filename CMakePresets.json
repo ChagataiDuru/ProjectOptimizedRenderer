@@ -25,6 +25,21 @@
       }
     },
     {
+      "name": "base-linux",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_CXX_STANDARD": "20",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
       "name": "base-windows",
       "hidden": true,
       "generator": "Ninja",
@@ -40,13 +55,28 @@
       }
     },
     {
+      "name": "linux-debug",
+      "displayName": "Debug (Linux)",
+      "inherits": "base-linux",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/build/conan-debug/conan_toolchain.cmake"
+      }
+    },
+    {
       "name": "debug",
       "displayName": "Debug (Apple Silicon)",
       "inherits": "base-macos",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_CXX_FLAGS_DEBUG": "-g -O0 -fno-omit-frame-pointer"
+        "CMAKE_CXX_FLAGS_DEBUG": "-g -O0 -fno-omit-frame-pointer",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/build/conan-debug/conan_toolchain.cmake"
       }
+    },
+    {
+      "name": "macos-debug",
+      "displayName": "Debug (macOS Apple Silicon)",
+      "inherits": "debug"
     },
     {
       "name": "relwithdebinfo",
@@ -71,7 +101,8 @@
       "displayName": "Debug (Windows NVIDIA)",
       "inherits": "base-windows",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug"
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/build/conan-debug/conan_toolchain.cmake"
       }
     },
     {
@@ -93,8 +124,18 @@
   ],
   "buildPresets": [
     {
+      "name": "linux-debug",
+      "configurePreset": "linux-debug",
+      "jobs": 0
+    },
+    {
       "name": "debug",
       "configurePreset": "debug",
+      "jobs": 0
+    },
+    {
+      "name": "macos-debug",
+      "configurePreset": "macos-debug",
       "jobs": 0
     },
     {
