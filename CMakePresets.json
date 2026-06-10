@@ -25,6 +25,21 @@
       }
     },
     {
+      "name": "base-linux",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_CXX_STANDARD": "20",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
       "name": "base-windows",
       "hidden": true,
       "generator": "Ninja",
@@ -40,6 +55,14 @@
       }
     },
     {
+      "name": "linux-debug",
+      "displayName": "Debug (Linux)",
+      "inherits": "base-linux",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
       "name": "debug",
       "displayName": "Debug (Apple Silicon)",
       "inherits": "base-macos",
@@ -47,6 +70,11 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_CXX_FLAGS_DEBUG": "-g -O0 -fno-omit-frame-pointer"
       }
+    },
+    {
+      "name": "macos-debug",
+      "displayName": "Debug (macOS alias)",
+      "inherits": "debug"
     },
     {
       "name": "relwithdebinfo",
@@ -98,6 +126,11 @@
       "jobs": 0
     },
     {
+      "name": "macos-debug",
+      "configurePreset": "macos-debug",
+      "jobs": 0
+    },
+    {
       "name": "relwithdebinfo",
       "configurePreset": "relwithdebinfo",
       "jobs": 0
@@ -120,6 +153,11 @@
     {
       "name": "win-release",
       "configurePreset": "win-release",
+      "jobs": 0
+    },
+    {
+      "name": "linux-debug",
+      "configurePreset": "linux-debug",
       "jobs": 0
     }
   ]
