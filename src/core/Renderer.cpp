@@ -61,10 +61,10 @@ struct SingleSamplerDescriptorResources {
 };
 
 static SingleSamplerDescriptorResources createSingleSamplerDescriptorResources(
-    VkDevice dev, VkShaderStageFlags stageFlags)
+    VkDevice dev, VkShaderStageFlags stageFlags, uint32_t bindingIndex)
 {
     const VkDescriptorSetLayoutBinding binding{
-        .binding         = 0,
+        .binding         = bindingIndex,
         .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         .descriptorCount = 1,
         .stageFlags      = stageFlags,
@@ -275,7 +275,6 @@ void Renderer::init()
     spdlog::info("Scene normalized: scale={:.4f}, radius={:.2f}",
                  m_sceneInfo.scaleFactor, m_sceneInfo.normalizedRadius);
 
-    // Phase 4.2.5: transform per-mesh model-space AABBs to world space
     for (size_t i = 0; i < m_model.meshes.size(); ++i) {
         const glm::vec3& lo = m_model.meshes[i].boundsMin;
         const glm::vec3& hi = m_model.meshes[i].boundsMax;
@@ -298,7 +297,8 @@ void Renderer::init()
     m_commandBuffer.init(m_ctx.getGraphicsQueueFamily(), 3);
     createDepthImage();
     createHdrTarget();
-    createTonemapPipeline();
+    m_tonemapPass.init(m_ctx.getDevice(), m_swapchain.getFormat(), SHADER_DIR);
+    m_tonemapPass.resize(m_ctx.getDevice(), m_hdrSampler, m_hdrTarget.getImageView());
     createPbrPipeline();
     createSkyPipeline();
     createShadowResources();
@@ -366,7 +366,7 @@ void Renderer::reloadModel(const std::string& modelPath)
     spdlog::info("Scene normalized: scale={:.4f}, radius={:.2f}",
                  m_sceneInfo.scaleFactor, m_sceneInfo.normalizedRadius);
 
-    // Phase 4.2.5: transform per-mesh model-space AABBs to world space
+    //  transform per-mesh model-space AABBs to world space
     for (size_t i = 0; i < m_model.meshes.size(); ++i) {
         const glm::vec3& lo = m_model.meshes[i].boundsMin;
         const glm::vec3& hi = m_model.meshes[i].boundsMax;
@@ -406,18 +406,15 @@ void Renderer::shutdown()
 
     m_gpuTimer.shutdown();
 
-    // Phase 5: tone map pass resources (model-independent; destroy before PBR pipeline)
+    // tone map pass resources (model-independent; destroy before PBR pipeline)
     {
         const VkDevice dev = m_ctx.getDevice();
-        if (m_tonemapPipeline       != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_tonemapPipeline, nullptr);              m_tonemapPipeline       = VK_NULL_HANDLE; }
-        if (m_tonemapPipelineLayout != VK_NULL_HANDLE) { vkDestroyPipelineLayout(dev, m_tonemapPipelineLayout, nullptr);   m_tonemapPipelineLayout = VK_NULL_HANDLE; }
-        if (m_tonemapPool           != VK_NULL_HANDLE) { vkDestroyDescriptorPool(dev, m_tonemapPool, nullptr);             m_tonemapPool           = VK_NULL_HANDLE; m_tonemapSet = VK_NULL_HANDLE; }
-        if (m_tonemapSetLayout      != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(dev, m_tonemapSetLayout, nullptr);   m_tonemapSetLayout      = VK_NULL_HANDLE; }
+        m_tonemapPass.shutdown(dev);
         if (m_hdrSampler            != VK_NULL_HANDLE) { vkDestroySampler(dev, m_hdrSampler, nullptr);                     m_hdrSampler            = VK_NULL_HANDLE; }
         m_hdrTarget.destroy();
     }
 
-    // Phase 6.5: sky resources (model-independent; destroy before PBR pipeline)
+    // sky resources (model-independent; destroy before PBR pipeline)
     {
         const VkDevice dev = m_ctx.getDevice();
         if (m_skyPipeline          != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_skyPipeline, nullptr);                      m_skyPipeline          = VK_NULL_HANDLE; }
@@ -587,7 +584,6 @@ void Renderer::loadModel(const std::string& modelPath)
             tex.loadFromFile(texEntry.path, format, transferCmd, m_samplerCache);
         } catch (const std::exception& e) {
             spdlog::error("Renderer: failed to load texture '{}': {}", texEntry.path, e.what());
-            // Leave tex invalid — draw loop will use fallback in Phase 2.3
         }
     }
 
@@ -679,7 +675,6 @@ void Renderer::createPbrPipeline()
         .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
     };
 
-    // Phase 1.5: reverse-Z depth — near=1.0 far=0.0, clear to 0.0, compare GREATER
     const VkPipelineDepthStencilStateCreateInfo depthStencil{
         .sType             = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
         .depthTestEnable   = VK_TRUE,
@@ -715,31 +710,31 @@ void Renderer::createPbrPipeline()
     // Descriptor set layout: set 0 — camera(b0), light(b1), shadowUBO(b2), depth array(b3), moments(b4).
     const std::array<VkDescriptorSetLayoutBinding, 5> setBindings{{
         {   // binding 0: camera matrices — read in vertex + fragment shaders
-            .binding         = 0,
+            .binding         = shader_interface::scene_binding::kCamera,
             .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
             .descriptorCount = 1,
             .stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         },
         {   // binding 1: directional light — read in fragment shader
-            .binding         = 1,
+            .binding         = shader_interface::scene_binding::kLight,
             .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
             .descriptorCount = 1,
             .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
         },
         {   // binding 2: shadow UBO (lightViewProj[4] + splitDepths) — vertex + fragment
-            .binding         = 2,
+            .binding         = shader_interface::scene_binding::kShadow,
             .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
             .descriptorCount = 1,
             .stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         },
         {   // binding 3: shadow depth array (D32_SFLOAT, None/PCF modes) — fragment only
-            .binding         = 3,
+            .binding         = shader_interface::scene_binding::kShadowMap,
             .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
             .descriptorCount = 1,
             .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
         },
         {   // binding 4: shadow moments array (RG32_SFLOAT, VSM mode) — fragment only
-            .binding         = 4,
+            .binding         = shader_interface::scene_binding::kShadowMoments,
             .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
             .descriptorCount = 1,
             .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -757,19 +752,19 @@ void Renderer::createPbrPipeline()
     // All read by the fragment shader only.
     const std::array<VkDescriptorSetLayoutBinding, 3> materialBindings{{
         {
-            .binding         = 0,
+            .binding         = shader_interface::material_binding::kAlbedo,
             .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
             .descriptorCount = 1,
             .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
         },
         {
-            .binding         = 1,
+            .binding         = shader_interface::material_binding::kNormal,
             .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
             .descriptorCount = 1,
             .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
         },
         {
-            .binding         = 2,
+            .binding         = shader_interface::material_binding::kMetallicRoughness,
             .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
             .descriptorCount = 1,
             .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -795,17 +790,17 @@ void Renderer::createPbrPipeline()
     const std::array<VkPushConstantRange, 3> pushRanges{{
         {
             .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
-            .offset     = 0,
+            .offset     = shader_interface::kModelMatrixPcOffset,
             .size       = sizeof(glm::mat4),
         },
         {
             .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-            .offset     = 64,
+            .offset     = shader_interface::kMaterialPcOffset,
             .size       = sizeof(MaterialPushConstants),
         },
         {
             .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-            .offset     = 96,
+            .offset     = shader_interface::kCascadeIndexPcOffset,
             .size       = sizeof(uint32_t),
         },
     }};
@@ -820,7 +815,6 @@ void Renderer::createPbrPipeline()
     VK_CHECK(vkCreatePipelineLayout(m_ctx.getDevice(), &layoutInfo, nullptr, &m_pipelineLayout));
 
     // VkPipelineRenderingCreateInfo replaces VkRenderPass for dynamic rendering (core in 1.3/1.4)
-    // Phase 5: PBR pipelines now render into the HDR float target, not directly to the swapchain.
     const VkFormat colorFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
     const VkPipelineRenderingCreateInfo renderingInfo{
         .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
@@ -993,8 +987,6 @@ void Renderer::createDepthImage()
     spdlog::info("Depth image created: {}x{} D32_SFLOAT (reverse-Z)", ext.width, ext.height);
 }
 
-// Phase 5: HDR offscreen target ──────────────────────────────────────────────
-
 void Renderer::createHdrTarget()
 {
     const VkExtent2D ext = m_swapchain.getExtent();
@@ -1020,81 +1012,11 @@ void Renderer::createHdrTarget()
         VK_CHECK(vkCreateSampler(m_ctx.getDevice(), &samplerCI, nullptr, &m_hdrSampler));
     }
 
-    // Update the descriptor set to point at the new image view (also handles first-time setup
-    // after the descriptor pool+set are created by createTonemapPipeline()).
-    if (m_tonemapSet != VK_NULL_HANDLE)
-        updateTonemapDescriptorSet();
+    m_tonemapPass.resize(m_ctx.getDevice(), m_hdrSampler, m_hdrTarget.getImageView());
 
     spdlog::info("HDR target created: {}x{} R16G16B16A16_SFLOAT", ext.width, ext.height);
 }
 
-void Renderer::createTonemapPipeline()
-{
-    const VkDevice dev = m_ctx.getDevice();
-    const std::string dir = SHADER_DIR;
-
-    // Descriptor resources: one combined image sampler (HDR input).
-    const SingleSamplerDescriptorResources tonemapDesc =
-        createSingleSamplerDescriptorResources(dev, VK_SHADER_STAGE_FRAGMENT_BIT);
-    m_tonemapSetLayout = tonemapDesc.layout;
-    m_tonemapPool      = tonemapDesc.pool;
-    m_tonemapSet       = tonemapDesc.set;
-
-    // Push constant: TonemapPC (16 bytes: mode + exposure + splitScreenMode + splitRightMode)
-    const VkPushConstantRange pcRange{
-        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-        .offset     = 0,
-        .size       = 4 * sizeof(uint32_t),  // 16 bytes: aligns to vec4 boundary
-    };
-    const VkPipelineLayoutCreateInfo layoutCI{
-        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .setLayoutCount         = 1,
-        .pSetLayouts            = &m_tonemapSetLayout,
-        .pushConstantRangeCount = 1,
-        .pPushConstantRanges    = &pcRange,
-    };
-    VK_CHECK(vkCreatePipelineLayout(dev, &layoutCI, nullptr, &m_tonemapPipelineLayout));
-
-    VkShaderModule vertMod = makeShaderModule(dev, loadSpv(dir + "/tonemap.vert.spv"));
-    VkShaderModule fragMod = makeShaderModule(dev, loadSpv(dir + "/tonemap.frag.spv"));
-
-    const std::array<VkPipelineShaderStageCreateInfo, 2> stages{{
-        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-          .stage = VK_SHADER_STAGE_VERTEX_BIT,   .module = vertMod, .pName = "main" },
-        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-          .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fragMod, .pName = "main" },
-    }};
-
-    // No depth test: fullscreen blit always overwrites.
-    const VkPipelineDepthStencilStateCreateInfo depthStencil{
-        .sType             = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-        .depthTestEnable   = VK_FALSE,
-        .depthWriteEnable  = VK_FALSE,
-    };
-
-    m_tonemapPipeline = createFullscreenPipeline(dev, stages, FullscreenPipelineConfig{
-        .layout       = m_tonemapPipelineLayout,
-        .colorFormat  = m_swapchain.getFormat(),
-        .depthFormat  = VK_FORMAT_UNDEFINED,
-        .depthStencil = depthStencil,
-    });
-
-    vkDestroyShaderModule(dev, vertMod, nullptr);
-    vkDestroyShaderModule(dev, fragMod, nullptr);
-
-    // Now that pool+set+layout exist, write the HDR image into the descriptor
-    // (m_hdrTarget was already created before createTonemapPipeline() is called)
-    updateTonemapDescriptorSet();
-
-    spdlog::info("Tone map pipeline created (fullscreen triangle -> swapchain SRGB)");
-}
-
-void Renderer::updateTonemapDescriptorSet()
-{
-    writeCombinedImageSamplerDescriptor(m_ctx.getDevice(), m_tonemapSet, 0,
-                                        m_hdrSampler, m_hdrTarget.getImageView(),
-                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-}
 // ── Sky pipeline ──────────────────────────────────────────────────────────────
 
 void Renderer::createSkyPipeline()
@@ -1104,7 +1026,8 @@ void Renderer::createSkyPipeline()
 
     // Panorama descriptor resources: one combined image sampler (set=1, binding=0).
     const SingleSamplerDescriptorResources skyPanoramaDesc =
-        createSingleSamplerDescriptorResources(dev, VK_SHADER_STAGE_FRAGMENT_BIT);
+        createSingleSamplerDescriptorResources(dev, VK_SHADER_STAGE_FRAGMENT_BIT,
+                                               shader_interface::sky_binding::kPanorama);
     m_skyPanoramaSetLayout = skyPanoramaDesc.layout;
     m_skyPanoramaPool      = skyPanoramaDesc.pool;
     m_skyPanoramaSet       = skyPanoramaDesc.set;
@@ -1127,7 +1050,7 @@ void Renderer::createSkyPipeline()
     // Bind fallback white as the initial panorama placeholder.
     // In procedural mode the sampler is never accessed; in panorama mode
     // loadHdrPanorama() updates this binding to the real image.
-    writeCombinedImageSamplerDescriptor(dev, m_skyPanoramaSet, 0,
+    writeCombinedImageSamplerDescriptor(dev, m_skyPanoramaSet, shader_interface::sky_binding::kPanorama,
                                         m_skyPanoramaSampler, m_fallbackWhite.getImageView(),
                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
@@ -1137,7 +1060,7 @@ void Renderer::createSkyPipeline()
     // Push constant: 4 bytes (skyMode) in fragment stage only
     const VkPushConstantRange pcRange{
         .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-        .offset     = 0,
+        .offset     = shader_interface::kSkyPcOffset,
         .size       = sizeof(uint32_t),
     };
     const std::array<VkDescriptorSetLayout, 2> skyLayouts = {
@@ -1218,7 +1141,8 @@ void Renderer::loadHdrPanorama(const std::string& path)
     m_skyPanorama.releaseStaging();
 
     // Point the panorama descriptor at the newly uploaded image
-    writeCombinedImageSamplerDescriptor(m_ctx.getDevice(), m_skyPanoramaSet, 0,
+    writeCombinedImageSamplerDescriptor(m_ctx.getDevice(), m_skyPanoramaSet,
+                                        shader_interface::sky_binding::kPanorama,
                                         m_skyPanoramaSampler, m_skyPanorama.getImageView(),
                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
@@ -1300,7 +1224,7 @@ void Renderer::createDescriptorSet()
         {
             .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .dstSet          = m_descriptorSet,
-            .dstBinding      = 0,
+            .dstBinding      = shader_interface::scene_binding::kCamera,
             .dstArrayElement = 0,
             .descriptorCount = 1,
             .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -1309,7 +1233,7 @@ void Renderer::createDescriptorSet()
         {
             .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .dstSet          = m_descriptorSet,
-            .dstBinding      = 1,
+            .dstBinding      = shader_interface::scene_binding::kLight,
             .dstArrayElement = 0,
             .descriptorCount = 1,
             .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -1318,7 +1242,7 @@ void Renderer::createDescriptorSet()
         {
             .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .dstSet          = m_descriptorSet,
-            .dstBinding      = 2,
+            .dstBinding      = shader_interface::scene_binding::kShadow,
             .dstArrayElement = 0,
             .descriptorCount = 1,
             .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -1327,7 +1251,7 @@ void Renderer::createDescriptorSet()
         {
             .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .dstSet          = m_descriptorSet,
-            .dstBinding      = 3,
+            .dstBinding      = shader_interface::scene_binding::kShadowMap,
             .dstArrayElement = 0,
             .descriptorCount = 1,
             .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -1336,7 +1260,7 @@ void Renderer::createDescriptorSet()
         {
             .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .dstSet          = m_descriptorSet,
-            .dstBinding      = 4,
+            .dstBinding      = shader_interface::scene_binding::kShadowMoments,
             .dstArrayElement = 0,
             .descriptorCount = 1,
             .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -1403,7 +1327,7 @@ void Renderer::createMaterialDescriptorSets()
             {
                 .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                 .dstSet          = m_materialSets[i],
-                .dstBinding      = 0,
+                .dstBinding      = shader_interface::material_binding::kAlbedo,
                 .dstArrayElement = 0,
                 .descriptorCount = 1,
                 .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -1412,7 +1336,7 @@ void Renderer::createMaterialDescriptorSets()
             {
                 .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                 .dstSet          = m_materialSets[i],
-                .dstBinding      = 1,
+                .dstBinding      = shader_interface::material_binding::kNormal,
                 .dstArrayElement = 0,
                 .descriptorCount = 1,
                 .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -1421,7 +1345,7 @@ void Renderer::createMaterialDescriptorSets()
             {
                 .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                 .dstSet          = m_materialSets[i],
-                .dstBinding      = 2,
+                .dstBinding      = shader_interface::material_binding::kMetallicRoughness,
                 .dstArrayElement = 0,
                 .descriptorCount = 1,
                 .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -1917,13 +1841,13 @@ void Renderer::createShadowResources()
     // Descriptor layout: 2 storage images (input and output image2DArrays).
     const std::array<VkDescriptorSetLayoutBinding, 2> blurBindings{{
         {
-            .binding         = 0,
+            .binding         = shader_interface::shadow_blur_binding::kInputImage,
             .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
             .descriptorCount = 1,
             .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT,
         },
         {
-            .binding         = 1,
+            .binding         = shader_interface::shadow_blur_binding::kOutputImage,
             .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
             .descriptorCount = 1,
             .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT,
@@ -1938,7 +1862,7 @@ void Renderer::createShadowResources()
 
     const VkPushConstantRange blurPushRange{
         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-        .offset     = 0,
+        .offset     = shader_interface::kShadowBlurPcOffset,
         .size       = 2 * sizeof(int32_t),  // direction + radius
     };
     const VkPipelineLayoutCreateInfo blurLayoutCI{
@@ -2009,7 +1933,7 @@ void Renderer::createShadowResources()
         { // horizontal: binding 0 = moments (read)
             .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .dstSet          = m_blurSetHorizontal,
-            .dstBinding      = 0,
+            .dstBinding      = shader_interface::shadow_blur_binding::kInputImage,
             .descriptorCount = 1,
             .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
             .pImageInfo      = &blurMomentsInfo,
@@ -2017,7 +1941,7 @@ void Renderer::createShadowResources()
         { // horizontal: binding 1 = temp (write)
             .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .dstSet          = m_blurSetHorizontal,
-            .dstBinding      = 1,
+            .dstBinding      = shader_interface::shadow_blur_binding::kOutputImage,
             .descriptorCount = 1,
             .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
             .pImageInfo      = &blurTempInfo,
@@ -2025,7 +1949,7 @@ void Renderer::createShadowResources()
         { // vertical: binding 0 = temp (read)
             .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .dstSet          = m_blurSetVertical,
-            .dstBinding      = 0,
+            .dstBinding      = shader_interface::shadow_blur_binding::kInputImage,
             .descriptorCount = 1,
             .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
             .pImageInfo      = &blurTempInfo,
@@ -2033,7 +1957,7 @@ void Renderer::createShadowResources()
         { // vertical: binding 1 = moments (write)
             .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .dstSet          = m_blurSetVertical,
-            .dstBinding      = 1,
+            .dstBinding      = shader_interface::shadow_blur_binding::kOutputImage,
             .descriptorCount = 1,
             .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
             .pImageInfo      = &blurMomentsInfo,
@@ -2112,7 +2036,7 @@ void Renderer::updateShadowMatrices()
 
         ubo.lightViewProj[c] = lightProj * finalLightView;
 
-        // Phase 4.2.5: build a standard-Z (non-reverse) camera VP for this cascade
+        // build a standard-Z (non-reverse) camera VP for this cascade
         // slice and extract shadow-caster culling planes from it.
         // perspectiveRH_NO maps Z to [-1,1] (OpenGL), matching the Gribb-Hartmann
         // r3±r2 formulas used in extractFrustumPlanes().
@@ -2152,7 +2076,7 @@ void Renderer::handleResize()
     const VkExtent2D newExt = m_swapchain.getExtent();
     if (newExt.width > 0 && newExt.height > 0) {
         createDepthImage();
-        createHdrTarget();  // also calls updateTonemapDescriptorSet() to rebind new image view
+        createHdrTarget();  // also refreshes TonemapPass HDR input binding
     }
 
     spdlog::info("Renderer resized: {}x{} -> {}x{}", oldExt.width, oldExt.height,
@@ -2207,7 +2131,7 @@ void Renderer::render()
     m_renderStats.drawCalls = 0;
     m_renderStats.triangles = 0;
 
-    // Phase 3.7: update shadow matrices each frame so the shadow follows the camera.
+    // update shadow matrices each frame so the shadow follows the camera.
     // Also recalculates shadowRadius/shadowDepth from m_sceneInfo.normalizedRadius.
     updateShadowMatrices();
 
@@ -2235,7 +2159,7 @@ void Renderer::render()
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                       isVsm ? m_shadowVsmPipeline : m_shadowPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout,
-                            0, 1, &m_descriptorSet, 0, nullptr);
+                            shader_interface::kSceneSet, 1, &m_descriptorSet, 0, nullptr);
 
     const VkBuffer     shadowVertexBuf = m_vertexBuffer.getBuffer();
     const VkDeviceSize zeroOffset      = 0;
@@ -2285,9 +2209,9 @@ void Renderer::render()
         // Push cascade index (bytes 96–99): shadow.vert selects lightViewProj[cascadeIndex]
         vkCmdPushConstants(cmd, m_pipelineLayout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                           96, sizeof(uint32_t), &c);
+                            shader_interface::kCascadeIndexPcOffset, sizeof(uint32_t), &c);
 
-        // Phase 4.2.5: per-mesh shadow-caster culling
+        // per-mesh shadow-caster culling
         uint32_t culledCount = 0;
         const auto& cullPlanes = m_shadowCullPlanes[c];
 
@@ -2299,7 +2223,7 @@ void Renderer::render()
                 continue;
             }
             vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
-                               0, sizeof(glm::mat4), &m_sceneInfo.modelMatrix);
+                               shader_interface::kModelMatrixPcOffset, sizeof(glm::mat4), &m_sceneInfo.modelMatrix);
             vkCmdDrawIndexed(cmd, meshData.indexCount, 1, meshData.firstIndex, 0, 0);
         }
 
@@ -2339,11 +2263,13 @@ void Renderer::render()
 
         // Horizontal pass: moments (read) → temp (write)
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                m_blurPipelineLayout, 0, 1, &m_blurSetHorizontal, 0, nullptr);
+                                m_blurPipelineLayout, shader_interface::kShadowBlurSet,
+                                1, &m_blurSetHorizontal, 0, nullptr);
         struct BlurPC { int32_t direction; int32_t radius; };
         BlurPC blurPC{ 0, 3 };
         vkCmdPushConstants(cmd, m_blurPipelineLayout,
-                           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(BlurPC), &blurPC);
+                            VK_SHADER_STAGE_COMPUTE_BIT, shader_interface::kShadowBlurPcOffset,
+                            sizeof(BlurPC), &blurPC);
         // dispatch: 2048/16=128 per axis, CASCADE_COUNT layers
         vkCmdDispatch(cmd, CASCADE_SIZE / 16, CASCADE_SIZE / 16, CASCADE_COUNT);
 
@@ -2364,10 +2290,12 @@ void Renderer::render()
 
         // Vertical pass: temp (read) → moments (write)
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                m_blurPipelineLayout, 0, 1, &m_blurSetVertical, 0, nullptr);
+                                m_blurPipelineLayout, shader_interface::kShadowBlurSet,
+                                1, &m_blurSetVertical, 0, nullptr);
         blurPC.direction = 1;
         vkCmdPushConstants(cmd, m_blurPipelineLayout,
-                           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(BlurPC), &blurPC);
+                            VK_SHADER_STAGE_COMPUTE_BIT, shader_interface::kShadowBlurPcOffset,
+                            sizeof(BlurPC), &blurPC);
         vkCmdDispatch(cmd, CASCADE_SIZE / 16, CASCADE_SIZE / 16, CASCADE_COUNT);
 
         m_gpuTimer.writeTimestamp(cmd, "BlurPass_End");
@@ -2379,7 +2307,7 @@ void Renderer::render()
             VK_IMAGE_LAYOUT_GENERAL,                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
 
-    // Phase 5: HDR target transitions from UNDEFINED every frame (LOAD_OP_CLEAR discards contents).
+    //  HDR target transitions from UNDEFINED every frame (LOAD_OP_CLEAR discards contents).
     vkutil::transitionImage(cmd, m_hdrTarget.getImage(),
         VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,              0,
         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,   VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
@@ -2450,13 +2378,13 @@ void Renderer::render()
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyPipeline);
         // Set 0: camera + light UBOs (same descriptor set used by PBR)
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyPipelineLayout,
-                                0, 1, &m_descriptorSet, 0, nullptr);
+                                shader_interface::kSceneSet, 1, &m_descriptorSet, 0, nullptr);
         // Set 1: equirectangular panorama (fallback white in procedural mode)
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyPipelineLayout,
-                                1, 1, &m_skyPanoramaSet, 0, nullptr);
+                                shader_interface::kSkyPanoramaSet, 1, &m_skyPanoramaSet, 0, nullptr);
         const uint32_t skyMode = static_cast<uint32_t>(m_skyMode);
         vkCmdPushConstants(cmd, m_skyPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, sizeof(uint32_t), &skyMode);
+                            shader_interface::kSkyPcOffset, sizeof(uint32_t), &skyMode);
         vkCmdDraw(cmd, 3, 1, 0, 0);
     }
 
@@ -2470,7 +2398,7 @@ void Renderer::render()
 
     // Bind camera UBO descriptor set (set=0, binding=0 — view/projection matrices)
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout,
-                            0, 1, &m_descriptorSet, 0, nullptr);
+                            shader_interface::kSceneSet, 1, &m_descriptorSet, 0, nullptr);
 
     // Bind vertex and index buffers
     const VkDeviceSize vertexOffset = 0;
@@ -2480,7 +2408,7 @@ void Renderer::render()
 
     // Push normalization model matrix (bytes 0–63): same transform as shadow pass.
     vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
-                       0, sizeof(glm::mat4), &m_sceneInfo.modelMatrix);
+                       shader_interface::kModelMatrixPcOffset, sizeof(glm::mat4), &m_sceneInfo.modelMatrix);
 
     for (const auto& mesh : m_meshRenderData) {
         if (mesh.materialIndex >= 0 &&
@@ -2489,7 +2417,7 @@ void Renderer::render()
             // Bind material texture set (set=1) — set=0 remains bound and unaffected.
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     m_pipelineLayout,
-                                    1, 1, &m_materialSets[static_cast<size_t>(mesh.materialIndex)],
+                                    shader_interface::kMaterialSet, 1, &m_materialSets[static_cast<size_t>(mesh.materialIndex)],
                                     0, nullptr);
 
             // Push material factors to fragment stage (offset 64, after model matrix).
@@ -2502,12 +2430,12 @@ void Renderer::render()
                                     ? mat.alphaCutoff : 0.0f,
             };
             vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
-                               64, sizeof(MaterialPushConstants), &matPC);
+                               shader_interface::kMaterialPcOffset, sizeof(MaterialPushConstants), &matPC);
         } else {
             // No material — push default white/neutral factors.
             const MaterialPushConstants defaultPC{};
             vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
-                               64, sizeof(MaterialPushConstants), &defaultPC);
+                               shader_interface::kMaterialPcOffset, sizeof(MaterialPushConstants), &defaultPC);
         }
 
         vkCmdDrawIndexed(cmd, mesh.indexCount, 1, mesh.firstIndex, 0, 0);
@@ -2534,60 +2462,17 @@ void Renderer::render()
     // ── Tone map pass: fullscreen triangle HDR→LDR → swapchain SRGB ──────────
     m_gpuTimer.writeTimestamp(cmd, "TonemapPass_Begin");
 
-    const VkRenderingAttachmentInfo tonemapColorAtt{
-        .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView   = m_swapchain.getCurrentImageView(),
-        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        .loadOp      = VK_ATTACHMENT_LOAD_OP_DONT_CARE,  // fullscreen overwrite; no need to load
-        .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
-    };
-    const VkRenderingInfo tonemapRenderInfo{
-        .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
-        .renderArea           = { .offset = { 0, 0 }, .extent = ext },
-        .layerCount           = 1,
-        .colorAttachmentCount = 1,
-        .pColorAttachments    = &tonemapColorAtt,
-        // No depth attachment — fullscreen blit doesn't depth-test
-    };
-
-    vkCmdBeginRendering(cmd, &tonemapRenderInfo);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_tonemapPipeline);
-
-    const VkViewport tonemapVP{
-        .x = 0.0f, .y = 0.0f,
-        .width  = static_cast<float>(ext.width),
-        .height = static_cast<float>(ext.height),
-        .minDepth = 0.0f, .maxDepth = 1.0f,
-    };
-    vkCmdSetViewport(cmd, 0, 1, &tonemapVP);
-    const VkRect2D tonemapScissor{ .offset = { 0, 0 }, .extent = ext };
-    vkCmdSetScissor(cmd, 0, 1, &tonemapScissor);
-
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            m_tonemapPipelineLayout, 0, 1, &m_tonemapSet, 0, nullptr);
-
-    struct TonemapPC {
-        uint32_t mode;
-        float    exposure;
-        uint32_t splitScreenMode;
-        uint32_t splitRightMode;
-    };
-    const TonemapPC tonemapPC{
+    const shader_interface::TonemapPC tonemapPC{
         static_cast<uint32_t>(m_tonemapMode),
         m_exposure,
         static_cast<uint32_t>(m_splitScreenMode),
         static_cast<uint32_t>(m_splitRightMode),
     };
-    vkCmdPushConstants(cmd, m_tonemapPipelineLayout,
-                       VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(TonemapPC), &tonemapPC);
-
-    vkCmdDraw(cmd, 3, 1, 0, 0);  // 3 vertices; fullscreen triangle generated in tonemap.vert
-
-    vkCmdEndRendering(cmd);
+    m_tonemapPass.record(cmd, m_swapchain.getCurrentImageView(), ext, tonemapPC);
 
     m_gpuTimer.writeTimestamp(cmd, "TonemapPass_End");
 
-    // Phase 2.5: ImGui overlay pass (LOAD_OP_LOAD preserves the tone-mapped image).
+    // ImGui overlay pass (LOAD_OP_LOAD preserves the tone-mapped image).
     if (m_imguiManager) {
         m_imguiManager->recordRenderPass(
             cmd,
@@ -2611,6 +2496,35 @@ void Renderer::requestScreenshot(const std::string& filename)
 {
     m_screenshotRequested = true;
     m_screenshotFilename  = filename;
+}
+
+void Renderer::submitFrame(const RenderFramePacket& packet)
+{
+    setCameraMatrices(packet.camera.view, packet.camera.projection, packet.camera.position);
+    setCameraFrustum(packet.camera.nearZ, packet.camera.farZ);
+
+    m_lightDirection    = glm::normalize(packet.light.direction);
+    m_lightColor        = packet.light.color;
+    m_lightIntensity    = packet.light.intensity;
+    m_ambientIntensity  = packet.light.ambient;
+
+    m_csmLambda          = packet.shadow.csmLambda;
+    m_showCascadeDebug   = packet.shadow.debugCascades;
+    m_shadowFilterMode   = packet.shadow.filterMode;
+    m_pcfSpreadRadius    = packet.shadow.pcfSpreadRadius;
+    m_vsmBleedReduction  = packet.shadow.vsmBleedReduction;
+    uploadLightUBO();
+
+    setTonemapParams(packet.tonemap.mode,
+                     packet.tonemap.exposure,
+                     packet.tonemap.splitScreen,
+                     packet.tonemap.splitRightMode);
+
+    m_skyEnabled = packet.sky.enabled;
+    m_skyMode    = packet.sky.mode;
+
+    m_wireframe   = packet.debug.wireframe;
+    m_showNormals = packet.debug.showNormals;
 }
 
 void Renderer::setCameraMatrices(const glm::mat4& view, const glm::mat4& projection,

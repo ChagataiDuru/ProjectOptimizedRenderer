@@ -8,6 +8,7 @@ layout(location = 0) in VS_OUT {
 } fs_in;
 
 // ── Per-frame uniform bindings (set 0) ───────────────────────────────────────
+// ShaderInterface.h: scene set owns camera/light/shadow descriptors.
 layout(binding = 0, set = 0) uniform CameraData {
     mat4 view;
     mat4 projection;
@@ -38,6 +39,7 @@ layout(binding = 3, set = 0) uniform sampler2DArray shadowMap;
 layout(binding = 4, set = 0) uniform sampler2DArray shadowMoments;
 
 // ── Material textures (set 1) ─────────────────────────────────────────────────
+// ShaderInterface.h: material set owns material texture descriptors.
 layout(binding = 0, set = 1) uniform sampler2D texAlbedo;
 layout(binding = 1, set = 1) uniform sampler2D texNormal;
 layout(binding = 2, set = 1) uniform sampler2D texMetallicRoughness;

@@ -2,6 +2,7 @@
 
 // ── Camera data (CameraUBO) — binding 0, set 0 ────────────────────────────────
 // Provides inverseVP to reconstruct a world-space ray direction from clip-space position.
+// ShaderInterface.h: scene set/binding 0 owns CameraData.
 layout(binding = 0, set = 0) uniform CameraData {
     mat4 view;
     mat4 projection;

@@ -10,6 +10,7 @@ layout(push_constant) uniform SkyPC {
 // ── Set 0: shared scene descriptors (same layout as PBR pipeline) ─────────────
 // Binding 0 is camera — declared in sky.vert, not needed here.
 // Binding 1: directional light — provides sun direction and intensity.
+// ShaderInterface.h: scene set/binding 1 owns LightData.
 layout(binding = 1, set = 0) uniform LightData {
     vec3  lightDirection;   // world-space direction pointing TOWARD the sun
     float lightIntensity;
@@ -17,6 +18,7 @@ layout(binding = 1, set = 0) uniform LightData {
 
 // ── Set 1: equirectangular HDR panorama ───────────────────────────────────────
 // In procedural mode (skyMode=0) a 1×1 white dummy texture is bound here.
+// ShaderInterface.h: sky panorama set/binding 0 owns panorama.
 layout(binding = 0, set = 1) uniform sampler2D panorama;
 
 // ── Constants ─────────────────────────────────────────────────────────────────

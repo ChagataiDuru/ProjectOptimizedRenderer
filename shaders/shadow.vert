@@ -10,6 +10,7 @@ layout(push_constant) uniform PushConstants {
     layout(offset = 96) uint cascadeIndex;
 } pc;
 
+// ShaderInterface.h: scene set/binding 2 owns ShadowData.
 layout(binding = 2, set = 0) uniform ShadowData {
     mat4 lightViewProj[4];
     vec4 splitDepths;

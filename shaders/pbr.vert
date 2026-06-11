@@ -12,6 +12,7 @@ layout(push_constant) uniform PushConstants {
 } pc;
 
 // ── Per-frame camera data via uniform buffer ─────────────────────────────────
+// ShaderInterface.h: scene set/binding 0 owns CameraData.
 layout(binding = 0, set = 0) uniform CameraData {
     mat4 view;
     mat4 projection;

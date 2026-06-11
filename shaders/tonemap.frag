@@ -3,8 +3,10 @@
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 outColor;
 
+// ShaderInterface.h: tonemap set/binding 0 owns HDR input.
 layout(binding = 0, set = 0) uniform sampler2D hdrInput;
 
+// ShaderInterface.h: TonemapPC is 16 bytes.
 layout(push_constant) uniform TonemapPC {
     uint  tonemapMode;      // 0=Reinhard, 1=AgX, 2=PBR Neutral
     float exposure;         // EV adjustment applied before tone mapping

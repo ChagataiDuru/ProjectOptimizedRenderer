@@ -4,8 +4,11 @@
 #include "core/Swapchain.h"
 #include "core/CommandBuffer.h"
 #include "core/FrameSync.h"
+#include "core/RenderFramePacket.h"
+#include "core/ShaderInterface.h"
 #include "debug/GPUTimer.h"
 #include "debug/Screenshot.h"
+#include "renderpasses/TonemapPass.h"
 #include "resource/Buffer.h"
 #include "resource/Image.h"
 #include "resource/Model.h"
@@ -37,6 +40,8 @@ public:
 
     // Record commands, submit, present, advance frame indices.
     void endFrame();
+
+    void submitFrame(const RenderFramePacket& packet);
 
     void setCameraMatrices(const glm::mat4& view, const glm::mat4& projection,
                            const glm::vec3& cameraPos);
@@ -77,7 +82,7 @@ public:
     bool isNormalVisualization()  const { return m_showNormals; }
 
     // Phase 4.3: cascade shadow map constants
-    static constexpr uint32_t CASCADE_COUNT = 4;
+    static constexpr uint32_t CASCADE_COUNT = shader_interface::kCascadeCount;
     static constexpr uint32_t CASCADE_SIZE  = 2048;
 
     // Phase 4.2.5: shadow culling stats
@@ -175,35 +180,15 @@ private:
     std::vector<VkDescriptorSet> m_materialSets;
 
     // Push constant: bytes 64-95 in the pipeline layout (after 64-byte model matrix)
-    struct MaterialPushConstants {
-        glm::vec4 baseColorFactor = glm::vec4(1.0f);
-        float     metallicFactor  = 1.0f;
-        float     roughnessFactor = 1.0f;
-        float     alphaCutoff     = 0.0f;   // 0 = no cutoff (opaque); >0 = discard below this
-        float     _pad            = 0.0f;
-    };
+    using MaterialPushConstants = shader_interface::MaterialPushConstants;
 
     // Camera UBO (host-visible, updated every frame)
     // Phase 6.5: added inverseVP between projection and cameraPos for sky ray reconstruction.
-    struct CameraUBO {
-        glm::mat4 view;
-        glm::mat4 projection;
-        glm::mat4 inverseVP;    // inverse(projection * view) — sky shader needs this
-        glm::vec3 cameraPos;
-        float     _pad = 0.0f;  // std140: vec3 rounds up to 16 bytes
-    };  // 208 bytes (was 144)
+    using CameraUBO = shader_interface::CameraUBO;
 
     // Directional light UBO (host-visible, std140: 48 bytes = 3×vec4)
-    struct LightUBO {
-        glm::vec3 lightDirection;
-        float     lightIntensity;
-        glm::vec3 lightColor;
-        float     ambientIntensity;
-        uint32_t  debugCascades;     // 0 = off, 1 = false-color overlay
-        uint32_t  shadowFilterMode;  // 0=None, 1=PCF, 2=VSM
-        float     pcfSpreadRadius;   // PCF sample spread in texels
-        float     vsmBleedReduction; // VSM light bleeding reduction factor
-    };  // 48 bytes: 2×(vec3+float) + 4×uint32/float
+    using LightUBO = shader_interface::LightUBO;
+    using ShadowCascadeUBO = shader_interface::ShadowCascadeUBO;
 
     Buffer           m_cameraUBOBuffer;
     Buffer           m_lightUBOBuffer;
@@ -220,12 +205,7 @@ private:
     Image            m_hdrTarget;
     VkSampler        m_hdrSampler           = VK_NULL_HANDLE;
 
-    // Phase 5: Tone map pass resources
-    VkDescriptorSetLayout m_tonemapSetLayout      = VK_NULL_HANDLE;
-    VkDescriptorPool      m_tonemapPool            = VK_NULL_HANDLE;
-    VkDescriptorSet       m_tonemapSet             = VK_NULL_HANDLE;
-    VkPipelineLayout      m_tonemapPipelineLayout  = VK_NULL_HANDLE;
-    VkPipeline            m_tonemapPipeline        = VK_NULL_HANDLE;
+    TonemapPass      m_tonemapPass;
 
     // Phase 5/6: tone map state (uploaded as TonemapPC push constant each frame)
     float   m_exposure         = 0.0f;  // EV offset; 0 = no change
@@ -245,10 +225,6 @@ private:
     RenderStats  m_renderStats;
 
     // Phase 4.3: cascaded shadow map resources
-    struct ShadowCascadeUBO {
-        glm::mat4 lightViewProj[CASCADE_COUNT];
-        glm::vec4 splitDepths;   // x=c0, y=c1, z=c2, w=c3 (view-space |Z|)
-    };
     Image            m_shadowMap;           // D32_SFLOAT 2D_ARRAY, CASCADE_COUNT layers
     std::array<VkImageView, CASCADE_COUNT> m_shadowLayerViews = {};  // per-layer attachment views
     VkSampler        m_shadowSampler    = VK_NULL_HANDLE;
@@ -326,9 +302,7 @@ private:
     void createLightUBO();
     void uploadLightUBO();   // re-upload m_lightUBOBuffer from stored params
     void createDepthImage();
-    void createHdrTarget();  // Phase 5: create/recreate HDR offscreen target + update tonemap set
-    void createTonemapPipeline();
-    void updateTonemapDescriptorSet();  // called by createHdrTarget() after image (re)creation
+    void createHdrTarget();  // create/recreate HDR target and refresh tone-map input
     void createDescriptorPool();
     void createDescriptorSet();
     void createMaterialDescriptorSets();

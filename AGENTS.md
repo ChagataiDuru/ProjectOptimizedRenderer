@@ -37,17 +37,16 @@ cmake --build --preset debug
 
 ### Windows Debug Build
 
-Use the Windows debug preset name: `win-debug`.
+Use the Conan-generated Windows debug preset name: `conan-debug`. Run from a Visual Studio 2022 Developer PowerShell so Ninja can find the MSVC toolchain. `Launch-VsDevShell.ps1` may change the current directory, so return to the repo root before running Conan/CMake.
 
 ```powershell
-# Install dependencies via Conan (run from repo root)
-conan install . --output-folder=build --build=missing
+& "C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\Tools\Launch-VsDevShell.ps1" -Arch amd64 -HostArch amd64
+Set-Location "C:\Users\DUC2IB\Repos\ProjectOptimizedRenderer"
 
-# Configure with CMake
-cmake --preset win-debug
+conan install . -of build/win-debug -s build_type=Debug --build=missing -c tools.cmake.cmaketoolchain:generator=Ninja
 
-# Build
-cmake --build --preset win-debug
+cmake --preset conan-debug
+cmake --build --preset conan-debug
 ```
 
 ### Linux Build Status

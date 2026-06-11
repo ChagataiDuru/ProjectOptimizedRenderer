@@ -89,6 +89,7 @@ add_executable(ProjectOptimizedRenderer
     src/core/Renderer.cpp
     src/core/VulkanUtil.cpp
     src/core/Camera.cpp
+    src/renderpasses/TonemapPass.cpp
     src/resource/VmaImpl.cpp
     src/resource/Buffer.cpp
     src/resource/Image.cpp
@@ -105,6 +106,7 @@ add_executable(ProjectOptimizedRenderer
     src/debug/GPUTimer.cpp
     src/debug/Screenshot.cpp
     src/debug/LogSink.cpp
+    src/viewer/ViewerPanels.cpp
     # ── Dear ImGui core ───────────────────────────────────────────────────────
     external/imgui/imgui.cpp
     external/imgui/imgui_draw.cpp
