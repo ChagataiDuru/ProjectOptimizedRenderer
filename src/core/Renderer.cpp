@@ -270,7 +270,7 @@ Renderer::~Renderer()
 
 void Renderer::init()
 {
-    loadModel(std::string(ASSET_DIR) + "/models/sponza/glTF/Sponza.gltf");
+    loadModel(std::string(ASSET_DIR) + "/source/Sponza.gltf");
     m_sceneInfo = computeSceneInfo(m_model.boundsMin, m_model.boundsMax);
     spdlog::info("Scene normalized: scale={:.4f}, radius={:.2f}",
                  m_sceneInfo.scaleFactor, m_sceneInfo.normalizedRadius);
@@ -354,7 +354,7 @@ void Renderer::reloadModel(const std::string& modelPath)
         spdlog::error("Failed to load model '{}': {}", modelPath, e.what());
         spdlog::info("Falling back to Sponza");
         try {
-            loadModel(std::string(ASSET_DIR) + "/models/sponza/glTF/Sponza.gltf");
+            loadModel(std::string(ASSET_DIR) + "/source/Sponza.gltf");
         } catch (const std::exception& e2) {
             spdlog::critical("Failed to load fallback model: {}", e2.what());
             throw;  // Unrecoverable

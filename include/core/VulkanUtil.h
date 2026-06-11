@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+#include <stdexcept>
 #include "core/VulkanContext.h"
 
 namespace vkutil {
