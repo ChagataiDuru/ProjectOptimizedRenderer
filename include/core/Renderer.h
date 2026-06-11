@@ -5,10 +5,12 @@
 #include "core/CommandBuffer.h"
 #include "core/DrawCommand.h"
 #include "core/FrameSync.h"
+#include "core/MeshRenderData.h"
 #include "core/RenderFramePacket.h"
 #include "core/ShaderInterface.h"
 #include "debug/GPUTimer.h"
 #include "debug/Screenshot.h"
+#include "renderpasses/ShadowPass.h"
 #include "renderpasses/SkyPass.h"
 #include "renderpasses/TonemapPass.h"
 #include "resource/Buffer.h"
@@ -55,15 +57,15 @@ public:
                             float intensity, float ambient);
 
     // Phase 4.3: CSM controls
-    void setCsmLambda(float lambda)            { m_csmLambda = lambda; }
+    void setCsmLambda(float lambda)            { m_shadowSettings.csmLambda = lambda; }
     void setCascadeDebugEnabled(bool enabled);
-    bool isCascadeDebugEnabled() const         { return m_showCascadeDebug; }
+    bool isCascadeDebugEnabled() const         { return m_shadowSettings.debugCascades; }
 
     // Phase 4.4-4.6: shadow filter mode and per-mode settings
     void setShadowFilterMode(int32_t mode);    // 0=None, 1=PCF, 2=VSM
     void setPcfSpreadRadius(float radius);
     void setVsmBleedReduction(float reduction);
-    int32_t getShadowFilterMode() const        { return m_shadowFilterMode; }
+    int32_t getShadowFilterMode() const        { return m_shadowSettings.filterMode; }
 
     // Unload current model and load a new glTF at the given path.
     // Destroys model-dependent GPU resources, loads new model, recreates descriptors.
@@ -85,17 +87,12 @@ public:
 
     // Phase 4.3: cascade shadow map constants
     static constexpr uint32_t CASCADE_COUNT = shader_interface::kCascadeCount;
-    static constexpr uint32_t CASCADE_SIZE  = 2048;
+    static constexpr uint32_t CASCADE_SIZE  = 1024;
 
     // Phase 4.2.5: shadow culling stats
-    const std::array<uint32_t, CASCADE_COUNT>& getShadowCulledMeshes() const { return m_shadowCulledMeshes; }
-    const std::array<uint32_t, CASCADE_COUNT>& getShadowTotalMeshes()  const { return m_shadowTotalMeshes; }
-
-    // Phase 4.2.5: culling plane type (public so static helpers in Renderer.cpp can alias it)
-    struct CullingPlane {
-        glm::vec3 normal;   // inward-pointing
-        float     d;        // dot(normal, X) + d >= 0 means inside
-    };
+    const std::array<uint32_t, CASCADE_COUNT>& getShadowCulledMeshes() const { return m_shadowPass.getDebugInfo().culledMeshes; }
+    const std::array<uint32_t, CASCADE_COUNT>& getShadowTotalMeshes()  const { return m_shadowPass.getDebugInfo().totalMeshes; }
+    const ShadowDebugInfo& getShadowDebugInfo() const { return m_shadowPass.getDebugInfo(); }
 
     // Phase 5/6: tone mapping controls
     void setExposure(float ev)           { m_exposure = ev; }
@@ -158,13 +155,6 @@ private:
     Buffer m_indexBuffer;
 
     // Phase 1.3: model and per-mesh draw data
-    struct MeshRenderData {
-        uint32_t firstIndex;
-        uint32_t indexCount;
-        // World-space AABB (model-space AABB transformed by m_sceneInfo.modelMatrix)
-        glm::vec3 worldBoundsMin = glm::vec3(0.0f);
-        glm::vec3 worldBoundsMax = glm::vec3(0.0f);
-    };
     Model                       m_model;
     SceneInfo                   m_sceneInfo;    // Phase 3.7: normalization transform
     std::vector<MeshRenderData> m_meshes;
@@ -231,14 +221,9 @@ private:
     Screenshot   m_screenshot;
     RenderStats  m_renderStats;
 
-    // Phase 4.3: cascaded shadow map resources
-    Image            m_shadowMap;           // D32_SFLOAT 2D_ARRAY, CASCADE_COUNT layers
-    std::array<VkImageView, CASCADE_COUNT> m_shadowLayerViews = {};  // per-layer attachment views
-    VkSampler        m_shadowSampler    = VK_NULL_HANDLE;
-    Buffer           m_shadowUBOBuffer;
-    VkPipeline       m_shadowPipeline   = VK_NULL_HANDLE;
-    VkShaderModule   m_shadowVertModule = VK_NULL_HANDLE;
-    glm::vec3        m_lightDirection   = glm::vec3(1.0f, 1.0f, 1.0f);
+    ShadowPass      m_shadowPass;
+    ShadowSettings  m_shadowSettings;
+    glm::vec3       m_lightDirection   = glm::vec3(1.0f, 1.0f, 1.0f);
 
     // Stored to re-upload LightUBO when debug toggle changes
     glm::vec3 m_lightColor        = glm::vec3(1.0f);
@@ -250,38 +235,6 @@ private:
     glm::mat4 m_projMatrix  = glm::mat4(1.0f);
     float     m_cameraNearZ = 0.01f;
     float     m_cameraFarZ  = 1000.0f;
-
-    // CSM UI state
-    float m_csmLambda        = 0.5f;
-    bool  m_showCascadeDebug = false;
-
-    // Phase 4.4-4.6: VSM moment images (RG32_SFLOAT, CASCADE_COUNT layers each)
-    Image m_shadowMoments;       // color attachment (shadow pass) + sampled (PBR pass)
-    Image m_shadowMomentsTemp;   // blur intermediate (compute only)
-    std::array<VkImageView, CASCADE_COUNT> m_momentsLayerViews = {};  // per-cascade color attach
-    VkSampler  m_momentsSampler    = VK_NULL_HANDLE;  // LINEAR filter for bilinear VSM
-    VkPipeline m_shadowVsmPipeline = VK_NULL_HANDLE;  // shadow pass: depth + moments output
-
-    // Separable Gaussian blur (compute)
-    VkPipeline            m_blurPipeline       = VK_NULL_HANDLE;
-    VkPipelineLayout      m_blurPipelineLayout = VK_NULL_HANDLE;
-    VkDescriptorSetLayout m_blurSetLayout      = VK_NULL_HANDLE;
-    VkDescriptorPool      m_blurDescriptorPool = VK_NULL_HANDLE;
-    VkDescriptorSet       m_blurSetHorizontal  = VK_NULL_HANDLE;  // moments→temp
-    VkDescriptorSet       m_blurSetVertical    = VK_NULL_HANDLE;  // temp→moments
-
-    // Shadow filter state (uploaded to LightUBO, used by pbr.frag)
-    int32_t m_shadowFilterMode    = 0;    // 0=None, 1=PCF, 2=VSM
-    float   m_pcfSpreadRadius     = 2.0f; // PCF sample spread in texels
-    float   m_vsmBleedReduction   = 0.2f; // VSM light bleeding reduction
-
-    // Phase 4.2.5: shadow-caster culling planes (Aaltonen technique)
-    // Per-cascade culling plane set (back-facing frustum planes + silhouette edge planes)
-    std::array<std::vector<CullingPlane>, CASCADE_COUNT> m_shadowCullPlanes;
-
-    // Stats: meshes culled per cascade (for ImGui display)
-    std::array<uint32_t, CASCADE_COUNT> m_shadowCulledMeshes = {};
-    std::array<uint32_t, CASCADE_COUNT> m_shadowTotalMeshes  = {};
 
     SkyPass m_skyPass;
     bool    m_skyEnabled = true;   // sky drawn by default
@@ -303,7 +256,6 @@ private:
     void createHdrTarget();
     void createDescriptorPool();
     void createDescriptorSet();
+    void updateShadowDescriptors();
     void createMaterialDescriptorSets();
-    void createShadowResources();
-    void updateShadowMatrices();
 };

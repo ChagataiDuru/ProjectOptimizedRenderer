@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
 #include <glm/glm.hpp>
 
 struct DirectionalLightData {
@@ -11,11 +12,29 @@ struct DirectionalLightData {
 };
 
 struct ShadowSettings {
-    float csmLambda        = 0.5f;
-    bool  debugCascades    = false;
-    int32_t filterMode     = 0;
-    float pcfSpreadRadius  = 2.0f;
+    float csmLambda         = 0.75f;
+    float maxDistance       = 100.0f;
+    bool  debugCascades     = false;
+    int32_t filterMode      = 0;
+    float pcfSpreadRadius   = 2.0f;
     float vsmBleedReduction = 0.2f;
+    float depthBiasConstant = 1.5f;
+    float depthBiasSlope    = 2.0f;
+    bool enableCasterCulling = true;
+    int32_t qualityPreset   = 1;
+    int32_t cullMode        = 0; // 0 none, 1 front, 2 back
+};
+
+struct ShadowDebugInfo {
+    glm::vec4 splitDepths = glm::vec4(0.0f);
+    std::array<uint32_t, 4> culledMeshes = {};
+    std::array<uint32_t, 4> totalMeshes = {};
+    std::array<uint32_t, 4> drawnMeshes = {};
+    uint32_t cascadeResolution = 0;
+    uint32_t cascadeCount = 4;
+    bool vsmAllocated = false;
+    float estimatedMemoryMB = 0.0f;
+    float maxDistance = 0.0f;
 };
 
 struct TonemapSettings {

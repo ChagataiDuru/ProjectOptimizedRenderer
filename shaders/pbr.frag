@@ -17,7 +17,7 @@ layout(binding = 0, set = 0) uniform CameraData {
 } camera;
 
 layout(binding = 1, set = 0) uniform LightData {
-    vec3  lightDirection;   // world-space, pointing TOWARD the scene (like the sun)
+    vec3  lightDirection;   // world-space, from shaded surface toward the light source
     float lightIntensity;
     vec3  lightColor;
     float ambientIntensity;

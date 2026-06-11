@@ -110,10 +110,7 @@ Renderer::Renderer(VulkanContext& ctx, Swapchain& swapchain)
     , m_fallbackWhite(ctx)
     , m_depthImage(ctx)
     , m_hdrTarget(ctx)
-    , m_shadowMap(ctx)
-    , m_shadowUBOBuffer(ctx)
-    , m_shadowMoments(ctx)
-    , m_shadowMomentsTemp(ctx)
+    , m_shadowPass(ctx)
     , m_skyPass(ctx)
     , m_gpuTimer(ctx)
     , m_screenshot(ctx)
@@ -141,11 +138,12 @@ void Renderer::init()
     m_skyPass.init(m_ctx, m_cameraSetLayout,
                    VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT,
                    SHADER_DIR);
-    createShadowResources();
     createCameraUBO();
     createLightUBO();
+    m_shadowPass.init(m_pipelineLayout, VK_NULL_HANDLE, SHADER_DIR);
     createDescriptorPool();
     createDescriptorSet();
+    m_shadowPass.setSceneDescriptorSet(m_descriptorSet);
     createMaterialDescriptorSets();
     m_gpuTimer.init(16);
 
@@ -212,6 +210,7 @@ void Renderer::reloadModel(const std::string& modelPath)
     // ── Recreate descriptors for the new model ───────────────────────────────────
     createDescriptorPool();
     createDescriptorSet();
+    m_shadowPass.setSceneDescriptorSet(m_descriptorSet);
     createMaterialDescriptorSets();
 
     // ── Update render stats ──────────────────────────────────────────────────────
@@ -251,62 +250,7 @@ void Renderer::shutdown()
     m_drawCommands.clear();
     m_samplerCache.shutdown();
 
-    // Destroy shadow resources
-    const VkDevice dev = m_ctx.getDevice();
-
-    // VSM blur compute resources
-    if (m_blurPipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(dev, m_blurPipeline, nullptr);
-        m_blurPipeline = VK_NULL_HANDLE;
-    }
-    if (m_blurPipelineLayout != VK_NULL_HANDLE) {
-        vkDestroyPipelineLayout(dev, m_blurPipelineLayout, nullptr);
-        m_blurPipelineLayout = VK_NULL_HANDLE;
-    }
-    if (m_blurDescriptorPool != VK_NULL_HANDLE) {
-        vkDestroyDescriptorPool(dev, m_blurDescriptorPool, nullptr);
-        m_blurDescriptorPool  = VK_NULL_HANDLE;
-        m_blurSetHorizontal   = VK_NULL_HANDLE;
-        m_blurSetVertical     = VK_NULL_HANDLE;
-    }
-    if (m_blurSetLayout != VK_NULL_HANDLE) {
-        vkDestroyDescriptorSetLayout(dev, m_blurSetLayout, nullptr);
-        m_blurSetLayout = VK_NULL_HANDLE;
-    }
-
-    // VSM shadow pipeline
-    if (m_shadowVsmPipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(dev, m_shadowVsmPipeline, nullptr);
-        m_shadowVsmPipeline = VK_NULL_HANDLE;
-    }
-
-    // VSM moment images and their per-layer views
-    if (m_momentsSampler != VK_NULL_HANDLE) {
-        vkDestroySampler(dev, m_momentsSampler, nullptr);
-        m_momentsSampler = VK_NULL_HANDLE;
-    }
-    for (auto& view : m_momentsLayerViews) {
-        if (view != VK_NULL_HANDLE) {
-            vkDestroyImageView(dev, view, nullptr);
-            view = VK_NULL_HANDLE;
-        }
-    }
-    m_shadowMomentsTemp.destroy();
-    m_shadowMoments.destroy();
-
-    // Hard shadow sampler and per-layer depth views
-    if (m_shadowSampler != VK_NULL_HANDLE) {
-        vkDestroySampler(dev, m_shadowSampler, nullptr);
-        m_shadowSampler = VK_NULL_HANDLE;
-    }
-    for (auto& view : m_shadowLayerViews) {
-        if (view != VK_NULL_HANDLE) {
-            vkDestroyImageView(dev, view, nullptr);
-            view = VK_NULL_HANDLE;
-        }
-    }
-    m_shadowMap.destroy();
-    m_shadowUBOBuffer.destroy();
+    m_shadowPass.shutdown(m_ctx.getDevice());
 
     // Destroy GPU resources that hold VMA allocations
     m_lightUBOBuffer.destroy();
@@ -748,8 +692,6 @@ void Renderer::destroyPipeline()
     if (m_pipeline           != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_pipeline, nullptr);                     m_pipeline          = VK_NULL_HANDLE; }
     if (m_wireframePipeline  != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_wireframePipeline, nullptr);            m_wireframePipeline = VK_NULL_HANDLE; }
     if (m_normalsPipeline    != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_normalsPipeline, nullptr);              m_normalsPipeline   = VK_NULL_HANDLE; }
-    if (m_shadowPipeline     != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_shadowPipeline, nullptr);               m_shadowPipeline    = VK_NULL_HANDLE; }
-    if (m_shadowVertModule   != VK_NULL_HANDLE) { vkDestroyShaderModule(dev, m_shadowVertModule, nullptr);         m_shadowVertModule  = VK_NULL_HANDLE; }
     if (m_pipelineLayout     != VK_NULL_HANDLE) { vkDestroyPipelineLayout(dev, m_pipelineLayout, nullptr);         m_pipelineLayout    = VK_NULL_HANDLE; }
     if (m_materialSetLayout  != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(dev, m_materialSetLayout, nullptr); m_materialSetLayout = VK_NULL_HANDLE; }
     if (m_cameraSetLayout    != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(dev, m_cameraSetLayout, nullptr);   m_cameraSetLayout   = VK_NULL_HANDLE; }
@@ -803,35 +745,35 @@ void Renderer::uploadLightUBO()
         m_lightIntensity,
         m_lightColor,
         m_ambientIntensity,
-        m_showCascadeDebug ? 1u : 0u,
-        static_cast<uint32_t>(m_shadowFilterMode),
-        m_pcfSpreadRadius,
-        m_vsmBleedReduction,
+        m_shadowSettings.debugCascades ? 1u : 0u,
+        static_cast<uint32_t>(m_shadowSettings.filterMode),
+        m_shadowSettings.pcfSpreadRadius,
+        m_shadowSettings.vsmBleedReduction,
     };
     m_lightUBOBuffer.upload(&light, sizeof(LightUBO));
 }
 
 void Renderer::setCascadeDebugEnabled(bool enabled)
 {
-    m_showCascadeDebug = enabled;
+    m_shadowSettings.debugCascades = enabled;
     uploadLightUBO();
 }
 
 void Renderer::setShadowFilterMode(int32_t mode)
 {
-    m_shadowFilterMode = mode;
+    m_shadowSettings.filterMode = mode;
     uploadLightUBO();
 }
 
 void Renderer::setPcfSpreadRadius(float radius)
 {
-    m_pcfSpreadRadius = radius;
+    m_shadowSettings.pcfSpreadRadius = radius;
     uploadLightUBO();
 }
 
 void Renderer::setVsmBleedReduction(float reduction)
 {
-    m_vsmBleedReduction = reduction;
+    m_shadowSettings.vsmBleedReduction = reduction;
     uploadLightUBO();
 }
 
@@ -960,19 +902,19 @@ void Renderer::createDescriptorSet()
         .range  = sizeof(LightUBO),
     };
     const VkDescriptorBufferInfo shadowUBOInfo{
-        .buffer = m_shadowUBOBuffer.getBuffer(),
+        .buffer = m_shadowPass.getShadowUBOBuffer(),
         .offset = 0,
         .range  = sizeof(ShadowCascadeUBO),
     };
     const VkDescriptorImageInfo shadowMapInfo{
-        .sampler     = m_shadowSampler,
-        .imageView   = m_shadowMap.getImageView(),
-        .imageLayout = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL,
+        .sampler     = m_shadowPass.getDepthSampler(),
+        .imageView   = m_shadowPass.getDepthImageView(),
+        .imageLayout = m_shadowPass.getDepthSampleLayout(),
     };
     const VkDescriptorImageInfo momentsInfo{
-        .sampler     = m_momentsSampler,
-        .imageView   = m_shadowMoments.getImageView(),
-        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        .sampler     = m_shadowPass.getMomentsSampler(),
+        .imageView   = m_shadowPass.getMomentsImageView(),
+        .imageLayout = m_shadowPass.getMomentsSampleLayout(),
     };
 
     const std::array<VkWriteDescriptorSet, 5> writes{{
@@ -1026,6 +968,55 @@ void Renderer::createDescriptorSet()
                            static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 
     spdlog::info("Descriptor set allocated: camera(b0), light(b1), shadowUBO(b2), depth(b3), moments(b4)");
+}
+
+void Renderer::updateShadowDescriptors()
+{
+    if (m_descriptorSet == VK_NULL_HANDLE) return;
+
+    const VkDescriptorBufferInfo shadowUBOInfo{
+        .buffer = m_shadowPass.getShadowUBOBuffer(),
+        .offset = 0,
+        .range = sizeof(ShadowCascadeUBO),
+    };
+    const VkDescriptorImageInfo shadowMapInfo{
+        .sampler = m_shadowPass.getDepthSampler(),
+        .imageView = m_shadowPass.getDepthImageView(),
+        .imageLayout = m_shadowPass.getDepthSampleLayout(),
+    };
+    const VkDescriptorImageInfo momentsInfo{
+        .sampler = m_shadowPass.getMomentsSampler(),
+        .imageView = m_shadowPass.getMomentsImageView(),
+        .imageLayout = m_shadowPass.getMomentsSampleLayout(),
+    };
+
+    const std::array<VkWriteDescriptorSet, 3> writes{{
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = m_descriptorSet,
+            .dstBinding = shader_interface::scene_binding::kShadow,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .pBufferInfo = &shadowUBOInfo,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = m_descriptorSet,
+            .dstBinding = shader_interface::scene_binding::kShadowMap,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo = &shadowMapInfo,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = m_descriptorSet,
+            .dstBinding = shader_interface::scene_binding::kShadowMoments,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo = &momentsInfo,
+        },
+    }};
+    vkUpdateDescriptorSets(m_ctx.getDevice(), static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 }
 
 void Renderer::createMaterialDescriptorSets()
@@ -1114,701 +1105,6 @@ void Renderer::createMaterialDescriptorSets()
     spdlog::info("Allocated {} material descriptor sets", materialCount);
 }
 
-// ── Shadow resources ──────────────────────────────────────────────────────────
-
-// Unproject NDC slice [nearNDC, farNDC] using inverse(proj*view) to get 8 world-space corners.
-static std::array<glm::vec3, 8> frustumCornersWorld(
-    const glm::mat4& view, const glm::mat4& proj,
-    float nearNDC, float farNDC)
-{
-    const glm::mat4 invVP = glm::inverse(proj * view);
-    const std::array<glm::vec4, 8> ndc{{
-        { -1, -1, nearNDC, 1 }, {  1, -1, nearNDC, 1 },
-        { -1,  1, nearNDC, 1 }, {  1,  1, nearNDC, 1 },
-        { -1, -1, farNDC,  1 }, {  1, -1, farNDC,  1 },
-        { -1,  1, farNDC,  1 }, {  1,  1, farNDC,  1 },
-    }};
-    std::array<glm::vec3, 8> world;
-    for (int i = 0; i < 8; ++i) {
-        const glm::vec4 w = invVP * ndc[i];
-        world[i] = glm::vec3(w) / w.w;
-    }
-    return world;
-}
-
-// Minimum bounding sphere of 8 points (center = average, radius = max distance).
-// Rotation-invariant radius enables stable texel snapping without shimmer.
-static std::pair<glm::vec3, float> boundingSphere(const std::array<glm::vec3, 8>& pts)
-{
-    glm::vec3 center(0.0f);
-    for (const auto& p : pts) center += p;
-    center /= 8.0f;
-    float r = 0.0f;
-    for (const auto& p : pts) r = std::max(r, glm::length(p - center));
-    return { center, r };
-}
-
-// ── Phase 4.2.5: Shadow-caster culling planes (Aaltonen technique) ───────────
-// Given 6 frustum planes and a light direction, compute the tightest culling
-// planes that can reject meshes whose shadows cannot reach the visible frustum.
-
-struct FrustumPlane {
-    glm::vec3 normal;
-    float     d;   // dot(normal, X) + d >= 0 → inside
-};
-
-// Extract 6 frustum planes from a VP matrix using Gribb-Hartmann.
-// Assumes NDC Z ∈ [-1,1] (perspectiveRH_NO convention).
-// Order: Left, Right, Bottom, Top, Near, Far.
-static std::array<FrustumPlane, 6> extractFrustumPlanes(const glm::mat4& vp)
-{
-    auto row = [&](int i) -> glm::vec4 {
-        return { vp[0][i], vp[1][i], vp[2][i], vp[3][i] };
-    };
-    const glm::vec4 r0 = row(0), r1 = row(1), r2 = row(2), r3 = row(3);
-
-    std::array<FrustumPlane, 6> planes;
-    auto set = [&](int idx, glm::vec4 v) {
-        float len = glm::length(glm::vec3(v));
-        if (len > 1e-8f) v /= len;
-        planes[idx] = { glm::vec3(v), v.w };
-    };
-    set(0, r3 + r0);  // Left
-    set(1, r3 - r0);  // Right
-    set(2, r3 + r1);  // Bottom
-    set(3, r3 - r1);  // Top
-    set(4, r3 + r2);  // Near
-    set(5, r3 - r2);  // Far
-    return planes;
-}
-
-// Frustum topology: 12 edges, each shared by exactly two faces.
-// Face indices: 0=Left, 1=Right, 2=Bottom, 3=Top, 4=Near, 5=Far
-static constexpr std::array<std::pair<int,int>, 12> kFrustumEdges = {{
-    {0, 2}, {0, 3}, {0, 4}, {0, 5},  // left edges
-    {1, 2}, {1, 3}, {1, 4}, {1, 5},  // right edges
-    {2, 4}, {2, 5},                   // bottom edges
-    {3, 4}, {3, 5},                   // top edges
-}};
-
-using CullingPlane = Renderer::CullingPlane;
-
-static std::vector<CullingPlane> computeShadowCullPlanes(
-    const glm::mat4& cascadeVP,
-    const glm::vec3& lightDir)
-{
-    const auto frustum = extractFrustumPlanes(cascadeVP);
-
-    // Classify faces: front-facing if light enters from that side.
-    std::array<bool, 6> isFrontFacing;
-    for (int i = 0; i < 6; ++i)
-        isFrontFacing[i] = glm::dot(frustum[i].normal, lightDir) > 0.0f;
-
-    std::vector<CullingPlane> planes;
-    planes.reserve(8);
-
-    // Keep back-facing frustum planes: they bound the shadow volume's extent.
-    for (int i = 0; i < 6; ++i) {
-        if (!isFrontFacing[i])
-            planes.push_back({ frustum[i].normal, frustum[i].d });
-    }
-
-    // Build one culling plane per silhouette edge (front-facing meets back-facing).
-    for (const auto& [fA, fB] : kFrustumEdges) {
-        if (isFrontFacing[fA] == isFrontFacing[fB])
-            continue;
-
-        // Edge direction = cross product of the two adjacent face normals.
-        glm::vec3 edgeDir = glm::cross(frustum[fA].normal, frustum[fB].normal);
-        float edgeLen = glm::length(edgeDir);
-        if (edgeLen < 1e-8f) continue;
-        edgeDir /= edgeLen;
-
-        // New plane contains the edge and is parallel to lightDir.
-        glm::vec3 planeNormal = glm::cross(edgeDir, lightDir);
-        float pnLen = glm::length(planeNormal);
-        if (pnLen < 1e-8f) continue;
-        planeNormal /= pnLen;
-
-        // Find a point on the edge by solving the two-plane intersection.
-        // Drop the axis most aligned with edgeDir to form a 2×2 system.
-        int bestAxis = 0;
-        float bestDot = 0.0f;
-        for (int a = 0; a < 3; ++a) {
-            float ad = std::abs(edgeDir[a]);
-            if (ad > bestDot) { bestDot = ad; bestAxis = a; }
-        }
-        const int c0 = (bestAxis + 1) % 3;
-        const int c1 = (bestAxis + 2) % 3;
-        const glm::vec3& nA = frustum[fA].normal;
-        const glm::vec3& nB = frustum[fB].normal;
-        float a00 = nA[c0], a01 = nA[c1], b0 = -frustum[fA].d;
-        float a10 = nB[c0], a11 = nB[c1], b1 = -frustum[fB].d;
-        glm::vec3 Q(0.0f);
-        const float det = a00 * a11 - a01 * a10;
-        if (std::abs(det) > 1e-10f) {
-            Q[c0] = (b0 * a11 - b1 * a01) / det;
-            Q[c1] = (a00 * b1 - a10 * b0) / det;
-        }
-
-        // Orient normal so it points toward the front-facing face's side
-        // (where shadow casters live relative to the silhouette edge).
-        const int frontFace = isFrontFacing[fA] ? fA : fB;
-        if (glm::dot(planeNormal, frustum[frontFace].normal) < 0.0f)
-            planeNormal = -planeNormal;
-
-        planes.push_back({ planeNormal, -glm::dot(planeNormal, Q) });
-    }
-
-    return planes;
-}
-
-// AABB vs half-plane test: returns true if the AABB is entirely outside the plane.
-static bool aabbOutsidePlane(const glm::vec3& bmin, const glm::vec3& bmax,
-                              const glm::vec3& normal, float d)
-{
-    glm::vec3 pVertex(
-        (normal.x >= 0.0f) ? bmax.x : bmin.x,
-        (normal.y >= 0.0f) ? bmax.y : bmin.y,
-        (normal.z >= 0.0f) ? bmax.z : bmin.z
-    );
-    return (glm::dot(normal, pVertex) + d) < 0.0f;
-}
-
-static bool aabbSurvivesCulling(const glm::vec3& bmin, const glm::vec3& bmax,
-                                 const std::vector<CullingPlane>& planes)
-{
-    for (const auto& p : planes) {
-        if (aabbOutsidePlane(bmin, bmax, p.normal, p.d))
-            return false;
-    }
-    return true;
-}
-
-void Renderer::createShadowResources()
-{
-    const VkDevice dev = m_ctx.getDevice();
-
-    // ── Shadow depth image (2D array: one layer per cascade) ─────────────────
-    // Standard Z (not reverse-Z): shadow map is compared with LESS_OR_EQUAL.
-    // Usage: DEPTH_STENCIL_ATTACHMENT (shadow pass) + SAMPLED (PBR pass reads it).
-    m_shadowMap.create(CASCADE_SIZE, CASCADE_SIZE, 1,
-                       VK_FORMAT_D32_SFLOAT,
-                       VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-                       VK_IMAGE_ASPECT_DEPTH_BIT,
-                       CASCADE_COUNT);
-
-    // Per-layer views for rendering (shadow pass attaches each cascade layer individually)
-    for (uint32_t c = 0; c < CASCADE_COUNT; ++c)
-        m_shadowLayerViews[c] = m_shadowMap.createSingleLayerView(c, VK_IMAGE_ASPECT_DEPTH_BIT);
-
-    // ── Shadow sampler (non-comparison) ──────────────────────────────────────
-    // compareEnable = VK_FALSE: raw depth fetch; manual comparison done in the shader.
-    // This avoids mutableComparisonSamplers (VK_KHR_portability_subset on MoltenVK).
-    // NEAREST filter: linear filtering of raw depth values is meaningless for hard shadows.
-    const VkSamplerCreateInfo samplerCI{
-        .sType            = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-        .magFilter        = VK_FILTER_NEAREST,
-        .minFilter        = VK_FILTER_NEAREST,
-        .mipmapMode       = VK_SAMPLER_MIPMAP_MODE_NEAREST,
-        .addressModeU     = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
-        .addressModeV     = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
-        .addressModeW     = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
-        .mipLodBias       = 0.0f,
-        .anisotropyEnable = VK_FALSE,
-        .compareEnable    = VK_FALSE,  // Manual comparison in shader — MoltenVK portable
-        .minLod           = 0.0f,
-        .maxLod           = 0.0f,
-        .borderColor      = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE,  // outside map = fully lit
-    };
-    VK_CHECK(vkCreateSampler(dev, &samplerCI, nullptr, &m_shadowSampler));
-
-    // ── Shadow UBO (4× lightViewProj + splitDepths) ───────────────────────────
-    m_shadowUBOBuffer.createHostVisible(sizeof(ShadowCascadeUBO), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
-    updateShadowMatrices();  // compute initial matrices from scene bounds
-
-    // ── Shadow vertex shader ──────────────────────────────────────────────────
-    auto shadowSpv = loadSpv(std::string(SHADER_DIR) + "/shadow.vert.spv");
-    const VkShaderModuleCreateInfo smCI{
-        .sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-        .codeSize = shadowSpv.size() * sizeof(uint32_t),
-        .pCode    = shadowSpv.data(),
-    };
-    VK_CHECK(vkCreateShaderModule(dev, &smCI, nullptr, &m_shadowVertModule));
-
-    // ── Shadow pipeline ───────────────────────────────────────────────────────
-    // Depth-only: no color attachment, no fragment shader.
-    // Uses the same pipeline layout as PBR (push constant b0 = model matrix, set=0 b2 = shadow UBO).
-    const VkPipelineShaderStageCreateInfo shadowStage{
-        .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        .stage  = VK_SHADER_STAGE_VERTEX_BIT,
-        .module = m_shadowVertModule,
-        .pName  = "main",
-    };
-
-    // Vertex layout matches PBR: position(0), normal(1), uv(2), tangent(3)
-    const std::array<VkVertexInputBindingDescription, 1> shadowBindings{{
-        { .binding = 0, .stride = sizeof(Vertex), .inputRate = VK_VERTEX_INPUT_RATE_VERTEX },
-    }};
-    const std::array<VkVertexInputAttributeDescription, 4> shadowAttribs{{
-        { .location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, position) },
-        { .location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, normal)   },
-        { .location = 2, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT,    .offset = offsetof(Vertex, uv)       },
-        { .location = 3, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, tangent)  },
-    }};
-    const VkPipelineVertexInputStateCreateInfo shadowVertexInput{
-        .sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-        .vertexBindingDescriptionCount   = static_cast<uint32_t>(shadowBindings.size()),
-        .pVertexBindingDescriptions      = shadowBindings.data(),
-        .vertexAttributeDescriptionCount = static_cast<uint32_t>(shadowAttribs.size()),
-        .pVertexAttributeDescriptions    = shadowAttribs.data(),
-    };
-
-    const VkPipelineInputAssemblyStateCreateInfo shadowInputAssembly{
-        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-        .topology               = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-        .primitiveRestartEnable = VK_FALSE,
-    };
-
-    const VkPipelineViewportStateCreateInfo shadowViewport{
-        .sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-        .viewportCount = 1,
-        .scissorCount  = 1,
-    };
-
-    // Depth bias to reduce shadow acne (constant + slope-scaled offset).
-    const VkPipelineRasterizationStateCreateInfo shadowRasterization{
-        .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-        .depthClampEnable        = VK_FALSE,
-        .rasterizerDiscardEnable = VK_FALSE,
-        .polygonMode             = VK_POLYGON_MODE_FILL,
-        .cullMode                = VK_CULL_MODE_FRONT_BIT,  // front-face culling avoids peter-panning
-        .frontFace               = VK_FRONT_FACE_COUNTER_CLOCKWISE,
-        .depthBiasEnable         = VK_TRUE,
-        .depthBiasConstantFactor = 1.5f,
-        .depthBiasClamp          = 0.0f,
-        .depthBiasSlopeFactor    = 2.0f,
-        .lineWidth               = 1.0f,
-    };
-
-    const VkPipelineMultisampleStateCreateInfo shadowMultisample{
-        .sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
-        .sampleShadingEnable  = VK_FALSE,
-    };
-
-    // Standard Z: clear to 1.0, compare LESS — closer fragments overwrite farther ones.
-    const VkPipelineDepthStencilStateCreateInfo shadowDepthStencil{
-        .sType                 = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-        .depthTestEnable       = VK_TRUE,
-        .depthWriteEnable      = VK_TRUE,
-        .depthCompareOp        = VK_COMPARE_OP_LESS_OR_EQUAL,
-        .depthBoundsTestEnable = VK_FALSE,
-        .stencilTestEnable     = VK_FALSE,
-    };
-
-    // No color attachments for the shadow pass.
-    const VkPipelineColorBlendStateCreateInfo shadowColorBlend{
-        .sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-        .attachmentCount = 0,
-        .pAttachments    = nullptr,
-    };
-
-    const std::array<VkDynamicState, 3> shadowDynStates{
-        VK_DYNAMIC_STATE_VIEWPORT,
-        VK_DYNAMIC_STATE_SCISSOR,
-        VK_DYNAMIC_STATE_DEPTH_BIAS,
-    };
-    const VkPipelineDynamicStateCreateInfo shadowDynamic{
-        .sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-        .dynamicStateCount = static_cast<uint32_t>(shadowDynStates.size()),
-        .pDynamicStates    = shadowDynStates.data(),
-    };
-
-    // Dynamic rendering: depth-only, no color formats.
-    const VkPipelineRenderingCreateInfo shadowRenderingInfo{
-        .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-        .colorAttachmentCount    = 0,
-        .pColorAttachmentFormats = nullptr,
-        .depthAttachmentFormat   = VK_FORMAT_D32_SFLOAT,
-        .stencilAttachmentFormat = VK_FORMAT_UNDEFINED,
-    };
-
-    const VkGraphicsPipelineCreateInfo shadowPipelineCI{
-        .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        .pNext               = &shadowRenderingInfo,
-        .stageCount          = 1,
-        .pStages             = &shadowStage,
-        .pVertexInputState   = &shadowVertexInput,
-        .pInputAssemblyState = &shadowInputAssembly,
-        .pViewportState      = &shadowViewport,
-        .pRasterizationState = &shadowRasterization,
-        .pMultisampleState   = &shadowMultisample,
-        .pDepthStencilState  = &shadowDepthStencil,
-        .pColorBlendState    = &shadowColorBlend,
-        .pDynamicState       = &shadowDynamic,
-        .layout              = m_pipelineLayout,
-        .renderPass          = VK_NULL_HANDLE,
-    };
-    VK_CHECK(vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &shadowPipelineCI,
-                                       nullptr, &m_shadowPipeline));
-
-    // ── VSM shadow pipeline (depth + RG32 moments color output) ──────────────
-    // Reuse the same vertex shader (shadow.vert still loaded in m_shadowVertModule).
-    auto vsmFragSpv = loadSpv(std::string(SHADER_DIR) + "/shadow_vsm.frag.spv");
-    VkShaderModule vsmFragModule = makeShaderModule(dev, vsmFragSpv);
-
-    const std::array<VkPipelineShaderStageCreateInfo, 2> vsmStages{{
-        {
-            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .stage  = VK_SHADER_STAGE_VERTEX_BIT,
-            .module = m_shadowVertModule,
-            .pName  = "main",
-        },
-        {
-            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .stage  = VK_SHADER_STAGE_FRAGMENT_BIT,
-            .module = vsmFragModule,
-            .pName  = "main",
-        },
-    }};
-
-    const VkPipelineColorBlendAttachmentState vsmColorBlendAtt{
-        .blendEnable    = VK_FALSE,
-        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT,
-    };
-    const VkPipelineColorBlendStateCreateInfo vsmColorBlend{
-        .sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-        .attachmentCount = 1,
-        .pAttachments    = &vsmColorBlendAtt,
-    };
-
-    const VkFormat momentsFormat = VK_FORMAT_R32G32_SFLOAT;
-    const VkPipelineRenderingCreateInfo vsmRenderingInfo{
-        .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-        .colorAttachmentCount    = 1,
-        .pColorAttachmentFormats = &momentsFormat,
-        .depthAttachmentFormat   = VK_FORMAT_D32_SFLOAT,
-        .stencilAttachmentFormat = VK_FORMAT_UNDEFINED,
-    };
-
-    VkGraphicsPipelineCreateInfo vsmPipelineCI = shadowPipelineCI;
-    vsmPipelineCI.pNext          = &vsmRenderingInfo;
-    vsmPipelineCI.stageCount     = static_cast<uint32_t>(vsmStages.size());
-    vsmPipelineCI.pStages        = vsmStages.data();
-    vsmPipelineCI.pColorBlendState = &vsmColorBlend;
-
-    VK_CHECK(vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &vsmPipelineCI,
-                                       nullptr, &m_shadowVsmPipeline));
-
-    // Both shadow pipelines created — release shader modules.
-    vkDestroyShaderModule(dev, m_shadowVertModule, nullptr);  m_shadowVertModule = VK_NULL_HANDLE;
-    vkDestroyShaderModule(dev, vsmFragModule, nullptr);
-
-    // ── VSM moment images ─────────────────────────────────────────────────────
-    // RG32_SFLOAT: stores (depth, depth²) per cascade layer.
-    // COLOR_ATTACHMENT (shadow pass write) + SAMPLED (PBR read) + STORAGE (compute blur).
-    m_shadowMoments.create(CASCADE_SIZE, CASCADE_SIZE, 1,
-        VK_FORMAT_R32G32_SFLOAT,
-        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-        VK_IMAGE_USAGE_STORAGE_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT,
-        CASCADE_COUNT);
-
-    m_shadowMomentsTemp.create(CASCADE_SIZE, CASCADE_SIZE, 1,
-        VK_FORMAT_R32G32_SFLOAT,
-        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT,
-        CASCADE_COUNT);
-
-    for (uint32_t c = 0; c < CASCADE_COUNT; ++c)
-        m_momentsLayerViews[c] = m_shadowMoments.createSingleLayerView(c, VK_IMAGE_ASPECT_COLOR_BIT);
-
-    // ── Moments sampler (LINEAR — VSM blur gives valid linear interpolation) ──
-    const VkSamplerCreateInfo momentsSamplerCI{
-        .sType            = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-        .magFilter        = VK_FILTER_LINEAR,
-        .minFilter        = VK_FILTER_LINEAR,
-        .mipmapMode       = VK_SAMPLER_MIPMAP_MODE_NEAREST,
-        .addressModeU     = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-        .addressModeV     = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-        .addressModeW     = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-        .anisotropyEnable = VK_FALSE,
-        .compareEnable    = VK_FALSE,
-        .minLod           = 0.0f,
-        .maxLod           = 0.0f,
-        .borderColor      = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE,
-    };
-    VK_CHECK(vkCreateSampler(dev, &momentsSamplerCI, nullptr, &m_momentsSampler));
-
-    // ── Initial layout transition: moments → SHADER_READ_ONLY_OPTIMAL ─────────
-    // Ensures the PBR descriptor binding 4 is always in a valid layout,
-    // even on the first frame before VSM mode is activated.
-    {
-        const VkCommandPoolCreateInfo initPoolCI{
-            .sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-            .flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
-            .queueFamilyIndex = m_ctx.getGraphicsQueueFamily(),
-        };
-        VkCommandPool initPool;
-        VK_CHECK(vkCreateCommandPool(dev, &initPoolCI, nullptr, &initPool));
-
-        const VkCommandBufferAllocateInfo initAllocInfo{
-            .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-            .commandPool        = initPool,
-            .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-            .commandBufferCount = 1,
-        };
-        VkCommandBuffer initCmd;
-        VK_CHECK(vkAllocateCommandBuffers(dev, &initAllocInfo, &initCmd));
-
-        const VkCommandBufferBeginInfo initBegin{
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-        };
-        VK_CHECK(vkBeginCommandBuffer(initCmd, &initBegin));
-
-        vkutil::transitionImage(initCmd, m_shadowMoments.getImage(),
-            VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,        0,
-            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,    VK_ACCESS_2_SHADER_READ_BIT,
-            VK_IMAGE_LAYOUT_UNDEFINED,                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            VK_IMAGE_ASPECT_COLOR_BIT);
-
-        VK_CHECK(vkEndCommandBuffer(initCmd));
-
-        VkFence initFence;
-        const VkFenceCreateInfo fenceCI{ .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
-        VK_CHECK(vkCreateFence(dev, &fenceCI, nullptr, &initFence));
-
-        const VkSubmitInfo initSubmit{
-            .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-            .commandBufferCount = 1,
-            .pCommandBuffers    = &initCmd,
-        };
-        VK_CHECK(vkQueueSubmit(m_ctx.getGraphicsQueue(), 1, &initSubmit, initFence));
-        VK_CHECK(vkWaitForFences(dev, 1, &initFence, VK_TRUE, UINT64_MAX));
-
-        vkDestroyFence(dev, initFence, nullptr);
-        vkDestroyCommandPool(dev, initPool, nullptr);
-    }
-
-    // ── Compute blur pipeline ─────────────────────────────────────────────────
-    // Descriptor layout: 2 storage images (input and output image2DArrays).
-    const std::array<VkDescriptorSetLayoutBinding, 2> blurBindings{{
-        {
-            .binding         = shader_interface::shadow_blur_binding::kInputImage,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-            .descriptorCount = 1,
-            .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT,
-        },
-        {
-            .binding         = shader_interface::shadow_blur_binding::kOutputImage,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-            .descriptorCount = 1,
-            .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT,
-        },
-    }};
-    const VkDescriptorSetLayoutCreateInfo blurSetLayoutCI{
-        .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = static_cast<uint32_t>(blurBindings.size()),
-        .pBindings    = blurBindings.data(),
-    };
-    VK_CHECK(vkCreateDescriptorSetLayout(dev, &blurSetLayoutCI, nullptr, &m_blurSetLayout));
-
-    const VkPushConstantRange blurPushRange{
-        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-        .offset     = shader_interface::kShadowBlurPcOffset,
-        .size       = 2 * sizeof(int32_t),  // direction + radius
-    };
-    const VkPipelineLayoutCreateInfo blurLayoutCI{
-        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .setLayoutCount         = 1,
-        .pSetLayouts            = &m_blurSetLayout,
-        .pushConstantRangeCount = 1,
-        .pPushConstantRanges    = &blurPushRange,
-    };
-    VK_CHECK(vkCreatePipelineLayout(dev, &blurLayoutCI, nullptr, &m_blurPipelineLayout));
-
-    auto blurSpv = loadSpv(std::string(SHADER_DIR) + "/shadow_blur.comp.spv");
-    VkShaderModule blurModule = makeShaderModule(dev, blurSpv);
-
-    const VkComputePipelineCreateInfo blurPipelineCI{
-        .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-        .stage  = {
-            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
-            .module = blurModule,
-            .pName  = "main",
-        },
-        .layout = m_blurPipelineLayout,
-    };
-    VK_CHECK(vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &blurPipelineCI,
-                                      nullptr, &m_blurPipeline));
-    vkDestroyShaderModule(dev, blurModule, nullptr);
-
-    // ── Blur descriptor pool and sets (separate from the main pool) ───────────
-    // 2 sets × 2 storage images = 4 storage image descriptors.
-    const VkDescriptorPoolSize blurPoolSize{
-        .type            = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-        .descriptorCount = 4,
-    };
-    const VkDescriptorPoolCreateInfo blurPoolCI{
-        .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets       = 2,
-        .poolSizeCount = 1,
-        .pPoolSizes    = &blurPoolSize,
-    };
-    VK_CHECK(vkCreateDescriptorPool(dev, &blurPoolCI, nullptr, &m_blurDescriptorPool));
-
-    const std::array<VkDescriptorSetLayout, 2> blurLayouts = {
-        m_blurSetLayout, m_blurSetLayout
-    };
-    const VkDescriptorSetAllocateInfo blurAllocInfo{
-        .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-        .descriptorPool     = m_blurDescriptorPool,
-        .descriptorSetCount = 2,
-        .pSetLayouts        = blurLayouts.data(),
-    };
-    std::array<VkDescriptorSet, 2> blurSets{};
-    VK_CHECK(vkAllocateDescriptorSets(dev, &blurAllocInfo, blurSets.data()));
-    m_blurSetHorizontal = blurSets[0];
-    m_blurSetVertical   = blurSets[1];
-
-    // Write horizontal set: moments (input) → temp (output)
-    const VkDescriptorImageInfo blurMomentsInfo{
-        .imageView   = m_shadowMoments.getImageView(),
-        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-    };
-    const VkDescriptorImageInfo blurTempInfo{
-        .imageView   = m_shadowMomentsTemp.getImageView(),
-        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-    };
-
-    const std::array<VkWriteDescriptorSet, 4> blurWrites{{
-        { // horizontal: binding 0 = moments (read)
-            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet          = m_blurSetHorizontal,
-            .dstBinding      = shader_interface::shadow_blur_binding::kInputImage,
-            .descriptorCount = 1,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-            .pImageInfo      = &blurMomentsInfo,
-        },
-        { // horizontal: binding 1 = temp (write)
-            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet          = m_blurSetHorizontal,
-            .dstBinding      = shader_interface::shadow_blur_binding::kOutputImage,
-            .descriptorCount = 1,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-            .pImageInfo      = &blurTempInfo,
-        },
-        { // vertical: binding 0 = temp (read)
-            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet          = m_blurSetVertical,
-            .dstBinding      = shader_interface::shadow_blur_binding::kInputImage,
-            .descriptorCount = 1,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-            .pImageInfo      = &blurTempInfo,
-        },
-        { // vertical: binding 1 = moments (write)
-            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet          = m_blurSetVertical,
-            .dstBinding      = shader_interface::shadow_blur_binding::kOutputImage,
-            .descriptorCount = 1,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-            .pImageInfo      = &blurMomentsInfo,
-        },
-    }};
-    vkUpdateDescriptorSets(dev, static_cast<uint32_t>(blurWrites.size()),
-                           blurWrites.data(), 0, nullptr);
-
-    spdlog::info("Shadow resources created: {}×{}×{} CSM, hard+VSM pipelines, blur compute",
-                 CASCADE_SIZE, CASCADE_SIZE, CASCADE_COUNT);
-}
-
-void Renderer::updateShadowMatrices()
-{
-    const glm::vec3 lightDir = glm::normalize(m_lightDirection);
-
-    // Degenerate lookAt guard: when light is nearly vertical, use X as up vector.
-    const glm::vec3 up = (std::abs(lightDir.y) > 0.9f)
-                         ? glm::vec3(1.0f, 0.0f, 0.0f)
-                         : glm::vec3(0.0f, 1.0f, 0.0f);
-
-    // Practical split scheme: lambda blends log (near-heavy) and uniform distributions.
-    const float n      = m_cameraNearZ;
-    const float f      = m_cameraFarZ;
-    const float lambda = m_csmLambda;
-
-    std::array<float, CASCADE_COUNT + 1> splitDepths;
-    splitDepths[0]             = n;
-    splitDepths[CASCADE_COUNT] = f;
-    for (uint32_t i = 1; i < CASCADE_COUNT; ++i) {
-        const float t          = static_cast<float>(i) / CASCADE_COUNT;
-        const float logSplit     = n * std::pow(f / n, t);
-        const float uniformSplit = n + (f - n) * t;
-        splitDepths[i] = lambda * logSplit + (1.0f - lambda) * uniformSplit;
-    }
-
-    ShadowCascadeUBO ubo{};
-    // splitDepths[1..4] are the cascade far-plane depths (positive view-space |Z|)
-    ubo.splitDepths = {
-        splitDepths[1], splitDepths[2], splitDepths[3], splitDepths[4]
-    };
-
-    // Reverse-Z camera: NDC near = 1.0, NDC far = 0.0.
-    // Remap view-space split depths into NDC Z for frustum corner unprojection.
-    for (uint32_t c = 0; c < CASCADE_COUNT; ++c) {
-        const float cNear    = splitDepths[c];
-        const float cFar     = splitDepths[c + 1];
-        const float cNearNDC = glm::mix(0.0f, 1.0f, (cNear - n) / (f - n));  // farNDC=0, nearNDC=1
-        const float cFarNDC  = glm::mix(0.0f, 1.0f, (cFar  - n) / (f - n));
-
-        // 8 world-space corners of this cascade frustum slice
-        // Note: cNearNDC > cFarNDC in reverse-Z, pass larger first
-        const auto corners = frustumCornersWorld(m_viewMatrix, m_projMatrix,
-                                                  cNearNDC, cFarNDC);
-
-        // Bounding sphere: rotation-invariant, enables stable texel snapping
-        auto [center, radius] = boundingSphere(corners);
-
-        // Texel-snap center in light space to eliminate shadow shimmer on camera rotation
-        const glm::mat4 lightViewSnap = glm::lookAt(center - lightDir, center, up);
-        const float texelSize = (2.0f * radius) / CASCADE_SIZE;
-        glm::vec4 centerLS = lightViewSnap * glm::vec4(center, 1.0f);
-        centerLS.x = std::floor(centerLS.x / texelSize) * texelSize;
-        centerLS.y = std::floor(centerLS.y / texelSize) * texelSize;
-        const glm::vec3 snappedCenter = glm::vec3(glm::inverse(lightViewSnap) * centerLS);
-
-        // Build final light matrices for this cascade
-        const glm::mat4 finalLightView = glm::lookAt(
-            snappedCenter - lightDir * radius,
-            snappedCenter, up);
-        glm::mat4 lightProj = glm::orthoRH_ZO(
-            -radius, radius,
-            -radius, radius,
-            0.0f, 2.0f * radius);
-        lightProj[1][1] *= -1.0f;  // Y-flip for Vulkan
-
-        ubo.lightViewProj[c] = lightProj * finalLightView;
-
-        // build a standard-Z (non-reverse) camera VP for this cascade
-        // slice and extract shadow-caster culling planes from it.
-        // perspectiveRH_NO maps Z to [-1,1] (OpenGL), matching the Gribb-Hartmann
-        // r3±r2 formulas used in extractFrustumPlanes().
-        {
-            const float tanHalfFov = 1.0f / std::abs(m_projMatrix[1][1]);
-            const float aspect     = std::abs(m_projMatrix[1][1]) / std::abs(m_projMatrix[0][0]);
-            glm::mat4 stdProj = glm::perspectiveRH_NO(
-                2.0f * std::atan(tanHalfFov), aspect, cNear, cFar);
-            stdProj[1][1] *= -1.0f;  // Vulkan Y-flip
-            m_shadowCullPlanes[c] = computeShadowCullPlanes(stdProj * m_viewMatrix, lightDir);
-        }
-    }
-
-    m_shadowUBOBuffer.upload(&ubo, sizeof(ShadowCascadeUBO));
-}
-
-// ── Frame loop ────────────────────────────────────────────────────────────────
 
 void Renderer::handleResize()
 {
@@ -1881,186 +1177,11 @@ void Renderer::render()
 
     // update shadow matrices each frame so the shadow follows the camera.
     // Also recalculates shadowRadius/shadowDepth from m_sceneInfo.normalizedRadius.
-    updateShadowMatrices();
-
-    // ── Shadow pass (4 cascades) ──────────────────────────────────────────────
-    // Transition all cascade layers from UNDEFINED to DEPTH_ATTACHMENT_OPTIMAL in one barrier.
-    // VK_REMAINING_ARRAY_LAYERS in VulkanUtil covers the whole 2D array image.
-    vkutil::transitionImage(cmd, m_shadowMap.getImage(),
-        VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,              0,
-        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
-            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
-        VK_IMAGE_LAYOUT_UNDEFINED,                         VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-        VK_IMAGE_ASPECT_DEPTH_BIT);
-
-    // VSM: transition moments from shader-read (resting state) to color attachment for writing.
-    const bool isVsm = (m_shadowFilterMode == 2);
-    if (isVsm) {
-        vkutil::transitionImage(cmd, m_shadowMoments.getImage(),
-            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,          VK_ACCESS_2_SHADER_READ_BIT,
-            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,  VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    }
-
-    m_gpuTimer.writeTimestamp(cmd, "ShadowPass_Begin");
-
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      isVsm ? m_shadowVsmPipeline : m_shadowPipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout,
-                            shader_interface::kSceneSet, 1, &m_descriptorSet, 0, nullptr);
-
-    const VkBuffer     shadowVertexBuf = m_vertexBuffer.getBuffer();
-    const VkDeviceSize zeroOffset      = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &shadowVertexBuf, &zeroOffset);
-    vkCmdBindIndexBuffer(cmd, m_indexBuffer.getBuffer(), 0, VK_INDEX_TYPE_UINT32);
-
-    const VkExtent2D shadowExtent{ CASCADE_SIZE, CASCADE_SIZE };
-    const VkViewport shadowVP{
-        .x = 0.0f, .y = 0.0f,
-        .width  = static_cast<float>(CASCADE_SIZE),
-        .height = static_cast<float>(CASCADE_SIZE),
-        .minDepth = 0.0f, .maxDepth = 1.0f,
-    };
-    const VkRect2D shadowScissor{ .offset = { 0, 0 }, .extent = shadowExtent };
-
-    for (uint32_t c = 0; c < CASCADE_COUNT; ++c) {
-        const VkRenderingAttachmentInfo cascadeDepthAtt{
-            .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-            .imageView   = m_shadowLayerViews[c],
-            .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-            .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
-            .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
-            .clearValue  = { .depthStencil = { 1.0f, 0 } },
-        };
-        // VSM: moments color attachment (one per cascade layer via per-layer view)
-        const VkRenderingAttachmentInfo momentsColorAtt{
-            .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-            .imageView   = m_momentsLayerViews[c],
-            .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
-            .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
-            .clearValue  = { .color = { .float32 = { 0.0f, 0.0f, 0.0f, 0.0f } } },
-        };
-        const VkRenderingInfo cascadeRenderInfo{
-            .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
-            .renderArea           = { .offset = { 0, 0 }, .extent = shadowExtent },
-            .layerCount           = 1,
-            .colorAttachmentCount = isVsm ? 1u : 0u,
-            .pColorAttachments    = isVsm ? &momentsColorAtt : nullptr,
-            .pDepthAttachment     = &cascadeDepthAtt,
-        };
-        vkCmdBeginRendering(cmd, &cascadeRenderInfo);
-        vkCmdSetViewport(cmd, 0, 1, &shadowVP);
-        vkCmdSetScissor(cmd, 0, 1, &shadowScissor);
-        vkCmdSetDepthBias(cmd, 1.5f, 0.0f, 2.0f);
-
-        // Push cascade index (bytes 96–99): shadow.vert selects lightViewProj[cascadeIndex]
-        vkCmdPushConstants(cmd, m_pipelineLayout,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                            shader_interface::kCascadeIndexPcOffset, sizeof(uint32_t), &c);
-
-        // per-mesh shadow-caster culling
-        uint32_t culledCount = 0;
-        const auto& cullPlanes = m_shadowCullPlanes[c];
-
-        for (const DrawCommand& draw : m_drawCommands) {
-            if (!draw.mesh.isValid() || draw.mesh.index >= m_meshes.size())
-                continue;
-
-            const MeshRenderData& meshData = m_meshes[draw.mesh.index];
-            if (!cullPlanes.empty() &&
-                !aabbSurvivesCulling(meshData.worldBoundsMin, meshData.worldBoundsMax, cullPlanes))
-            {
-                ++culledCount;
-                continue;
-            }
-            vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
-                               shader_interface::kModelMatrixPcOffset, sizeof(glm::mat4), &draw.transform);
-            vkCmdDrawIndexed(cmd, meshData.indexCount, 1, meshData.firstIndex, 0, 0);
-        }
-
-        m_shadowCulledMeshes[c] = culledCount;
-        m_shadowTotalMeshes[c]  = static_cast<uint32_t>(m_drawCommands.size());
-
-        vkCmdEndRendering(cmd);
-    }
-
-    m_gpuTimer.writeTimestamp(cmd, "ShadowPass_End");
-
-    // Transition all cascade layers to shader-read for the PBR pass.
-    vkutil::transitionImage(cmd, m_shadowMap.getImage(),
-        VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,      VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,           VK_ACCESS_2_SHADER_READ_BIT,
-        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,          VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL,
-        VK_IMAGE_ASPECT_DEPTH_BIT);
-
-    // VSM: separable Gaussian blur on moment maps, then restore to shader-read layout.
-    if (isVsm) {
-        // Transition moments COLOR_ATTACHMENT → GENERAL (storage image for compute read+write)
-        vkutil::transitionImage(cmd, m_shadowMoments.getImage(),
-            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,  VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,          VK_IMAGE_LAYOUT_GENERAL);
-
-        // Transition temp UNDEFINED → GENERAL (discard-write is safe for temp buffer)
-        vkutil::transitionImage(cmd, m_shadowMomentsTemp.getImage(),
-            VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,  0,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT,
-            VK_IMAGE_LAYOUT_UNDEFINED,               VK_IMAGE_LAYOUT_GENERAL);
-
-        m_gpuTimer.writeTimestamp(cmd, "BlurPass_Begin");
-
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_blurPipeline);
-
-        // Horizontal pass: moments (read) → temp (write)
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                m_blurPipelineLayout, shader_interface::kShadowBlurSet,
-                                1, &m_blurSetHorizontal, 0, nullptr);
-        struct BlurPC { int32_t direction; int32_t radius; };
-        BlurPC blurPC{ 0, 3 };
-        vkCmdPushConstants(cmd, m_blurPipelineLayout,
-                            VK_SHADER_STAGE_COMPUTE_BIT, shader_interface::kShadowBlurPcOffset,
-                            sizeof(BlurPC), &blurPC);
-        // dispatch: 2048/16=128 per axis, CASCADE_COUNT layers
-        vkCmdDispatch(cmd, CASCADE_SIZE / 16, CASCADE_SIZE / 16, CASCADE_COUNT);
-
-        // Execution+memory barrier: compute write (temp) must be visible to next compute read
-        const VkMemoryBarrier2 computeBarrier{
-            .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
-            .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-            .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-        };
-        const VkDependencyInfo blurDepInfo{
-            .sType              = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-            .memoryBarrierCount = 1,
-            .pMemoryBarriers    = &computeBarrier,
-        };
-        vkCmdPipelineBarrier2(cmd, &blurDepInfo);
-
-        // Vertical pass: temp (read) → moments (write)
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                m_blurPipelineLayout, shader_interface::kShadowBlurSet,
-                                1, &m_blurSetVertical, 0, nullptr);
-        blurPC.direction = 1;
-        vkCmdPushConstants(cmd, m_blurPipelineLayout,
-                            VK_SHADER_STAGE_COMPUTE_BIT, shader_interface::kShadowBlurPcOffset,
-                            sizeof(BlurPC), &blurPC);
-        vkCmdDispatch(cmd, CASCADE_SIZE / 16, CASCADE_SIZE / 16, CASCADE_COUNT);
-
-        m_gpuTimer.writeTimestamp(cmd, "BlurPass_End");
-
-        // Transition moments GENERAL → SHADER_READ_ONLY_OPTIMAL for PBR sampling
-        vkutil::transitionImage(cmd, m_shadowMoments.getImage(),
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT,
-            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT,
-            VK_IMAGE_LAYOUT_GENERAL,                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    }
-
-    //  HDR target transitions from UNDEFINED every frame (LOAD_OP_CLEAR discards contents).
-    vkutil::transitionImage(cmd, m_hdrTarget.getImage(),
+    m_shadowPass.record(cmd, m_vertexBuffer, m_indexBuffer, m_drawCommands,
+                        m_meshes, m_materials, m_materialSets, m_gpuTimer);
+    if (m_shadowPass.consumeDescriptorDirty()) {
+        updateShadowDescriptors();
+    }    vkutil::transitionImage(cmd, m_hdrTarget.getImage(),
         VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,              0,
         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,   VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
         VK_IMAGE_LAYOUT_UNDEFINED,                          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -2254,11 +1375,14 @@ void Renderer::submitFrame(const RenderFramePacket& packet)
     m_lightIntensity    = packet.light.intensity;
     m_ambientIntensity  = packet.light.ambient;
 
-    m_csmLambda          = packet.shadow.csmLambda;
-    m_showCascadeDebug   = packet.shadow.debugCascades;
-    m_shadowFilterMode   = packet.shadow.filterMode;
-    m_pcfSpreadRadius    = packet.shadow.pcfSpreadRadius;
-    m_vsmBleedReduction  = packet.shadow.vsmBleedReduction;
+    m_shadowSettings = packet.shadow;
+    m_shadowPass.updateCamera(m_viewMatrix, m_projMatrix, m_cameraNearZ, m_cameraFarZ, m_cameraPos);
+    m_shadowPass.updateLightDirection(m_lightDirection);
+    const bool shadowResourcesChanged = m_shadowPass.updateSettings(m_shadowSettings);
+    const bool shadowDescriptorsDirty = m_shadowPass.consumeDescriptorDirty();
+    if (shadowResourcesChanged || shadowDescriptorsDirty) {
+        updateShadowDescriptors();
+    }
     uploadLightUBO();
 
     setTonemapParams(packet.tonemap.mode,

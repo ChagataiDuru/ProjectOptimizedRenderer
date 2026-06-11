@@ -12,7 +12,7 @@ layout(push_constant) uniform SkyPC {
 // Binding 1: directional light — provides sun direction and intensity.
 // ShaderInterface.h: scene set/binding 1 owns LightData.
 layout(binding = 1, set = 0) uniform LightData {
-    vec3  lightDirection;   // world-space direction pointing TOWARD the sun
+    vec3  lightDirection;   // world-space direction from the surface toward the sun
     float lightIntensity;
 } light;
 

@@ -81,6 +81,7 @@ void registerViewerPanels(ImGuiManager& imguiManager,
 
         ImGui::Separator();
         ImGui::Text(ICON_FA_LAYER_GROUP " Cascaded Shadows");
+        ImGui::SliderFloat("Max Distance", &state.shadow.maxDistance, 10.0f, 300.0f, "%.0f");
         ImGui::SliderFloat("CSM Lambda", &state.shadow.csmLambda, 0.0f, 1.0f,
                            "%.2f", ImGuiSliderFlags_None);
         ImGui::Checkbox("Debug Cascades", &state.shadow.debugCascades);
@@ -93,6 +94,13 @@ void registerViewerPanels(ImGuiManager& imguiManager,
         ImGui::Text(ICON_FA_DROPLET " Shadow Filter");
         const char* filterItems[] = { "None (hard)", "PCF (soft)", "VSM (variance)" };
         ImGui::Combo("Mode", &state.shadow.filterMode, filterItems, 3);
+        const char* qualityItems[] = { "Low 1024", "Medium 1024", "High 2048", "Ultra 2048" };
+        ImGui::Combo("Quality", &state.shadow.qualityPreset, qualityItems, 4);
+        ImGui::SliderFloat("Bias Constant", &state.shadow.depthBiasConstant, 0.0f, 5.0f, "%.2f");
+        ImGui::SliderFloat("Bias Slope", &state.shadow.depthBiasSlope, 0.0f, 6.0f, "%.2f");
+        ImGui::Checkbox("Caster Culling", &state.shadow.enableCasterCulling);
+        const char* cullItems[] = { "None", "Front", "Back" };
+        ImGui::Combo("Shadow Cull", &state.shadow.cullMode, cullItems, 3);
         if (state.shadow.filterMode == 1) {
             ImGui::SliderFloat("PCF Spread (texels)",
                                &state.shadow.pcfSpreadRadius,
@@ -174,10 +182,21 @@ void registerViewerPanels(ImGuiManager& imguiManager,
 
         ImGui::Separator();
         if (ImGui::TreeNode("Shadow Culling")) {
-            const auto& culled = renderer.getShadowCulledMeshes();
-            const auto& total  = renderer.getShadowTotalMeshes();
+            const auto& shadow = renderer.getShadowDebugInfo();
+            const auto& culled = shadow.culledMeshes;
+            const auto& total  = shadow.totalMeshes;
+            const auto& splits = shadow.splitDepths;
+            ImGui::Text("Splits: %.2f  %.2f  %.2f  %.2f",
+                        splits.x, splits.y, splits.z, splits.w);
+            ImGui::Text("Max distance: %.1f", shadow.maxDistance);
+            ImGui::Text("Resolution: %u", shadow.cascadeResolution);
+            ImGui::Text("VSM allocated: %s", shadow.vsmAllocated ? "yes" : "no");
+            ImGui::Text("Shadow memory: %.1f MB", shadow.estimatedMemoryMB);
+            if (camera.getFarZ() > state.shadow.maxDistance * 4.0f) {
+                ImGui::TextDisabled("Camera far plane is much larger than shadow distance");
+            }
             for (uint32_t c = 0; c < Renderer::CASCADE_COUNT; ++c) {
-                const uint32_t drawn = total[c] - culled[c];
+                const uint32_t drawn = shadow.drawnMeshes[c];
                 ImGui::Text("Cascade %u: %u / %u drawn (-%u culled)",
                             c, drawn, total[c], culled[c]);
             }

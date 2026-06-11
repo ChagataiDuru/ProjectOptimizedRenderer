@@ -91,6 +91,7 @@ add_executable(ProjectOptimizedRenderer
     src/core/Camera.cpp
     src/renderpasses/SkyPass.cpp
     src/renderpasses/TonemapPass.cpp
+    src/renderpasses/ShadowPass.cpp
     src/resource/VmaImpl.cpp
     src/resource/Buffer.cpp
     src/resource/Image.cpp
@@ -224,8 +225,23 @@ shader_compile_glsl(
 )
 shader_compile_glsl(
     TARGET ProjectOptimizedRenderer
+    SOURCE "${CMAKE_SOURCE_DIR}/shaders/shadow_alpha.vert"
+    OUTPUT "shadow_alpha.vert.spv"
+)
+shader_compile_glsl(
+    TARGET ProjectOptimizedRenderer
+    SOURCE "${CMAKE_SOURCE_DIR}/shaders/shadow_alpha.frag"
+    OUTPUT "shadow_alpha.frag.spv"
+)
+shader_compile_glsl(
+    TARGET ProjectOptimizedRenderer
     SOURCE "${CMAKE_SOURCE_DIR}/shaders/shadow_vsm.frag"
     OUTPUT "shadow_vsm.frag.spv"
+)
+shader_compile_glsl(
+    TARGET ProjectOptimizedRenderer
+    SOURCE "${CMAKE_SOURCE_DIR}/shaders/shadow_vsm_alpha.frag"
+    OUTPUT "shadow_vsm_alpha.frag.spv"
 )
 shader_compile_glsl(
     TARGET ProjectOptimizedRenderer
