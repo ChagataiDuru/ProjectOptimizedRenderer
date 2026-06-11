@@ -135,10 +135,8 @@ void Renderer::init()
 
     m_frameSync.init(3);
     m_commandBuffer.init(m_ctx.getGraphicsQueueFamily(), 3);
-    createDepthImage();
-    createHdrTarget();
     m_tonemapPass.init(m_ctx.getDevice(), m_swapchain.getFormat(), SHADER_DIR);
-    m_tonemapPass.resize(m_ctx.getDevice(), m_hdrSampler, m_hdrTarget.getImageView());
+    createResizeDependentResources();
     createPbrPipeline();
     m_skyPass.init(m_ctx, m_cameraSetLayout,
                    VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT,
@@ -232,12 +230,11 @@ void Renderer::shutdown()
 
     m_gpuTimer.shutdown();
 
-    // tone map pass resources (model-independent; destroy before PBR pipeline)
-    {
-        const VkDevice dev = m_ctx.getDevice();
-        m_tonemapPass.shutdown(dev);
-        if (m_hdrSampler            != VK_NULL_HANDLE) { vkDestroySampler(dev, m_hdrSampler, nullptr);                     m_hdrSampler            = VK_NULL_HANDLE; }
-        m_hdrTarget.destroy();
+    destroyResizeDependentResources();
+    m_tonemapPass.shutdown(m_ctx.getDevice());
+    if (m_hdrSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(m_ctx.getDevice(), m_hdrSampler, nullptr);
+        m_hdrSampler = VK_NULL_HANDLE;
     }
 
     m_skyPass.shutdown(m_ctx.getDevice());
@@ -312,7 +309,6 @@ void Renderer::shutdown()
     m_shadowUBOBuffer.destroy();
 
     // Destroy GPU resources that hold VMA allocations
-    m_depthImage.destroy();
     m_lightUBOBuffer.destroy();
     m_cameraUBOBuffer.destroy();
     m_indexBuffer.destroy();
@@ -851,6 +847,30 @@ void Renderer::createDepthImage()
     spdlog::info("Depth image created: {}x{} D32_SFLOAT (reverse-Z)", ext.width, ext.height);
 }
 
+void Renderer::createResizeDependentResources()
+{
+    const VkExtent2D ext = m_swapchain.getExtent();
+    if (ext.width == 0 || ext.height == 0) {
+        return;
+    }
+
+    createDepthImage();
+    createHdrTarget();
+    m_tonemapPass.resize(m_ctx.getDevice(), m_hdrSampler, m_hdrTarget.getImageView());
+}
+
+void Renderer::destroyResizeDependentResources()
+{
+    m_hdrTarget.destroy();
+    m_depthImage.destroy();
+}
+
+void Renderer::recreateResizeDependentResources()
+{
+    destroyResizeDependentResources();
+    createResizeDependentResources();
+}
+
 void Renderer::createHdrTarget()
 {
     const VkExtent2D ext = m_swapchain.getExtent();
@@ -875,8 +895,6 @@ void Renderer::createHdrTarget()
         };
         VK_CHECK(vkCreateSampler(m_ctx.getDevice(), &samplerCI, nullptr, &m_hdrSampler));
     }
-
-    m_tonemapPass.resize(m_ctx.getDevice(), m_hdrSampler, m_hdrTarget.getImageView());
 
     spdlog::info("HDR target created: {}x{} R16G16B16A16_SFLOAT", ext.width, ext.height);
 }
@@ -1796,14 +1814,8 @@ void Renderer::handleResize()
 {
     const VkExtent2D oldExt = m_swapchain.getExtent();
 
-    // CRITICAL: drain the GPU before destroying any resources.
-    // The just-submitted command buffer may still reference the depth image.
-    // Swapchain::recreate() also calls vkDeviceWaitIdle() internally —
-    // the second call is a no-op since the device is already idle.
     vkDeviceWaitIdle(m_ctx.getDevice());
-
-    m_depthImage.destroy();
-    m_hdrTarget.destroy();
+    destroyResizeDependentResources();
 
     // Recreate swapchain. Passing current extent as hint; Swapchain::createSwapchain()
     // reads surface capabilities and uses cap.currentExtent when available (most platforms),
@@ -1812,8 +1824,7 @@ void Renderer::handleResize()
 
     const VkExtent2D newExt = m_swapchain.getExtent();
     if (newExt.width > 0 && newExt.height > 0) {
-        createDepthImage();
-        createHdrTarget();  // also refreshes TonemapPass HDR input binding
+        createResizeDependentResources();
     }
 
     spdlog::info("Renderer resized: {}x{} -> {}x{}", oldExt.width, oldExt.height,

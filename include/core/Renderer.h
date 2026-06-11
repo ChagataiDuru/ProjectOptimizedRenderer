@@ -137,6 +137,9 @@ public:
 private:
     void render();
     void handleResize();
+    void createResizeDependentResources();
+    void destroyResizeDependentResources();
+    void recreateResizeDependentResources();
     void createPbrPipeline();
     void loadModel(const std::string& modelPath);
     void rebuildDrawCommands();
@@ -201,11 +204,12 @@ private:
     std::vector<Texture> m_textures;
     Texture              m_fallbackWhite;
 
-    // Depth buffer (D32_SFLOAT, reverse-Z)
+    // Resize-dependent depth buffer (D32_SFLOAT, reverse-Z)
     Image            m_depthImage;
 
-    // Phase 5: HDR offscreen target (R16G16B16A16_SFLOAT, swapchain-sized)
+    // Phase 5: resize-dependent HDR offscreen target (R16G16B16A16_SFLOAT, swapchain-sized)
     Image            m_hdrTarget;
+    // Image-independent sampler reused when the HDR target is recreated.
     VkSampler        m_hdrSampler           = VK_NULL_HANDLE;
 
     TonemapPass      m_tonemapPass;
@@ -296,7 +300,7 @@ private:
     void createLightUBO();
     void uploadLightUBO();   // re-upload m_lightUBOBuffer from stored params
     void createDepthImage();
-    void createHdrTarget();  // create/recreate HDR target and refresh tone-map input
+    void createHdrTarget();
     void createDescriptorPool();
     void createDescriptorSet();
     void createMaterialDescriptorSets();
