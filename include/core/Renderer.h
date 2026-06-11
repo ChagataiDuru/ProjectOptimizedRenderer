@@ -3,6 +3,7 @@
 #include "core/VulkanContext.h"
 #include "core/Swapchain.h"
 #include "core/CommandBuffer.h"
+#include "core/DrawCommand.h"
 #include "core/FrameSync.h"
 #include "core/RenderFramePacket.h"
 #include "core/ShaderInterface.h"
@@ -137,6 +138,7 @@ private:
     void handleResize();
     void createPbrPipeline();
     void loadModel(const std::string& modelPath);
+    void rebuildDrawCommands();
     void destroyPipeline();
     void refreshRenderStats();
 
@@ -155,15 +157,15 @@ private:
     struct MeshRenderData {
         uint32_t firstIndex;
         uint32_t indexCount;
-        int32_t  materialIndex = -1;
-
         // World-space AABB (model-space AABB transformed by m_sceneInfo.modelMatrix)
         glm::vec3 worldBoundsMin = glm::vec3(0.0f);
         glm::vec3 worldBoundsMax = glm::vec3(0.0f);
     };
     Model                       m_model;
     SceneInfo                   m_sceneInfo;    // Phase 3.7: normalization transform
-    std::vector<MeshRenderData> m_meshRenderData;
+    std::vector<MeshRenderData> m_meshes;
+    std::vector<Material>       m_materials;
+    std::vector<DrawCommand>    m_drawCommands;
 
     // Pipeline resources
     VkPipeline            m_pipeline           = VK_NULL_HANDLE;

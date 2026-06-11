@@ -13,6 +13,7 @@
 #include <array>
 #include <cmath>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -274,24 +275,7 @@ void Renderer::init()
     m_sceneInfo = computeSceneInfo(m_model.boundsMin, m_model.boundsMax);
     spdlog::info("Scene normalized: scale={:.4f}, radius={:.2f}",
                  m_sceneInfo.scaleFactor, m_sceneInfo.normalizedRadius);
-
-    for (size_t i = 0; i < m_model.meshes.size(); ++i) {
-        const glm::vec3& lo = m_model.meshes[i].boundsMin;
-        const glm::vec3& hi = m_model.meshes[i].boundsMax;
-        const glm::mat4& M  = m_sceneInfo.modelMatrix;
-        glm::vec3 wMin( std::numeric_limits<float>::max());
-        glm::vec3 wMax(-std::numeric_limits<float>::max());
-        for (int j = 0; j < 8; ++j) {
-            glm::vec3 corner((j & 1) ? hi.x : lo.x,
-                             (j & 2) ? hi.y : lo.y,
-                             (j & 4) ? hi.z : lo.z);
-            glm::vec3 w = glm::vec3(M * glm::vec4(corner, 1.0f));
-            wMin = glm::min(wMin, w);
-            wMax = glm::max(wMax, w);
-        }
-        m_meshRenderData[i].worldBoundsMin = wMin;
-        m_meshRenderData[i].worldBoundsMax = wMax;
-    }
+    rebuildDrawCommands();
 
     m_frameSync.init(3);
     m_commandBuffer.init(m_ctx.getGraphicsQueueFamily(), 3);
@@ -344,7 +328,9 @@ void Renderer::reloadModel(const std::string& modelPath)
     m_indexBuffer.destroy();
     m_vertexBuffer.destroy();
 
-    m_meshRenderData.clear();
+    m_meshes.clear();
+    m_materials.clear();
+    m_drawCommands.clear();
     m_model = Model{};
 
     // ── Load new model and upload resources ──────────────────────────────────────
@@ -365,25 +351,7 @@ void Renderer::reloadModel(const std::string& modelPath)
     m_sceneInfo = computeSceneInfo(m_model.boundsMin, m_model.boundsMax);
     spdlog::info("Scene normalized: scale={:.4f}, radius={:.2f}",
                  m_sceneInfo.scaleFactor, m_sceneInfo.normalizedRadius);
-
-    //  transform per-mesh model-space AABBs to world space
-    for (size_t i = 0; i < m_model.meshes.size(); ++i) {
-        const glm::vec3& lo = m_model.meshes[i].boundsMin;
-        const glm::vec3& hi = m_model.meshes[i].boundsMax;
-        const glm::mat4& M  = m_sceneInfo.modelMatrix;
-        glm::vec3 wMin( std::numeric_limits<float>::max());
-        glm::vec3 wMax(-std::numeric_limits<float>::max());
-        for (int j = 0; j < 8; ++j) {
-            glm::vec3 corner((j & 1) ? hi.x : lo.x,
-                             (j & 2) ? hi.y : lo.y,
-                             (j & 4) ? hi.z : lo.z);
-            glm::vec3 w = glm::vec3(M * glm::vec4(corner, 1.0f));
-            wMin = glm::min(wMin, w);
-            wMax = glm::max(wMax, w);
-        }
-        m_meshRenderData[i].worldBoundsMin = wMin;
-        m_meshRenderData[i].worldBoundsMax = wMax;
-    }
+    rebuildDrawCommands();
 
     // ── Recreate descriptors for the new model ───────────────────────────────────
     createDescriptorPool();
@@ -432,6 +400,9 @@ void Renderer::shutdown()
     for (auto& tex : m_textures)
         tex.destroy();
     m_textures.clear();
+    m_meshes.clear();
+    m_materials.clear();
+    m_drawCommands.clear();
     m_samplerCache.shutdown();
 
     // Destroy shadow resources
@@ -504,8 +475,8 @@ void Renderer::shutdown()
 
 void Renderer::refreshRenderStats()
 {
-    m_renderStats.meshCount          = static_cast<uint32_t>(m_meshRenderData.size());
-    m_renderStats.materialCount      = static_cast<uint32_t>(m_model.materials.size());
+    m_renderStats.meshCount          = static_cast<uint32_t>(m_meshes.size());
+    m_renderStats.materialCount      = static_cast<uint32_t>(m_materials.size());
     m_renderStats.textureCount       = static_cast<uint32_t>(m_textures.size());
     m_renderStats.textureMemoryBytes = 0;
     for (const auto& tex : m_textures) {
@@ -522,6 +493,9 @@ void Renderer::refreshRenderStats()
 void Renderer::loadModel(const std::string& modelPath)
 {
     m_model = GLTFLoader::loadGLTF(modelPath);
+    m_meshes.clear();
+    m_materials = m_model.materials;
+    m_drawCommands.clear();
 
     // Flatten all mesh vertex/index data into single contiguous arrays.
     // Each mesh's indices are already absolute (offset applied in GLTFLoader)
@@ -535,8 +509,7 @@ void Renderer::loadModel(const std::string& modelPath)
         MeshRenderData data{};
         data.firstIndex    = static_cast<uint32_t>(allIndices.size());
         data.indexCount    = static_cast<uint32_t>(mesh.indices.size());
-        data.materialIndex = mesh.materialIndex;
-        m_meshRenderData.push_back(data);
+        m_meshes.push_back(data);
 
         allVertices.insert(allVertices.end(), mesh.vertices.begin(), mesh.vertices.end());
 
@@ -597,6 +570,48 @@ void Renderer::loadModel(const std::string& modelPath)
 
     spdlog::info("Model uploaded: {} meshes, {} vertices, {} indices",
                  m_model.meshes.size(), allVertices.size(), allIndices.size());
+}
+
+void Renderer::rebuildDrawCommands()
+{
+    m_drawCommands.clear();
+    m_drawCommands.reserve(m_model.meshes.size());
+
+    const glm::mat4& transform = m_sceneInfo.modelMatrix;
+
+    for (size_t i = 0; i < m_model.meshes.size() && i < m_meshes.size(); ++i) {
+        const Mesh& srcMesh = m_model.meshes[i];
+        MeshRenderData& dstMesh = m_meshes[i];
+
+        const glm::vec3& lo = srcMesh.boundsMin;
+        const glm::vec3& hi = srcMesh.boundsMax;
+        glm::vec3 wMin(std::numeric_limits<float>::max());
+        glm::vec3 wMax(-std::numeric_limits<float>::max());
+
+        for (int j = 0; j < 8; ++j) {
+            const glm::vec3 corner((j & 1) ? hi.x : lo.x,
+                                   (j & 2) ? hi.y : lo.y,
+                                   (j & 4) ? hi.z : lo.z);
+            const glm::vec3 world = glm::vec3(transform * glm::vec4(corner, 1.0f));
+            wMin = glm::min(wMin, world);
+            wMax = glm::max(wMax, world);
+        }
+
+        dstMesh.worldBoundsMin = wMin;
+        dstMesh.worldBoundsMax = wMax;
+
+        MaterialHandle material{};
+        if (srcMesh.materialIndex >= 0 &&
+            srcMesh.materialIndex < static_cast<int32_t>(m_materials.size())) {
+            material.index = static_cast<uint32_t>(srcMesh.materialIndex);
+        }
+
+        m_drawCommands.push_back(DrawCommand{
+            .transform = transform,
+            .mesh = MeshHandle{ static_cast<uint32_t>(i) },
+            .material = material,
+        });
+    }
 }
 
 // ── Pipeline ──────────────────────────────────────────────────────────────────
@@ -1154,7 +1169,7 @@ void Renderer::createDescriptorPool()
     //   1 set  × 3 uniform buffers (camera + light + shadow, set=0)
     //   1 set  × 1 combined image sampler (shadow map, set=0)
     //   N sets × 3 combined image samplers each (material textures, set=1)
-    const uint32_t materialCount = static_cast<uint32_t>(m_model.materials.size());
+    const uint32_t materialCount = static_cast<uint32_t>(m_materials.size());
     const uint32_t maxSets       = 1 + std::max(materialCount, 1u);
     // 2 samplers in set=0 (depth array b3 + moments array b4) + 3 per material
     const uint32_t samplerCount  = 2 + 3 * std::max(materialCount, 1u);
@@ -1275,7 +1290,7 @@ void Renderer::createDescriptorSet()
 
 void Renderer::createMaterialDescriptorSets()
 {
-    const uint32_t materialCount = static_cast<uint32_t>(m_model.materials.size());
+    const uint32_t materialCount = static_cast<uint32_t>(m_materials.size());
     if (materialCount == 0) return;
 
     // Allocate all material sets in one batch — more efficient than N individual calls.
@@ -1305,7 +1320,7 @@ void Renderer::createMaterialDescriptorSets()
     };
 
     for (uint32_t i = 0; i < materialCount; ++i) {
-        const Material& mat = m_model.materials[i];
+        const Material& mat = m_materials[i];
 
         const VkDescriptorImageInfo albedoInfo{
             .sampler     = getSampler(mat.albedoTextureIndex),
@@ -2215,7 +2230,11 @@ void Renderer::render()
         uint32_t culledCount = 0;
         const auto& cullPlanes = m_shadowCullPlanes[c];
 
-        for (const auto& meshData : m_meshRenderData) {
+        for (const DrawCommand& draw : m_drawCommands) {
+            if (!draw.mesh.isValid() || draw.mesh.index >= m_meshes.size())
+                continue;
+
+            const MeshRenderData& meshData = m_meshes[draw.mesh.index];
             if (!cullPlanes.empty() &&
                 !aabbSurvivesCulling(meshData.worldBoundsMin, meshData.worldBoundsMax, cullPlanes))
             {
@@ -2223,12 +2242,12 @@ void Renderer::render()
                 continue;
             }
             vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
-                               shader_interface::kModelMatrixPcOffset, sizeof(glm::mat4), &m_sceneInfo.modelMatrix);
+                               shader_interface::kModelMatrixPcOffset, sizeof(glm::mat4), &draw.transform);
             vkCmdDrawIndexed(cmd, meshData.indexCount, 1, meshData.firstIndex, 0, 0);
         }
 
         m_shadowCulledMeshes[c] = culledCount;
-        m_shadowTotalMeshes[c]  = static_cast<uint32_t>(m_meshRenderData.size());
+        m_shadowTotalMeshes[c]  = static_cast<uint32_t>(m_drawCommands.size());
 
         vkCmdEndRendering(cmd);
     }
@@ -2407,21 +2426,27 @@ void Renderer::render()
     vkCmdBindIndexBuffer(cmd, m_indexBuffer.getBuffer(), 0, VK_INDEX_TYPE_UINT32);
 
     // Push normalization model matrix (bytes 0–63): same transform as shadow pass.
-    vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
-                       shader_interface::kModelMatrixPcOffset, sizeof(glm::mat4), &m_sceneInfo.modelMatrix);
+    for (const DrawCommand& draw : m_drawCommands) {
+        if (!draw.mesh.isValid() || draw.mesh.index >= m_meshes.size())
+            continue;
 
-    for (const auto& mesh : m_meshRenderData) {
-        if (mesh.materialIndex >= 0 &&
-            mesh.materialIndex < static_cast<int32_t>(m_materialSets.size())) {
+        const MeshRenderData& mesh = m_meshes[draw.mesh.index];
+
+        vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
+                           shader_interface::kModelMatrixPcOffset, sizeof(glm::mat4), &draw.transform);
+
+        if (draw.material.isValid() &&
+            draw.material.index < m_materialSets.size() &&
+            draw.material.index < m_materials.size()) {
 
             // Bind material texture set (set=1) — set=0 remains bound and unaffected.
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     m_pipelineLayout,
-                                    shader_interface::kMaterialSet, 1, &m_materialSets[static_cast<size_t>(mesh.materialIndex)],
+                                    shader_interface::kMaterialSet, 1, &m_materialSets[draw.material.index],
                                     0, nullptr);
 
             // Push material factors to fragment stage (offset 64, after model matrix).
-            const Material& mat = m_model.materials[static_cast<size_t>(mesh.materialIndex)];
+            const Material& mat = m_materials[draw.material.index];
             const MaterialPushConstants matPC{
                 .baseColorFactor  = mat.baseColorFactor,
                 .metallicFactor   = mat.metallicFactor,
