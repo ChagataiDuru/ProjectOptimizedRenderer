@@ -8,7 +8,6 @@
 #include <spdlog/spdlog.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
-#include <stb_image.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -43,6 +42,15 @@ std::vector<uint32_t> Renderer::loadSpv(const std::string& path)
     return code;
 }
 
+static glm::vec3 safeNormalizeDirection(glm::vec3 v, glm::vec3 fallback)
+{
+    const float len2 = glm::dot(v, v);
+    if (len2 <= 1e-8f) {
+        return glm::normalize(fallback);
+    }
+    return v * glm::inversesqrt(len2);
+}
+
 static VkShaderModule makeShaderModule(VkDevice device, const std::vector<uint32_t>& code)
 {
     const VkShaderModuleCreateInfo info{
@@ -53,76 +61,6 @@ static VkShaderModule makeShaderModule(VkDevice device, const std::vector<uint32
     VkShaderModule mod;
     VK_CHECK(vkCreateShaderModule(device, &info, nullptr, &mod));
     return mod;
-}
-
-struct SingleSamplerDescriptorResources {
-    VkDescriptorSetLayout layout = VK_NULL_HANDLE;
-    VkDescriptorPool      pool   = VK_NULL_HANDLE;
-    VkDescriptorSet       set    = VK_NULL_HANDLE;
-};
-
-static SingleSamplerDescriptorResources createSingleSamplerDescriptorResources(
-    VkDevice dev, VkShaderStageFlags stageFlags, uint32_t bindingIndex)
-{
-    const VkDescriptorSetLayoutBinding binding{
-        .binding         = bindingIndex,
-        .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .descriptorCount = 1,
-        .stageFlags      = stageFlags,
-    };
-    const VkDescriptorSetLayoutCreateInfo setLayoutCI{
-        .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 1,
-        .pBindings    = &binding,
-    };
-
-    SingleSamplerDescriptorResources out{};
-    VK_CHECK(vkCreateDescriptorSetLayout(dev, &setLayoutCI, nullptr, &out.layout));
-
-    const VkDescriptorPoolSize poolSize{
-        .type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .descriptorCount = 1,
-    };
-    const VkDescriptorPoolCreateInfo poolCI{
-        .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets       = 1,
-        .poolSizeCount = 1,
-        .pPoolSizes    = &poolSize,
-    };
-    VK_CHECK(vkCreateDescriptorPool(dev, &poolCI, nullptr, &out.pool));
-
-    const VkDescriptorSetAllocateInfo allocInfo{
-        .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-        .descriptorPool     = out.pool,
-        .descriptorSetCount = 1,
-        .pSetLayouts        = &out.layout,
-    };
-    VK_CHECK(vkAllocateDescriptorSets(dev, &allocInfo, &out.set));
-    return out;
-}
-
-static void writeCombinedImageSamplerDescriptor(
-    VkDevice dev,
-    VkDescriptorSet set,
-    uint32_t binding,
-    VkSampler sampler,
-    VkImageView imageView,
-    VkImageLayout imageLayout)
-{
-    const VkDescriptorImageInfo imgInfo{
-        .sampler     = sampler,
-        .imageView   = imageView,
-        .imageLayout = imageLayout,
-    };
-    const VkWriteDescriptorSet write{
-        .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .dstSet          = set,
-        .dstBinding      = binding,
-        .descriptorCount = 1,
-        .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .pImageInfo      = &imgInfo,
-    };
-    vkUpdateDescriptorSets(dev, 1, &write, 0, nullptr);
 }
 
 static VkGraphicsPipelineCreateInfo makeGraphicsPipelineCreateInfo(
@@ -157,88 +95,6 @@ static VkGraphicsPipelineCreateInfo makeGraphicsPipelineCreateInfo(
     };
 }
 
-struct FullscreenPipelineConfig {
-    VkPipelineLayout                     layout      = VK_NULL_HANDLE;
-    VkFormat                             colorFormat = VK_FORMAT_UNDEFINED;
-    VkFormat                             depthFormat = VK_FORMAT_UNDEFINED;
-    VkPipelineDepthStencilStateCreateInfo depthStencil{
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-    };
-};
-
-static VkPipeline createFullscreenPipeline(
-    VkDevice dev,
-    const std::array<VkPipelineShaderStageCreateInfo, 2>& stages,
-    const FullscreenPipelineConfig& cfg)
-{
-    const VkPipelineVertexInputStateCreateInfo vertexInput{
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-    };
-    const VkPipelineInputAssemblyStateCreateInfo inputAssembly{
-        .sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-    };
-    const VkPipelineViewportStateCreateInfo viewportState{
-        .sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-        .viewportCount = 1,
-        .scissorCount  = 1,
-    };
-    const VkPipelineRasterizationStateCreateInfo rasterization{
-        .sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-        .polygonMode = VK_POLYGON_MODE_FILL,
-        .cullMode    = VK_CULL_MODE_NONE,
-        .frontFace   = VK_FRONT_FACE_CLOCKWISE,
-        .lineWidth   = 1.0f,
-    };
-    const VkPipelineMultisampleStateCreateInfo multisample{
-        .sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
-    };
-    const VkPipelineColorBlendAttachmentState blendAtt{
-        .blendEnable    = VK_FALSE,
-        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
-    };
-    const VkPipelineColorBlendStateCreateInfo colorBlend{
-        .sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-        .attachmentCount = 1,
-        .pAttachments    = &blendAtt,
-    };
-    const std::array<VkDynamicState, 2> dynStates = {
-        VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
-    const VkPipelineDynamicStateCreateInfo dynamicState{
-        .sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-        .dynamicStateCount = static_cast<uint32_t>(dynStates.size()),
-        .pDynamicStates    = dynStates.data(),
-    };
-
-    const VkPipelineRenderingCreateInfo renderingInfo{
-        .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-        .colorAttachmentCount    = 1,
-        .pColorAttachmentFormats = &cfg.colorFormat,
-        .depthAttachmentFormat   = cfg.depthFormat,
-        .stencilAttachmentFormat = VK_FORMAT_UNDEFINED,
-    };
-
-    const VkGraphicsPipelineCreateInfo pipelineCI = makeGraphicsPipelineCreateInfo(
-        renderingInfo,
-        stages.data(),
-        static_cast<uint32_t>(stages.size()),
-        vertexInput,
-        inputAssembly,
-        viewportState,
-        rasterization,
-        multisample,
-        cfg.depthStencil,
-        colorBlend,
-        dynamicState,
-        cfg.layout);
-
-    VkPipeline pipeline = VK_NULL_HANDLE;
-    VK_CHECK(vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &pipelineCI, nullptr, &pipeline));
-    return pipeline;
-}
-
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 Renderer::Renderer(VulkanContext& ctx, Swapchain& swapchain)
@@ -258,7 +114,7 @@ Renderer::Renderer(VulkanContext& ctx, Swapchain& swapchain)
     , m_shadowUBOBuffer(ctx)
     , m_shadowMoments(ctx)
     , m_shadowMomentsTemp(ctx)
-    , m_skyPanorama(ctx)
+    , m_skyPass(ctx)
     , m_gpuTimer(ctx)
     , m_screenshot(ctx)
 {
@@ -284,7 +140,9 @@ void Renderer::init()
     m_tonemapPass.init(m_ctx.getDevice(), m_swapchain.getFormat(), SHADER_DIR);
     m_tonemapPass.resize(m_ctx.getDevice(), m_hdrSampler, m_hdrTarget.getImageView());
     createPbrPipeline();
-    createSkyPipeline();
+    m_skyPass.init(m_ctx, m_cameraSetLayout,
+                   VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT,
+                   SHADER_DIR);
     createShadowResources();
     createCameraUBO();
     createLightUBO();
@@ -382,16 +240,7 @@ void Renderer::shutdown()
         m_hdrTarget.destroy();
     }
 
-    // sky resources (model-independent; destroy before PBR pipeline)
-    {
-        const VkDevice dev = m_ctx.getDevice();
-        if (m_skyPipeline          != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_skyPipeline, nullptr);                      m_skyPipeline          = VK_NULL_HANDLE; }
-        if (m_skyPipelineLayout    != VK_NULL_HANDLE) { vkDestroyPipelineLayout(dev, m_skyPipelineLayout, nullptr);           m_skyPipelineLayout    = VK_NULL_HANDLE; }
-        if (m_skyPanoramaPool      != VK_NULL_HANDLE) { vkDestroyDescriptorPool(dev, m_skyPanoramaPool, nullptr);             m_skyPanoramaPool      = VK_NULL_HANDLE; m_skyPanoramaSet = VK_NULL_HANDLE; }
-        if (m_skyPanoramaSetLayout != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(dev, m_skyPanoramaSetLayout, nullptr);   m_skyPanoramaSetLayout = VK_NULL_HANDLE; }
-        if (m_skyPanoramaSampler   != VK_NULL_HANDLE) { vkDestroySampler(dev, m_skyPanoramaSampler, nullptr);                 m_skyPanoramaSampler   = VK_NULL_HANDLE; }
-        m_skyPanorama.destroy();
-    }
+    m_skyPass.shutdown(m_ctx.getDevice());
 
     destroyPipeline();
 
@@ -1032,136 +881,9 @@ void Renderer::createHdrTarget()
     spdlog::info("HDR target created: {}x{} R16G16B16A16_SFLOAT", ext.width, ext.height);
 }
 
-// ── Sky pipeline ──────────────────────────────────────────────────────────────
-
-void Renderer::createSkyPipeline()
-{
-    const VkDevice     dev = m_ctx.getDevice();
-    const std::string  dir = SHADER_DIR;
-
-    // Panorama descriptor resources: one combined image sampler (set=1, binding=0).
-    const SingleSamplerDescriptorResources skyPanoramaDesc =
-        createSingleSamplerDescriptorResources(dev, VK_SHADER_STAGE_FRAGMENT_BIT,
-                                               shader_interface::sky_binding::kPanorama);
-    m_skyPanoramaSetLayout = skyPanoramaDesc.layout;
-    m_skyPanoramaPool      = skyPanoramaDesc.pool;
-    m_skyPanoramaSet       = skyPanoramaDesc.set;
-
-    // Panorama sampler: linear filter, clamp to edge.
-    const VkSamplerCreateInfo samplerCI{
-        .sType         = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-        .magFilter     = VK_FILTER_LINEAR,
-        .minFilter     = VK_FILTER_LINEAR,
-        .mipmapMode    = VK_SAMPLER_MIPMAP_MODE_LINEAR,
-        .addressModeU  = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-        .addressModeV  = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-        .addressModeW  = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-        .maxAnisotropy = 1.0f,
-        .minLod        = 0.0f,
-        .maxLod        = 1.0f,
-    };
-    VK_CHECK(vkCreateSampler(dev, &samplerCI, nullptr, &m_skyPanoramaSampler));
-
-    // Bind fallback white as the initial panorama placeholder.
-    // In procedural mode the sampler is never accessed; in panorama mode
-    // loadHdrPanorama() updates this binding to the real image.
-    writeCombinedImageSamplerDescriptor(dev, m_skyPanoramaSet, shader_interface::sky_binding::kPanorama,
-                                        m_skyPanoramaSampler, m_fallbackWhite.getImageView(),
-                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-
-    // Pipeline layout
-    // Set 0: m_cameraSetLayout (shared with PBR - sky uses bindings 0=camera, 1=light)
-    // Set 1: m_skyPanoramaSetLayout (equirectangular HDR or dummy white)
-    // Push constant: 4 bytes (skyMode) in fragment stage only
-    const VkPushConstantRange pcRange{
-        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-        .offset     = shader_interface::kSkyPcOffset,
-        .size       = sizeof(uint32_t),
-    };
-    const std::array<VkDescriptorSetLayout, 2> skyLayouts = {
-        m_cameraSetLayout,
-        m_skyPanoramaSetLayout,
-    };
-    const VkPipelineLayoutCreateInfo layoutCI{
-        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .setLayoutCount         = static_cast<uint32_t>(skyLayouts.size()),
-        .pSetLayouts            = skyLayouts.data(),
-        .pushConstantRangeCount = 1,
-        .pPushConstantRanges    = &pcRange,
-    };
-    VK_CHECK(vkCreatePipelineLayout(dev, &layoutCI, nullptr, &m_skyPipelineLayout));
-
-    VkShaderModule vertMod = makeShaderModule(dev, loadSpv(dir + "/sky.vert.spv"));
-    VkShaderModule fragMod = makeShaderModule(dev, loadSpv(dir + "/sky.frag.spv"));
-
-    const std::array<VkPipelineShaderStageCreateInfo, 2> stages{{
-        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-          .stage = VK_SHADER_STAGE_VERTEX_BIT,   .module = vertMod, .pName = "main" },
-        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-          .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fragMod, .pName = "main" },
-    }};
-
-    // Reverse-Z: sky at z=0 (far plane). GREATER_OR_EQUAL passes the cleared value (0.0 >= 0.0).
-    // Write depth=0 so geometry (GREATER at z>0) can overwrite sky on covered pixels.
-    const VkPipelineDepthStencilStateCreateInfo depthStencil{
-        .sType             = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-        .depthTestEnable   = VK_TRUE,
-        .depthWriteEnable  = VK_TRUE,
-        .depthCompareOp    = VK_COMPARE_OP_GREATER_OR_EQUAL,
-    };
-
-    // Sky renders into the same HDR offscreen target as the PBR scene pass.
-    m_skyPipeline = createFullscreenPipeline(dev, stages, FullscreenPipelineConfig{
-        .layout       = m_skyPipelineLayout,
-        .colorFormat  = VK_FORMAT_R16G16B16A16_SFLOAT,
-        .depthFormat  = VK_FORMAT_D32_SFLOAT,
-        .depthStencil = depthStencil,
-    });
-
-    vkDestroyShaderModule(dev, vertMod, nullptr);
-    vkDestroyShaderModule(dev, fragMod, nullptr);
-
-    spdlog::info("Sky pipeline created (procedural Rayleigh+Mie + HDR equirectangular panorama)");
-}
-// ── Sky HDR panorama loader ────────────────────────────────────────────────────
-
 void Renderer::loadHdrPanorama(const std::string& path)
 {
-    // Drain GPU before modifying the descriptor
-    vkDeviceWaitIdle(m_ctx.getDevice());
-
-    // Load float RGBA data from an equirectangular .hdr file
-    int   w = 0, h = 0, channels = 0;
-    float* pixels = stbi_loadf(path.c_str(), &w, &h, &channels, 4);
-    if (!pixels) {
-        spdlog::error("HDR panorama load failed '{}': {}", path, stbi_failure_reason());
-        return;
-    }
-
-    const VkDeviceSize dataSize = static_cast<VkDeviceSize>(w) * h * 4 * sizeof(float);
-
-    VkCommandPool   uploadPool = VK_NULL_HANDLE;
-    VkCommandBuffer cmd        = vkutil::beginSingleUseCommands(m_ctx, uploadPool);
-
-    // Destroy previous panorama image (if any) and create the new one
-    m_skyPanorama.destroy();
-    m_skyPanorama.createFromData(static_cast<uint32_t>(w), static_cast<uint32_t>(h),
-                                 VK_FORMAT_R32G32B32A32_SFLOAT, pixels, dataSize, cmd);
-
-    // Staging buffer holds the data - safe to free host pixels now
-    stbi_image_free(pixels);
-
-    vkutil::endSingleUseCommands(m_ctx, uploadPool, cmd);
-
-    m_skyPanorama.releaseStaging();
-
-    // Point the panorama descriptor at the newly uploaded image
-    writeCombinedImageSamplerDescriptor(m_ctx.getDevice(), m_skyPanoramaSet,
-                                        shader_interface::sky_binding::kPanorama,
-                                        m_skyPanoramaSampler, m_skyPanorama.getImageView(),
-                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-
-    spdlog::info("HDR panorama loaded: {}x{} from '{}'", w, h, path);
+    m_skyPass.loadHdrPanorama(m_ctx, path);
 }
 void Renderer::createDescriptorPool()
 {
@@ -2393,19 +2115,7 @@ void Renderer::render()
     // ── Sky pass: fullscreen triangle at reverse-Z far plane (z = 0) ─────────
     // GREATER_OR_EQUAL depth: passes where depth == 0.0 (clear value, no geometry yet).
     // Drawn first — PBR geometry (GREATER at z > 0) overwrites sky on covered pixels.
-    if (m_skyEnabled && m_skyPipeline != VK_NULL_HANDLE) {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyPipeline);
-        // Set 0: camera + light UBOs (same descriptor set used by PBR)
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyPipelineLayout,
-                                shader_interface::kSceneSet, 1, &m_descriptorSet, 0, nullptr);
-        // Set 1: equirectangular panorama (fallback white in procedural mode)
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyPipelineLayout,
-                                shader_interface::kSkyPanoramaSet, 1, &m_skyPanoramaSet, 0, nullptr);
-        const uint32_t skyMode = static_cast<uint32_t>(m_skyMode);
-        vkCmdPushConstants(cmd, m_skyPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
-                            shader_interface::kSkyPcOffset, sizeof(uint32_t), &skyMode);
-        vkCmdDraw(cmd, 3, 1, 0, 0);
-    }
+    m_skyPass.record(cmd, m_descriptorSet, ext, m_skyEnabled, m_skyMode);
 
     // ── PBR geometry pass ─────────────────────────────────────────────────────
     VkPipeline activePipeline = m_pipeline;
@@ -2528,7 +2238,7 @@ void Renderer::submitFrame(const RenderFramePacket& packet)
     setCameraMatrices(packet.camera.view, packet.camera.projection, packet.camera.position);
     setCameraFrustum(packet.camera.nearZ, packet.camera.farZ);
 
-    m_lightDirection    = glm::normalize(packet.light.direction);
+    m_lightDirection    = safeNormalizeDirection(packet.light.direction, glm::vec3(0.577f));
     m_lightColor        = packet.light.color;
     m_lightIntensity    = packet.light.intensity;
     m_ambientIntensity  = packet.light.ambient;
@@ -2615,4 +2325,3 @@ void Renderer::endFrame()
     m_frameSync.advanceFrame();
     m_commandBuffer.beginFrame();
 }
-

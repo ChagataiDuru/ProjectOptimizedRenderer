@@ -9,6 +9,7 @@
 #include "core/ShaderInterface.h"
 #include "debug/GPUTimer.h"
 #include "debug/Screenshot.h"
+#include "renderpasses/SkyPass.h"
 #include "renderpasses/TonemapPass.h"
 #include "resource/Buffer.h"
 #include "resource/Image.h"
@@ -278,15 +279,7 @@ private:
     std::array<uint32_t, CASCADE_COUNT> m_shadowCulledMeshes = {};
     std::array<uint32_t, CASCADE_COUNT> m_shadowTotalMeshes  = {};
 
-    // Phase 6.5: sky pipeline resources
-    Image                 m_skyPanorama;                               // HDR equirectangular (optional)
-    VkSampler             m_skyPanoramaSampler    = VK_NULL_HANDLE;   // linear clamp
-    VkDescriptorSetLayout m_skyPanoramaSetLayout  = VK_NULL_HANDLE;
-    VkDescriptorPool      m_skyPanoramaPool       = VK_NULL_HANDLE;
-    VkDescriptorSet       m_skyPanoramaSet        = VK_NULL_HANDLE;   // set 1: panorama
-    VkPipelineLayout      m_skyPipelineLayout     = VK_NULL_HANDLE;
-    VkPipeline            m_skyPipeline           = VK_NULL_HANDLE;
-
+    SkyPass m_skyPass;
     bool    m_skyEnabled = true;   // sky drawn by default
     int32_t m_skyMode    = 0;      // 0 = Procedural (Rayleigh+Mie),  1 = HDR Panorama
 
@@ -299,7 +292,6 @@ private:
 
     glm::vec3 m_cameraPos = glm::vec3(0.0f);
 
-    void createSkyPipeline();
     void createCameraUBO();
     void createLightUBO();
     void uploadLightUBO();   // re-upload m_lightUBOBuffer from stored params

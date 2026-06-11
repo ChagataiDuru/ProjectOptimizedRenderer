@@ -89,6 +89,7 @@ add_executable(ProjectOptimizedRenderer
     src/core/Renderer.cpp
     src/core/VulkanUtil.cpp
     src/core/Camera.cpp
+    src/renderpasses/SkyPass.cpp
     src/renderpasses/TonemapPass.cpp
     src/resource/VmaImpl.cpp
     src/resource/Buffer.cpp
