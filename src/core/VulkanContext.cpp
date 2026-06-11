@@ -9,6 +9,28 @@
 #include <string>
 #include <vector>
 
+static bool hasExtension(const std::vector<VkExtensionProperties>& exts, const char* name)
+{
+    return std::any_of(exts.begin(), exts.end(), [name](const VkExtensionProperties& e) {
+        return strcmp(e.extensionName, name) == 0;
+    });
+}
+
+static bool anyFragmentShadingRateFeatureEnabled(
+    const VkPhysicalDeviceFragmentShadingRateFeaturesKHR& features)
+{
+    return features.pipelineFragmentShadingRate == VK_TRUE ||
+           features.primitiveFragmentShadingRate == VK_TRUE ||
+           features.attachmentFragmentShadingRate == VK_TRUE;
+}
+
+static void appendDeviceExtension(std::vector<const char*>& extensions, const char* name)
+{
+    if (std::find(extensions.begin(), extensions.end(), name) == extensions.end()) {
+        extensions.push_back(name);
+    }
+}
+
 // ── Debug messenger callback ──────────────────────────────────────────────────
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
@@ -177,7 +199,7 @@ void VulkanContext::createInstance()
 
 // ── Physical device selection ─────────────────────────────────────────────────
 
-std::vector<VkExtensionProperties> VulkanContext::getDeviceExtensions(VkPhysicalDevice device)
+std::vector<VkExtensionProperties> VulkanContext::getDeviceExtensions(VkPhysicalDevice device) const
 {
     uint32_t count = 0;
     vkEnumerateDeviceExtensionProperties(device, nullptr, &count, nullptr);
@@ -186,14 +208,83 @@ std::vector<VkExtensionProperties> VulkanContext::getDeviceExtensions(VkPhysical
     return exts;
 }
 
+RendererDeviceFeatures VulkanContext::queryRendererDeviceFeatures(VkPhysicalDevice device) const
+{
+    const std::vector<VkExtensionProperties> exts = getDeviceExtensions(device);
+    const bool hasFragmentShadingRateExt = hasExtension(exts, VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME);
+    const bool hasMeshShaderExt = hasExtension(exts, VK_EXT_MESH_SHADER_EXTENSION_NAME);
+
+    VkPhysicalDeviceFragmentShadingRateFeaturesKHR fragmentShadingRateFeatures{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR
+    };
+    VkPhysicalDeviceMeshShaderFeaturesEXT meshShaderFeatures{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT
+    };
+    VkPhysicalDeviceVulkan12Features vk12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+    VkPhysicalDeviceVulkan13Features vk13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, &vk12};
+    VkPhysicalDeviceVulkan14Features vk14{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES, &vk13};
+
+    VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &vk14};
+
+    if (hasFragmentShadingRateExt) {
+        fragmentShadingRateFeatures.pNext = features.pNext;
+        features.pNext = &fragmentShadingRateFeatures;
+    }
+    if (hasMeshShaderExt) {
+        meshShaderFeatures.pNext = features.pNext;
+        features.pNext = &meshShaderFeatures;
+    }
+
+    vkGetPhysicalDeviceFeatures2(device, &features);
+
+    RendererDeviceFeatures result{};
+    result.dynamicRendering = vk13.dynamicRendering == VK_TRUE;
+    result.dynamicRenderingLocalRead = vk14.dynamicRenderingLocalRead == VK_TRUE;
+    result.synchronization2 = vk13.synchronization2 == VK_TRUE;
+    result.pushDescriptor = vk14.pushDescriptor == VK_TRUE;
+    result.fragmentShadingRate = hasFragmentShadingRateExt &&
+        anyFragmentShadingRateFeatureEnabled(fragmentShadingRateFeatures);
+    result.meshShader = hasMeshShaderExt && meshShaderFeatures.meshShader == VK_TRUE;
+    result.taskShader = hasMeshShaderExt && meshShaderFeatures.taskShader == VK_TRUE;
+    result.descriptorIndexing = vk12.descriptorIndexing == VK_TRUE;
+    result.timelineSemaphore = vk12.timelineSemaphore == VK_TRUE;
+    return result;
+}
+
+RendererMeshShaderProperties VulkanContext::queryMeshShaderProperties(
+    VkPhysicalDevice device,
+    const RendererDeviceFeatures& features) const
+{
+    RendererMeshShaderProperties result{};
+    if (!features.meshShader) {
+        return result;
+    }
+
+    VkPhysicalDeviceMeshShaderPropertiesEXT meshProps{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT
+    };
+    VkPhysicalDeviceProperties2 props{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+        &meshProps
+    };
+    vkGetPhysicalDeviceProperties2(device, &props);
+
+    result.maxTaskWorkGroupInvocations = meshProps.maxTaskWorkGroupInvocations;
+    result.maxMeshWorkGroupInvocations = meshProps.maxMeshWorkGroupInvocations;
+    result.maxMeshOutputVertices = meshProps.maxMeshOutputVertices;
+    result.maxMeshOutputPrimitives = meshProps.maxMeshOutputPrimitives;
+    result.maxPreferredTaskWorkGroupInvocations = meshProps.maxPreferredTaskWorkGroupInvocations;
+    result.maxPreferredMeshWorkGroupInvocations = meshProps.maxPreferredMeshWorkGroupInvocations;
+    result.maxMeshMultiviewViewCount = meshProps.maxMeshMultiviewViewCount;
+    return result;
+}
+
 bool VulkanContext::checkPortabilitySubset(VkPhysicalDevice device)
 {
     // VK_KHR_portability_subset is mandatory on MoltenVK but doesn't exist
     // on native Vulkan drivers (NVIDIA, AMD, Intel on Windows/Linux).
     auto exts = getDeviceExtensions(device);
-    return std::any_of(exts.begin(), exts.end(), [](const VkExtensionProperties& e) {
-        return strcmp(e.extensionName, "VK_KHR_portability_subset") == 0;
-    });
+    return hasExtension(exts, "VK_KHR_portability_subset");
 }
 
 bool VulkanContext::isDeviceSuitable(VkPhysicalDevice device)
@@ -209,14 +300,10 @@ bool VulkanContext::isDeviceSuitable(VkPhysicalDevice device)
     });
     if (!hasGraphics) return false;
 
-    // Mandatory Vulkan 1.4 features
-    VkPhysicalDeviceVulkan14Features vk14{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES};
-    VkPhysicalDeviceVulkan13Features vk13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, &vk14};
-    VkPhysicalDeviceFeatures2 feats{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &vk13};
-    vkGetPhysicalDeviceFeatures2(device, &feats);
+    const RendererDeviceFeatures features = queryRendererDeviceFeatures(device);
 
-    return vk13.dynamicRendering == VK_TRUE &&
-           vk14.dynamicRenderingLocalRead == VK_TRUE;
+    return features.dynamicRendering &&
+           features.dynamicRenderingLocalRead;
 }
 
 void VulkanContext::selectPhysicalDevice()
@@ -245,18 +332,11 @@ void VulkanContext::selectPhysicalDevice()
         else if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU)
             score += 500;
 
-        VkPhysicalDeviceVulkan14Features vk14{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES};
-        VkPhysicalDeviceFeatures2 feats{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &vk14};
-        vkGetPhysicalDeviceFeatures2(dev, &feats);
+        const RendererDeviceFeatures features = queryRendererDeviceFeatures(dev);
 
-        if (vk14.pushDescriptor) score += 100;
-
-        auto exts = getDeviceExtensions(dev);
-        bool hasFragShading = std::any_of(exts.begin(), exts.end(),
-            [](const VkExtensionProperties& e) {
-                return strcmp(e.extensionName, VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME) == 0;
-            });
-        if (hasFragShading) score += 50;
+        if (features.pushDescriptor) score += 100;
+        if (features.fragmentShadingRate) score += 50;
+        if (features.meshShader) score += 25;
 
         spdlog::info("  GPU candidate: {} | type {} | score {}",
             props.deviceName, static_cast<int>(props.deviceType), score);
@@ -273,6 +353,8 @@ void VulkanContext::selectPhysicalDevice()
             "dynamicRenderingLocalRead are required");
 
     m_physicalDevice = best;
+    m_deviceFeatures = queryRendererDeviceFeatures(m_physicalDevice);
+    m_meshShaderProperties = queryMeshShaderProperties(m_physicalDevice, m_deviceFeatures);
 
     m_deviceProps = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
     vkGetPhysicalDeviceProperties2(m_physicalDevice, &m_deviceProps);
@@ -329,17 +411,19 @@ void VulkanContext::createLogicalDevice()
         });
     }
 
-    // Query which optional features are actually supported before enabling them
-    VkPhysicalDeviceVulkan14Features queryVk14{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES};
-    VkPhysicalDeviceFeatures2 queryFeats{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &queryVk14};
-    vkGetPhysicalDeviceFeatures2(m_physicalDevice, &queryFeats);
+    if (!m_deviceFeatures.dynamicRendering && !m_deviceFeatures.dynamicRenderingLocalRead) {
+        m_deviceFeatures = queryRendererDeviceFeatures(m_physicalDevice);
+        m_meshShaderProperties = queryMeshShaderProperties(m_physicalDevice, m_deviceFeatures);
+    }
 
     // Build enabled feature chain: Features2 -> Vk14 -> Vk13 -> Vk12
     m_vulkan12Features = {
         .sType              = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-        .scalarBlockLayout  = VK_TRUE,   // core since 1.2; needed for std430 in GLSL
-        .bufferDeviceAddress = VK_TRUE,  // required for VMA buffer device address mode
     };
+    m_vulkan12Features.descriptorIndexing = m_deviceFeatures.descriptorIndexing ? VK_TRUE : VK_FALSE;
+    m_vulkan12Features.scalarBlockLayout = VK_TRUE;   // Needed for std430 in GLSL.
+    m_vulkan12Features.timelineSemaphore = m_deviceFeatures.timelineSemaphore ? VK_TRUE : VK_FALSE;
+    m_vulkan12Features.bufferDeviceAddress = VK_TRUE; // Required for VMA buffer device address mode.
 
     m_vulkan13Features = {
         .sType                          = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
@@ -353,7 +437,7 @@ void VulkanContext::createLogicalDevice()
         .sType                    = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
         .pNext                    = &m_vulkan13Features,
         .dynamicRenderingLocalRead = VK_TRUE,                         // SMAA tile-local
-        .pushDescriptor           = queryVk14.pushDescriptor,         // core in 1.4; conditional
+        .pushDescriptor           = m_deviceFeatures.pushDescriptor ? VK_TRUE : VK_FALSE,
     };
 
     m_enabledFeatures = {
@@ -365,15 +449,44 @@ void VulkanContext::createLogicalDevice()
         },
     };
 
-    // VK_KHR_swapchain is not core — always required for presentation.
-    // All other extensions (dynamic_rendering, push_descriptors, sync2) are core in 1.4.
+    // VK_KHR_swapchain is not core; presentation always requires it.
+    // Optional renderer features below add their device extensions only when supported.
+    VkPhysicalDeviceFragmentShadingRateFeaturesKHR fragmentShadingRateFeatures{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR
+    };
+    if (m_deviceFeatures.fragmentShadingRate) {
+        VkPhysicalDeviceFeatures2 supportedFeatures{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+            &fragmentShadingRateFeatures
+        };
+        vkGetPhysicalDeviceFeatures2(m_physicalDevice, &supportedFeatures);
+        fragmentShadingRateFeatures.pNext = m_enabledFeatures.pNext;
+        m_enabledFeatures.pNext = &fragmentShadingRateFeatures;
+    }
+
+    VkPhysicalDeviceMeshShaderFeaturesEXT meshShaderFeatures{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT
+    };
+    if (m_deviceFeatures.meshShader) {
+        meshShaderFeatures.taskShader = m_deviceFeatures.taskShader ? VK_TRUE : VK_FALSE;
+        meshShaderFeatures.meshShader = VK_TRUE;
+        meshShaderFeatures.pNext = m_enabledFeatures.pNext;
+        m_enabledFeatures.pNext = &meshShaderFeatures;
+    }
+
     std::vector<const char*> deviceExtensions = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
     };
 
     // VK_KHR_portability_subset is mandatory on MoltenVK; doesn't exist on native drivers.
     if (checkPortabilitySubset(m_physicalDevice))
-        deviceExtensions.push_back("VK_KHR_portability_subset");
+        appendDeviceExtension(deviceExtensions, "VK_KHR_portability_subset");
+
+    if (m_deviceFeatures.fragmentShadingRate)
+        appendDeviceExtension(deviceExtensions, VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME);
+
+    if (m_deviceFeatures.meshShader)
+        appendDeviceExtension(deviceExtensions, VK_EXT_MESH_SHADER_EXTENSION_NAME);
 
     const VkDeviceCreateInfo deviceInfo{
         .sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
@@ -415,12 +528,12 @@ void VulkanContext::createLogicalDevice()
 
 bool VulkanContext::hasFeature_DynamicRenderingLocalRead() const
 {
-    return m_vulkan14Features.dynamicRenderingLocalRead == VK_TRUE;
+    return m_deviceFeatures.dynamicRenderingLocalRead;
 }
 
 bool VulkanContext::hasFeature_PushDescriptor() const
 {
-    return m_vulkan14Features.pushDescriptor == VK_TRUE;
+    return m_deviceFeatures.pushDescriptor;
 }
 
 // ── Diagnostics ───────────────────────────────────────────────────────────────
@@ -473,11 +586,38 @@ void VulkanContext::logDeviceInfo() const
     spdlog::info("    pushDescriptor            : {}",
         hasFeature_PushDescriptor() ? "YES" : "NO");
     spdlog::info("    dynamicRendering          : {}",
-        m_vulkan13Features.dynamicRendering == VK_TRUE ? "YES" : "NO");
+        m_deviceFeatures.dynamicRendering ? "YES" : "NO");
     spdlog::info("    synchronization2          : {}",
-        m_vulkan13Features.synchronization2 == VK_TRUE ? "YES" : "NO");
+        m_deviceFeatures.synchronization2 ? "YES" : "NO");
+    spdlog::info("    descriptorIndexing        : {}",
+        m_deviceFeatures.descriptorIndexing ? "YES" : "NO");
+    spdlog::info("    timelineSemaphore         : {}",
+        m_deviceFeatures.timelineSemaphore ? "YES" : "NO");
+    spdlog::info("    fragmentShadingRate       : {}",
+        m_deviceFeatures.fragmentShadingRate ? "YES" : "NO");
+    spdlog::info("    meshShader                : {}",
+        m_deviceFeatures.meshShader ? "YES" : "NO");
+    spdlog::info("    taskShader                : {}",
+        m_deviceFeatures.taskShader ? "YES" : "NO");
     spdlog::info("    scalarBlockLayout         : {}",
         m_vulkan12Features.scalarBlockLayout == VK_TRUE ? "YES" : "NO");
+    if (m_deviceFeatures.meshShader) {
+        spdlog::info("  Mesh shader properties:");
+        spdlog::info("    maxTaskWorkGroupInvocations      : {}",
+            m_meshShaderProperties.maxTaskWorkGroupInvocations);
+        spdlog::info("    maxMeshWorkGroupInvocations      : {}",
+            m_meshShaderProperties.maxMeshWorkGroupInvocations);
+        spdlog::info("    maxMeshOutputVertices            : {}",
+            m_meshShaderProperties.maxMeshOutputVertices);
+        spdlog::info("    maxMeshOutputPrimitives          : {}",
+            m_meshShaderProperties.maxMeshOutputPrimitives);
+        spdlog::info("    maxPreferredTaskWorkGroupInvoc.  : {}",
+            m_meshShaderProperties.maxPreferredTaskWorkGroupInvocations);
+        spdlog::info("    maxPreferredMeshWorkGroupInvoc.  : {}",
+            m_meshShaderProperties.maxPreferredMeshWorkGroupInvocations);
+        spdlog::info("    maxMeshMultiviewViewCount        : {}",
+            m_meshShaderProperties.maxMeshMultiviewViewCount);
+    }
     spdlog::info("  Queue families:");
     spdlog::info("    Graphics  : {}", m_graphicsQueueFamily);
     spdlog::info("    Compute   : {}", m_computeQueueFamily);

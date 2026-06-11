@@ -16,6 +16,29 @@
         }                                                                           \
     } while (0)
 
+struct RendererDeviceFeatures {
+    bool dynamicRendering = false;
+    bool dynamicRenderingLocalRead = false;
+    bool synchronization2 = false;
+    bool pushDescriptor = false;
+
+    bool fragmentShadingRate = false;
+    bool meshShader = false;
+    bool taskShader = false;
+    bool descriptorIndexing = false;
+    bool timelineSemaphore = false;
+};
+
+struct RendererMeshShaderProperties {
+    uint32_t maxTaskWorkGroupInvocations = 0;
+    uint32_t maxMeshWorkGroupInvocations = 0;
+    uint32_t maxMeshOutputVertices = 0;
+    uint32_t maxMeshOutputPrimitives = 0;
+    uint32_t maxPreferredTaskWorkGroupInvocations = 0;
+    uint32_t maxPreferredMeshWorkGroupInvocations = 0;
+    uint32_t maxMeshMultiviewViewCount = 0;
+};
+
 class VulkanContext {
 public:
     VulkanContext();
@@ -36,6 +59,9 @@ public:
     uint32_t         getGraphicsQueueFamily() const { return m_graphicsQueueFamily; }
     VmaAllocator     getAllocator()           const { return m_allocator; }
 
+    const RendererDeviceFeatures& getDeviceFeatures() const { return m_deviceFeatures; }
+    const RendererMeshShaderProperties& getMeshShaderProperties() const { return m_meshShaderProperties; }
+
     bool hasFeature_DynamicRenderingLocalRead() const;
     bool hasFeature_PushDescriptor()            const;
     void logDeviceInfo()                        const;
@@ -47,7 +73,10 @@ private:
 
     bool                               isDeviceSuitable(VkPhysicalDevice device);
     bool                               checkPortabilitySubset(VkPhysicalDevice device);
-    std::vector<VkExtensionProperties> getDeviceExtensions(VkPhysicalDevice device);
+    std::vector<VkExtensionProperties> getDeviceExtensions(VkPhysicalDevice device) const;
+    RendererDeviceFeatures             queryRendererDeviceFeatures(VkPhysicalDevice device) const;
+    RendererMeshShaderProperties       queryMeshShaderProperties(VkPhysicalDevice device,
+                                                                 const RendererDeviceFeatures& features) const;
 
     VkInstance               m_instance      = VK_NULL_HANDLE;
     VkPhysicalDevice         m_physicalDevice = VK_NULL_HANDLE;
@@ -69,4 +98,7 @@ private:
     VkPhysicalDeviceVulkan13Features m_vulkan13Features{};
     VkPhysicalDeviceVulkan14Features m_vulkan14Features{};
     VkPhysicalDeviceFeatures2        m_enabledFeatures{};
+
+    RendererDeviceFeatures       m_deviceFeatures{};
+    RendererMeshShaderProperties m_meshShaderProperties{};
 };
