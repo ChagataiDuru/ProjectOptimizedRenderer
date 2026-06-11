@@ -13,6 +13,7 @@
 #include "renderpasses/ShadowPass.h"
 #include "renderpasses/SkyPass.h"
 #include "renderpasses/TonemapPass.h"
+#include "renderpasses/ClusteredLightCullingPass.h"
 #include "resource/Buffer.h"
 #include "resource/Image.h"
 #include "resource/Model.h"
@@ -55,6 +56,7 @@ public:
 
     void setLightParameters(const glm::vec3& direction, const glm::vec3& color,
                             float intensity, float ambient);
+    void setPointLights(const std::vector<shader_interface::GpuPointLight>& pointLights);
 
     // Phase 4.3: CSM controls
     void setCsmLambda(float lambda)            { m_shadowSettings.csmLambda = lambda; }
@@ -185,9 +187,20 @@ private:
     // Directional light UBO (host-visible, std140: 48 bytes = 3×vec4)
     using LightUBO = shader_interface::LightUBO;
     using ShadowCascadeUBO = shader_interface::ShadowCascadeUBO;
+    using ClusterMetadataUBO = shader_interface::ClusterMetadataUBO;
 
     Buffer           m_cameraUBOBuffer;
     Buffer           m_lightUBOBuffer;
+    Buffer           m_pointLightBuffer;
+    Buffer           m_clusterGridBuffer;
+    Buffer           m_clusterLightIndexBuffer;
+    Buffer           m_clusterMetadataBuffer;
+    std::vector<shader_interface::GpuPointLight> m_pointLights;
+    uint32_t         m_maxPointLights = 1024;
+    uint32_t         m_clusterCountX = 0;
+    uint32_t         m_clusterCountY = 0;
+    uint32_t         m_clusterCountZ = shader_interface::kClusterZSlices;
+    uint32_t         m_clusterCount = 0;
 
     // Texture infrastructure
     SamplerCache         m_samplerCache;
@@ -222,6 +235,7 @@ private:
     RenderStats  m_renderStats;
 
     ShadowPass      m_shadowPass;
+    ClusteredLightCullingPass m_clusteredLightCullingPass;
     ShadowSettings  m_shadowSettings;
     glm::vec3       m_lightDirection   = glm::vec3(1.0f, 1.0f, 1.0f);
 
@@ -252,6 +266,13 @@ private:
     void createCameraUBO();
     void createLightUBO();
     void uploadLightUBO();   // re-upload m_lightUBOBuffer from stored params
+    void createDefaultPointLights();
+    void createClusteredLightResources();
+    void destroyClusteredLightResources();
+    void resizeClusteredLightResources();
+    void uploadPointLightBuffer();
+    void uploadClusterMetadata();
+    void updateClusterDescriptors();
     void createDepthImage();
     void createHdrTarget();
     void createDescriptorPool();

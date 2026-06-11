@@ -92,6 +92,7 @@ add_executable(ProjectOptimizedRenderer
     src/renderpasses/SkyPass.cpp
     src/renderpasses/TonemapPass.cpp
     src/renderpasses/ShadowPass.cpp
+    src/renderpasses/ClusteredLightCullingPass.cpp
     src/resource/VmaImpl.cpp
     src/resource/Buffer.cpp
     src/resource/Image.cpp
@@ -247,6 +248,11 @@ shader_compile_glsl(
     TARGET ProjectOptimizedRenderer
     SOURCE "${CMAKE_SOURCE_DIR}/shaders/shadow_blur.comp"
     OUTPUT "shadow_blur.comp.spv"
+)
+shader_compile_glsl(
+    TARGET ProjectOptimizedRenderer
+    SOURCE "${CMAKE_SOURCE_DIR}/shaders/cluster_cull.comp"
+    OUTPUT "cluster_cull.comp.spv"
 )
 shader_compile_glsl(
     TARGET ProjectOptimizedRenderer

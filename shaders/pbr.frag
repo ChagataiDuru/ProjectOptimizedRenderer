@@ -38,6 +38,34 @@ layout(binding = 3, set = 0) uniform sampler2DArray shadowMap;
 // VSM moment map (RG32_SFLOAT array, 4 layers) — used for VSM mode.
 layout(binding = 4, set = 0) uniform sampler2DArray shadowMoments;
 
+struct PointLight {
+    vec4 positionRadius;
+    vec4 colorIntensity;
+};
+
+struct ClusterLightRange {
+    uint offset;
+    uint count;
+};
+
+layout(std430, binding = 5, set = 0) readonly buffer PointLightBuffer {
+    PointLight pointLights[];
+};
+
+layout(std430, binding = 6, set = 0) readonly buffer ClusterGridBuffer {
+    ClusterLightRange clusterGrid[];
+};
+
+layout(std430, binding = 7, set = 0) readonly buffer ClusterLightIndexBuffer {
+    uint clusterLightIndices[];
+};
+
+layout(binding = 8, set = 0) uniform ClusterMetadata {
+    uvec4 clusterCounts;
+    uvec4 lightCounts;
+    vec4 screenSizeDepth;
+} clusterMeta;
+
 // ── Material textures (set 1) ─────────────────────────────────────────────────
 // ShaderInterface.h: material set owns material texture descriptors.
 layout(binding = 0, set = 1) uniform sampler2D texAlbedo;
@@ -94,8 +122,9 @@ float geometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
 
 // ── Cook-Torrance BRDF ───────────────────────────────────────────────────────
 // Returns outgoing radiance for one directional light hit.
-vec3 cookTorrance(vec3 N, vec3 L, vec3 V,
-                  vec3 baseColor, float metallic, float roughness) {
+vec3 cookTorranceRadiance(vec3 N, vec3 L, vec3 V,
+                          vec3 baseColor, float metallic, float roughness,
+                          vec3 radiance) {
     vec3 H = normalize(L + V);
 
     float NdotL = max(dot(N, L), 0.0);
@@ -114,8 +143,60 @@ vec3 cookTorrance(vec3 N, vec3 L, vec3 V,
 
     vec3 specular = (NDF * G * F) / max(4.0 * NdotV * NdotL + 0.0001, 0.0001);
 
-    vec3 radiance = light.lightColor * light.lightIntensity;
     return (kD * baseColor / PI + specular) * radiance * NdotL;
+}
+
+vec3 cookTorrance(vec3 N, vec3 L, vec3 V,
+                  vec3 baseColor, float metallic, float roughness) {
+    return cookTorranceRadiance(N, L, V, baseColor, metallic, roughness,
+                                light.lightColor * light.lightIntensity);
+}
+
+vec3 evaluatePointLight(PointLight pointLight,
+                        vec3 worldPos,
+                        vec3 N,
+                        vec3 V,
+                        vec3 baseColor,
+                        float metallic,
+                        float roughness)
+{
+    const vec3 toLight = pointLight.positionRadius.xyz - worldPos;
+    const float distSq = max(dot(toLight, toLight), 0.0001);
+    const float dist = sqrt(distSq);
+    const float radius = pointLight.positionRadius.w;
+    if (dist >= radius || radius <= 0.0 || pointLight.colorIntensity.a <= 0.0) {
+        return vec3(0.0);
+    }
+
+    const vec3 L = toLight / dist;
+    const float rangeAttenuation = pow(clamp(1.0 - dist / radius, 0.0, 1.0), 2.0);
+    const vec3 radiance =
+        pointLight.colorIntensity.rgb *
+        pointLight.colorIntensity.a *
+        rangeAttenuation / distSq;
+    return cookTorranceRadiance(N, L, V, baseColor, metallic, roughness, radiance);
+}
+
+uint computeClusterIndex(vec2 fragCoord, float viewZ)
+{
+    if (clusterMeta.clusterCounts.x == 0u ||
+        clusterMeta.clusterCounts.y == 0u ||
+        clusterMeta.clusterCounts.z == 0u) {
+        return 0u;
+    }
+
+    const uvec2 tile = min(uvec2(fragCoord / vec2(16.0, 16.0)),
+                           clusterMeta.clusterCounts.xy - uvec2(1u));
+    const float nearZ = max(clusterMeta.screenSizeDepth.z, 0.0001);
+    const float farZ = max(clusterMeta.screenSizeDepth.w, nearZ + 0.0001);
+    const float zNorm = clamp(log(max(viewZ, nearZ) / nearZ) / log(farZ / nearZ),
+                              0.0, 0.999999);
+    const uint zSlice = min(uint(zNorm * float(clusterMeta.clusterCounts.z)),
+                            clusterMeta.clusterCounts.z - 1u);
+
+    return tile.x +
+           tile.y * clusterMeta.clusterCounts.x +
+           zSlice * clusterMeta.clusterCounts.x * clusterMeta.clusterCounts.y;
 }
 
 // ── 16-tap Poisson disk offsets (unit disk, golden-ratio rotated) ─────────────
@@ -322,6 +403,22 @@ void main() {
     int cascadeIdx;
     float shadowFactor = computeShadow(fs_in.worldPos, cascadeIdx);
     Lo *= shadowFactor;
+
+    const float clusteredViewZ = abs((camera.view * vec4(fs_in.worldPos, 1.0)).z);
+    const uint clusterIndex = computeClusterIndex(gl_FragCoord.xy, clusteredViewZ);
+    const ClusterLightRange range = clusterGrid[clusterIndex];
+    for (uint i = 0; i < range.count; ++i) {
+        const uint lightIndex = clusterLightIndices[range.offset + i];
+        if (lightIndex < clusterMeta.lightCounts.x) {
+            Lo += evaluatePointLight(pointLights[lightIndex],
+                                     fs_in.worldPos,
+                                     N,
+                                     V,
+                                     baseColor,
+                                     metallic,
+                                     roughness);
+        }
+    }
 
     // ── Ambient ──────────────────────────────────────────────────────────
     vec3 ambient = baseColor * light.ambientIntensity;

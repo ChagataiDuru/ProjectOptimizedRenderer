@@ -1,0 +1,119 @@
+#version 460 core
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(binding = 0, set = 0) uniform CameraData {
+    mat4 view;
+    mat4 projection;
+    mat4 inverseVP;
+    vec3 cameraPos;
+} camera;
+
+struct PointLight {
+    vec4 positionRadius;
+    vec4 colorIntensity;
+};
+
+struct ClusterLightRange {
+    uint offset;
+    uint count;
+};
+
+layout(std430, binding = 5, set = 0) readonly buffer PointLightBuffer {
+    PointLight pointLights[];
+};
+
+layout(std430, binding = 6, set = 0) writeonly buffer ClusterGridBuffer {
+    ClusterLightRange clusterGrid[];
+};
+
+layout(std430, binding = 7, set = 0) writeonly buffer ClusterLightIndexBuffer {
+    uint clusterLightIndices[];
+};
+
+layout(binding = 8, set = 0) uniform ClusterMetadata {
+    uvec4 clusterCounts;    // x=countX, y=countY, z=countZ, w=maxLightsPerCluster
+    uvec4 lightCounts;      // x=pointLightCount, y=debugMode
+    vec4 screenSizeDepth;   // x=width, y=height, z=nearZ, w=farZ
+} clusterMeta;
+
+const float CLUSTER_TILE_SIZE_X = 16.0;
+const float CLUSTER_TILE_SIZE_Y = 16.0;
+
+bool rangesOverlap(float aMin, float aMax, float bMin, float bMax)
+{
+    return aMin <= bMax && bMin <= aMax;
+}
+
+void main()
+{
+    const uvec3 clusterCoord = gl_GlobalInvocationID.xyz;
+    if (any(greaterThanEqual(clusterCoord, clusterMeta.clusterCounts.xyz))) {
+        return;
+    }
+
+    const uint clusterIndex =
+        clusterCoord.x +
+        clusterCoord.y * clusterMeta.clusterCounts.x +
+        clusterCoord.z * clusterMeta.clusterCounts.x * clusterMeta.clusterCounts.y;
+
+    const uint maxLightsPerCluster = clusterMeta.clusterCounts.w;
+    const uint offset = clusterIndex * maxLightsPerCluster;
+
+    ClusterLightRange range;
+    range.offset = offset;
+    range.count = 0;
+
+    const vec2 tileMin = vec2(clusterCoord.xy) * vec2(CLUSTER_TILE_SIZE_X, CLUSTER_TILE_SIZE_Y);
+    const vec2 tileMax = min(tileMin + vec2(CLUSTER_TILE_SIZE_X, CLUSTER_TILE_SIZE_Y),
+                             clusterMeta.screenSizeDepth.xy);
+
+    const float nearZ = max(clusterMeta.screenSizeDepth.z, 0.0001);
+    const float farZ = max(clusterMeta.screenSizeDepth.w, nearZ + 0.0001);
+    const float z0 = float(clusterCoord.z) / float(clusterMeta.clusterCounts.z);
+    const float z1 = float(clusterCoord.z + 1u) / float(clusterMeta.clusterCounts.z);
+    const float sliceNear = nearZ * pow(farZ / nearZ, z0);
+    const float sliceFar = nearZ * pow(farZ / nearZ, z1);
+
+    const uint pointLightCount = clusterMeta.lightCounts.x;
+    for (uint lightIndex = 0; lightIndex < pointLightCount; ++lightIndex) {
+        PointLight light = pointLights[lightIndex];
+        const float radius = light.positionRadius.w;
+        if (radius <= 0.0 || light.colorIntensity.a <= 0.0) {
+            continue;
+        }
+
+        const vec4 viewCenter4 = camera.view * vec4(light.positionRadius.xyz, 1.0);
+        const float viewDepth = abs(viewCenter4.z);
+        if (!rangesOverlap(viewDepth - radius, viewDepth + radius, sliceNear, sliceFar)) {
+            continue;
+        }
+
+        const vec4 clipCenter = camera.projection * viewCenter4;
+        if (abs(clipCenter.w) <= 0.0001) {
+            continue;
+        }
+
+        const vec2 ndc = clipCenter.xy / clipCenter.w;
+        const vec2 screenCenter = (ndc * 0.5 + 0.5) * clusterMeta.screenSizeDepth.xy;
+        const float radiusPixels =
+            abs(camera.projection[1][1]) * radius / max(viewDepth, 0.0001) *
+            clusterMeta.screenSizeDepth.y * 0.5;
+
+        const vec2 lightMin = screenCenter - vec2(radiusPixels);
+        const vec2 lightMax = screenCenter + vec2(radiusPixels);
+        const bool overlapsTile =
+            rangesOverlap(lightMin.x, lightMax.x, tileMin.x, tileMax.x) &&
+            rangesOverlap(lightMin.y, lightMax.y, tileMin.y, tileMax.y);
+        if (!overlapsTile) {
+            continue;
+        }
+
+        if (range.count < maxLightsPerCluster) {
+            clusterLightIndices[offset + range.count] = lightIndex;
+            ++range.count;
+        }
+    }
+
+    clusterGrid[clusterIndex] = range;
+}

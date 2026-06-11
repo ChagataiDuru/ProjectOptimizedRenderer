@@ -217,10 +217,11 @@ void registerViewerPanels(ImGuiManager& imguiManager,
         const bool  hasBlur   = (state.shadow.filterMode == 2);
         const float blurMs    = hasBlur
             ? timer.getElapsedMs("BlurPass_Begin", "BlurPass_End") : 0.0f;
+        const float clusterMs = timer.getElapsedMs("ClusterCull_Begin", "ClusterCull_End");
         const float sceneMs   = timer.getElapsedMs("ScenePass_Begin", "ScenePass_End");
         const float tonemapMs = timer.getElapsedMs("TonemapPass_Begin", "TonemapPass_End");
         const float imguiMs   = timer.getElapsedMs("TonemapPass_End", "ImGuiPass_End");
-        const float totalMs   = shadowMs + blurMs + sceneMs + tonemapMs + imguiMs;
+        const float totalMs   = shadowMs + blurMs + clusterMs + sceneMs + tonemapMs + imguiMs;
         const float budget    = 16.67f;
 
         ImGui::Text("Budget: %.2f / %.2f ms (60 Hz)", totalMs, budget);
@@ -252,13 +253,20 @@ void registerViewerPanels(ImGuiManager& imguiManager,
         }
 
         const float usedW  = shadowW + blurW;
-        const float sceneW = std::min((sceneMs / budget) * barWidth, barWidth - usedW);
+        const float clusterW = std::min((clusterMs / budget) * barWidth, barWidth - usedW);
         draw->AddRectFilled(ImVec2(barStart.x + usedW, barStart.y),
-                            ImVec2(barStart.x + usedW + sceneW, barStart.y + barHeight),
+                            ImVec2(barStart.x + usedW + clusterW, barStart.y + barHeight),
+                            IM_COL32(80, 210, 220, 200),
+                            4.0f);
+
+        const float usedWCluster = usedW + clusterW;
+        const float sceneW = std::min((sceneMs / budget) * barWidth, barWidth - usedWCluster);
+        draw->AddRectFilled(ImVec2(barStart.x + usedWCluster, barStart.y),
+                            ImVec2(barStart.x + usedWCluster + sceneW, barStart.y + barHeight),
                             IM_COL32(66, 150, 250, 200),
                             4.0f);
 
-        const float usedW2   = usedW + sceneW;
+        const float usedW2   = usedWCluster + sceneW;
         const float tonemapW = std::min((tonemapMs / budget) * barWidth,
                                         barWidth - usedW2);
         draw->AddRectFilled(ImVec2(barStart.x + usedW2, barStart.y),
@@ -299,6 +307,11 @@ void registerViewerPanels(ImGuiManager& imguiManager,
                            ImGuiColorEditFlags_NoTooltip, ImVec2(10.0f, 10.0f));
         ImGui::SameLine();
         ImGui::Text("Scene: %.3f ms", sceneMs);
+
+        ImGui::ColorButton("##cl", ImVec4(0.31f, 0.82f, 0.86f, 1.0f),
+                           ImGuiColorEditFlags_NoTooltip, ImVec2(10.0f, 10.0f));
+        ImGui::SameLine();
+        ImGui::Text("Cluster cull: %.3f ms", clusterMs);
 
         ImGui::ColorButton("##tm", ImVec4(0.90f, 0.82f, 0.23f, 1.0f),
                            ImGuiColorEditFlags_NoTooltip, ImVec2(10.0f, 10.0f));

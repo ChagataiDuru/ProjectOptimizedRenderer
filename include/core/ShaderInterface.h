@@ -20,6 +20,10 @@ inline constexpr uint32_t kLight = 1;
 inline constexpr uint32_t kShadow = 2;
 inline constexpr uint32_t kShadowMap = 3;
 inline constexpr uint32_t kShadowMoments = 4;
+inline constexpr uint32_t kPointLights = 5;
+inline constexpr uint32_t kClusterGrid = 6;
+inline constexpr uint32_t kClusterLightIndices = 7;
+inline constexpr uint32_t kClusterMetadata = 8;
 }
 
 namespace material_binding {
@@ -48,6 +52,32 @@ inline constexpr uint32_t kCascadeIndexPcOffset = 96;
 inline constexpr uint32_t kSkyPcOffset = 0;
 inline constexpr uint32_t kShadowBlurPcOffset = 0;
 inline constexpr uint32_t kTonemapPcOffset = 0;
+inline constexpr uint32_t kClusterTileSizeX = 16;
+inline constexpr uint32_t kClusterTileSizeY = 16;
+inline constexpr uint32_t kClusterZSlices = 24;
+inline constexpr uint32_t kMaxLightsPerCluster = 128;
+
+struct GpuPointLight {
+    glm::vec4 positionRadius;   // xyz, radius
+    glm::vec4 colorIntensity;   // rgb, intensity
+};
+
+struct GpuSpotLight {
+    glm::vec4 positionRadius;
+    glm::vec4 directionInnerCos;
+    glm::vec4 colorOuterCosIntensity;
+};
+
+struct ClusterLightRange {
+    uint32_t offset;
+    uint32_t count;
+};
+
+struct ClusterMetadataUBO {
+    glm::uvec4 clusterCounts;    // x=countX, y=countY, z=countZ, w=maxLightsPerCluster
+    glm::uvec4 lightCounts;      // x=pointLightCount, y=debugMode
+    glm::vec4  screenSizeDepth;  // x=width, y=height, z=nearZ, w=farZ
+};
 
 struct MaterialPushConstants {
     glm::vec4 baseColorFactor = glm::vec4(1.0f);
@@ -89,12 +119,20 @@ struct TonemapPC {
 };
 
 static_assert(std::is_standard_layout_v<MaterialPushConstants>);
+static_assert(std::is_standard_layout_v<GpuPointLight>);
+static_assert(std::is_standard_layout_v<GpuSpotLight>);
+static_assert(std::is_standard_layout_v<ClusterLightRange>);
+static_assert(std::is_standard_layout_v<ClusterMetadataUBO>);
 static_assert(std::is_standard_layout_v<CameraUBO>);
 static_assert(std::is_standard_layout_v<LightUBO>);
 static_assert(std::is_standard_layout_v<ShadowCascadeUBO>);
 static_assert(std::is_standard_layout_v<TonemapPC>);
 
 static_assert(sizeof(MaterialPushConstants) == 32);
+static_assert(sizeof(GpuPointLight) == 32);
+static_assert(sizeof(GpuSpotLight) == 48);
+static_assert(sizeof(ClusterLightRange) == 8);
+static_assert(sizeof(ClusterMetadataUBO) == 48);
 static_assert(sizeof(CameraUBO) == 208);
 static_assert(sizeof(LightUBO) == 48);
 static_assert(sizeof(ShadowCascadeUBO) == 272);

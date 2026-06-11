@@ -106,11 +106,16 @@ Renderer::Renderer(VulkanContext& ctx, Swapchain& swapchain)
     , m_indexBuffer(ctx)
     , m_cameraUBOBuffer(ctx)
     , m_lightUBOBuffer(ctx)
+    , m_pointLightBuffer(ctx)
+    , m_clusterGridBuffer(ctx)
+    , m_clusterLightIndexBuffer(ctx)
+    , m_clusterMetadataBuffer(ctx)
     , m_samplerCache(ctx)
     , m_fallbackWhite(ctx)
     , m_depthImage(ctx)
     , m_hdrTarget(ctx)
     , m_shadowPass(ctx)
+    , m_clusteredLightCullingPass(ctx)
     , m_skyPass(ctx)
     , m_gpuTimer(ctx)
     , m_screenshot(ctx)
@@ -128,6 +133,7 @@ void Renderer::init()
     m_sceneInfo = computeSceneInfo(m_model.boundsMin, m_model.boundsMax);
     spdlog::info("Scene normalized: scale={:.4f}, radius={:.2f}",
                  m_sceneInfo.scaleFactor, m_sceneInfo.normalizedRadius);
+    createDefaultPointLights();
     rebuildDrawCommands();
 
     m_frameSync.init(3);
@@ -135,17 +141,19 @@ void Renderer::init()
     m_tonemapPass.init(m_ctx.getDevice(), m_swapchain.getFormat(), SHADER_DIR);
     createResizeDependentResources();
     createPbrPipeline();
+    m_clusteredLightCullingPass.init(m_cameraSetLayout, SHADER_DIR);
     m_skyPass.init(m_ctx, m_cameraSetLayout,
                    VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT,
                    SHADER_DIR);
     createCameraUBO();
     createLightUBO();
+    createClusteredLightResources();
     m_shadowPass.init(m_pipelineLayout, VK_NULL_HANDLE, SHADER_DIR);
     createDescriptorPool();
     createDescriptorSet();
     m_shadowPass.setSceneDescriptorSet(m_descriptorSet);
     createMaterialDescriptorSets();
-    m_gpuTimer.init(16);
+    m_gpuTimer.init(24);
 
     // Populate static render stats (counts that don't change after load)
     refreshRenderStats();
@@ -205,6 +213,9 @@ void Renderer::reloadModel(const std::string& modelPath)
     m_sceneInfo = computeSceneInfo(m_model.boundsMin, m_model.boundsMax);
     spdlog::info("Scene normalized: scale={:.4f}, radius={:.2f}",
                  m_sceneInfo.scaleFactor, m_sceneInfo.normalizedRadius);
+    createDefaultPointLights();
+    uploadPointLightBuffer();
+    uploadClusterMetadata();
     rebuildDrawCommands();
 
     // ── Recreate descriptors for the new model ───────────────────────────────────
@@ -237,6 +248,7 @@ void Renderer::shutdown()
     }
 
     m_skyPass.shutdown(m_ctx.getDevice());
+    m_clusteredLightCullingPass.shutdown(m_ctx.getDevice());
 
     destroyPipeline();
 
@@ -253,6 +265,7 @@ void Renderer::shutdown()
     m_shadowPass.shutdown(m_ctx.getDevice());
 
     // Destroy GPU resources that hold VMA allocations
+    destroyClusteredLightResources();
     m_lightUBOBuffer.destroy();
     m_cameraUBOBuffer.destroy();
     m_indexBuffer.destroy();
@@ -512,12 +525,14 @@ void Renderer::createPbrPipeline()
     };
 
     // Descriptor set layout: set 0 — camera(b0), light(b1), shadowUBO(b2), depth array(b3), moments(b4).
-    const std::array<VkDescriptorSetLayoutBinding, 5> setBindings{{
+    const std::array<VkDescriptorSetLayoutBinding, 9> setBindings{{
         {   // binding 0: camera matrices — read in vertex + fragment shaders
             .binding         = shader_interface::scene_binding::kCamera,
             .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
             .descriptorCount = 1,
-            .stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            .stageFlags      = VK_SHADER_STAGE_VERTEX_BIT |
+                               VK_SHADER_STAGE_FRAGMENT_BIT |
+                               VK_SHADER_STAGE_COMPUTE_BIT,
         },
         {   // binding 1: directional light — read in fragment shader
             .binding         = shader_interface::scene_binding::kLight,
@@ -542,6 +557,30 @@ void Renderer::createPbrPipeline()
             .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
             .descriptorCount = 1,
             .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
+        },
+        {
+            .binding         = shader_interface::scene_binding::kPointLights,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
+        },
+        {
+            .binding         = shader_interface::scene_binding::kClusterGrid,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
+        },
+        {
+            .binding         = shader_interface::scene_binding::kClusterLightIndices,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
+        },
+        {
+            .binding         = shader_interface::scene_binding::kClusterMetadata,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
         },
     }};
     const VkDescriptorSetLayoutCreateInfo setLayoutInfo{
@@ -753,6 +792,175 @@ void Renderer::uploadLightUBO()
     m_lightUBOBuffer.upload(&light, sizeof(LightUBO));
 }
 
+void Renderer::createDefaultPointLights()
+{
+    const float r = std::max(m_sceneInfo.normalizedRadius, 1.0f);
+    const float y = 1.8f;
+    const float radius = r * 0.45f;
+    const float intensity = 22.0f;
+
+    m_pointLights = {
+        { glm::vec4(-0.45f * r, y, -0.35f * r, radius), glm::vec4(1.0f, 0.45f, 0.30f, intensity) },
+        { glm::vec4( 0.45f * r, y, -0.35f * r, radius), glm::vec4(0.35f, 0.65f, 1.0f, intensity) },
+        { glm::vec4(-0.45f * r, y,  0.35f * r, radius), glm::vec4(0.45f, 1.0f, 0.55f, intensity) },
+        { glm::vec4( 0.45f * r, y,  0.35f * r, radius), glm::vec4(1.0f, 0.80f, 0.35f, intensity) },
+    };
+}
+
+void Renderer::createClusteredLightResources()
+{
+    m_pointLightBuffer.createHostVisible(
+        static_cast<VkDeviceSize>(m_maxPointLights) * sizeof(shader_interface::GpuPointLight),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    m_clusterMetadataBuffer.createHostVisible(sizeof(ClusterMetadataUBO),
+                                              VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+
+    uploadPointLightBuffer();
+    resizeClusteredLightResources();
+
+    spdlog::info("Clustered Forward+ light resources created: max point lights={}, max lights/cluster={}",
+                 m_maxPointLights, shader_interface::kMaxLightsPerCluster);
+}
+
+void Renderer::destroyClusteredLightResources()
+{
+    m_clusterLightIndexBuffer.destroy();
+    m_clusterGridBuffer.destroy();
+    m_clusterMetadataBuffer.destroy();
+    m_pointLightBuffer.destroy();
+}
+
+void Renderer::resizeClusteredLightResources()
+{
+    const VkExtent2D ext = m_swapchain.getExtent();
+    if (ext.width == 0 || ext.height == 0) {
+        return;
+    }
+
+    m_clusterCountX = (ext.width + shader_interface::kClusterTileSizeX - 1u) /
+                      shader_interface::kClusterTileSizeX;
+    m_clusterCountY = (ext.height + shader_interface::kClusterTileSizeY - 1u) /
+                      shader_interface::kClusterTileSizeY;
+    m_clusterCountZ = shader_interface::kClusterZSlices;
+    m_clusterCount = m_clusterCountX * m_clusterCountY * m_clusterCountZ;
+
+    m_clusterGridBuffer.destroy();
+    m_clusterLightIndexBuffer.destroy();
+
+    m_clusterGridBuffer.createDeviceLocal(
+        static_cast<VkDeviceSize>(m_clusterCount) * sizeof(shader_interface::ClusterLightRange),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    m_clusterLightIndexBuffer.createDeviceLocal(
+        static_cast<VkDeviceSize>(m_clusterCount) * shader_interface::kMaxLightsPerCluster * sizeof(uint32_t),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+
+    uploadClusterMetadata();
+    updateClusterDescriptors();
+
+    spdlog::info("Cluster grid resized: {}x{}x{} ({} clusters)",
+                 m_clusterCountX, m_clusterCountY, m_clusterCountZ, m_clusterCount);
+}
+
+void Renderer::setPointLights(const std::vector<shader_interface::GpuPointLight>& pointLights)
+{
+    m_pointLights.assign(pointLights.begin(),
+                         pointLights.begin() + std::min(pointLights.size(),
+                                                        static_cast<size_t>(m_maxPointLights)));
+    uploadPointLightBuffer();
+    uploadClusterMetadata();
+}
+
+void Renderer::uploadPointLightBuffer()
+{
+    if (m_pointLightBuffer.getBuffer() == VK_NULL_HANDLE) return;
+
+    std::vector<shader_interface::GpuPointLight> uploadData(m_maxPointLights);
+    const size_t copyCount = std::min(m_pointLights.size(), uploadData.size());
+    std::copy_n(m_pointLights.data(), copyCount, uploadData.data());
+    m_pointLightBuffer.upload(uploadData.data(),
+                              static_cast<VkDeviceSize>(uploadData.size() * sizeof(uploadData[0])));
+}
+
+void Renderer::uploadClusterMetadata()
+{
+    if (m_clusterMetadataBuffer.getBuffer() == VK_NULL_HANDLE) return;
+
+    const VkExtent2D ext = m_swapchain.getExtent();
+    const ClusterMetadataUBO metadata{
+        glm::uvec4(m_clusterCountX, m_clusterCountY, m_clusterCountZ,
+                   shader_interface::kMaxLightsPerCluster),
+        glm::uvec4(static_cast<uint32_t>(std::min(m_pointLights.size(),
+                                                  static_cast<size_t>(m_maxPointLights))),
+                   0u, 0u, 0u),
+        glm::vec4(static_cast<float>(ext.width),
+                  static_cast<float>(ext.height),
+                  m_cameraNearZ,
+                  m_cameraFarZ),
+    };
+    m_clusterMetadataBuffer.upload(&metadata, sizeof(metadata));
+}
+
+void Renderer::updateClusterDescriptors()
+{
+    if (m_descriptorSet == VK_NULL_HANDLE ||
+        m_pointLightBuffer.getBuffer() == VK_NULL_HANDLE ||
+        m_clusterGridBuffer.getBuffer() == VK_NULL_HANDLE ||
+        m_clusterLightIndexBuffer.getBuffer() == VK_NULL_HANDLE ||
+        m_clusterMetadataBuffer.getBuffer() == VK_NULL_HANDLE) {
+        return;
+    }
+
+    const VkDescriptorBufferInfo pointLightInfo{
+        .buffer = m_pointLightBuffer.getBuffer(),
+        .offset = 0,
+        .range = m_pointLightBuffer.getSize(),
+    };
+    const VkDescriptorBufferInfo clusterGridInfo{
+        .buffer = m_clusterGridBuffer.getBuffer(),
+        .offset = 0,
+        .range = m_clusterGridBuffer.getSize(),
+    };
+    const VkDescriptorBufferInfo clusterIndicesInfo{
+        .buffer = m_clusterLightIndexBuffer.getBuffer(),
+        .offset = 0,
+        .range = m_clusterLightIndexBuffer.getSize(),
+    };
+    const VkDescriptorBufferInfo clusterMetadataInfo{
+        .buffer = m_clusterMetadataBuffer.getBuffer(),
+        .offset = 0,
+        .range = sizeof(ClusterMetadataUBO),
+    };
+
+    const std::array<VkWriteDescriptorSet, 4> writes{{
+        { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = m_descriptorSet,
+          .dstBinding = shader_interface::scene_binding::kPointLights,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .pBufferInfo = &pointLightInfo },
+        { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = m_descriptorSet,
+          .dstBinding = shader_interface::scene_binding::kClusterGrid,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .pBufferInfo = &clusterGridInfo },
+        { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = m_descriptorSet,
+          .dstBinding = shader_interface::scene_binding::kClusterLightIndices,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .pBufferInfo = &clusterIndicesInfo },
+        { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = m_descriptorSet,
+          .dstBinding = shader_interface::scene_binding::kClusterMetadata,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+          .pBufferInfo = &clusterMetadataInfo },
+    }};
+    vkUpdateDescriptorSets(m_ctx.getDevice(), static_cast<uint32_t>(writes.size()),
+                           writes.data(), 0, nullptr);
+}
+
 void Renderer::setCascadeDebugEnabled(bool enabled)
 {
     m_shadowSettings.debugCascades = enabled;
@@ -799,10 +1007,18 @@ void Renderer::createResizeDependentResources()
     createDepthImage();
     createHdrTarget();
     m_tonemapPass.resize(m_ctx.getDevice(), m_hdrSampler, m_hdrTarget.getImageView());
+    if (m_clusterMetadataBuffer.getBuffer() != VK_NULL_HANDLE) {
+        resizeClusteredLightResources();
+    }
 }
 
 void Renderer::destroyResizeDependentResources()
 {
+    m_clusterLightIndexBuffer.destroy();
+    m_clusterGridBuffer.destroy();
+    m_clusterCountX = 0;
+    m_clusterCountY = 0;
+    m_clusterCount = 0;
     m_hdrTarget.destroy();
     m_depthImage.destroy();
 }
@@ -856,14 +1072,18 @@ void Renderer::createDescriptorPool()
     // 2 samplers in set=0 (depth array b3 + moments array b4) + 3 per material
     const uint32_t samplerCount  = 2 + 3 * std::max(materialCount, 1u);
 
-    const std::array<VkDescriptorPoolSize, 2> poolSizes{{
+    const std::array<VkDescriptorPoolSize, 3> poolSizes{{
         {
             .type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .descriptorCount = 3,  // camera + light + shadow
+            .descriptorCount = 4,  // camera + light + shadow + cluster metadata
         },
         {
             .type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
             .descriptorCount = samplerCount,
+        },
+        {
+            .type            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 3,  // point lights + cluster grid + cluster indices
         },
     }};
 
@@ -875,7 +1095,7 @@ void Renderer::createDescriptorPool()
     };
     VK_CHECK(vkCreateDescriptorPool(m_ctx.getDevice(), &poolCI, nullptr, &m_descriptorPool));
 
-    spdlog::info("Descriptor pool created: {} max sets (3 UBO, {} sampler descriptors)",
+    spdlog::info("Descriptor pool created: {} max sets (4 UBO, 3 SSBO, {} sampler descriptors)",
                  maxSets, samplerCount);
 }
 
@@ -966,8 +1186,9 @@ void Renderer::createDescriptorSet()
     }};
     vkUpdateDescriptorSets(m_ctx.getDevice(),
                            static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+    updateClusterDescriptors();
 
-    spdlog::info("Descriptor set allocated: camera(b0), light(b1), shadowUBO(b2), depth(b3), moments(b4)");
+    spdlog::info("Descriptor set allocated: camera/light/shadow + clustered light buffers");
 }
 
 void Renderer::updateShadowDescriptors()
@@ -1181,7 +1402,47 @@ void Renderer::render()
                         m_meshes, m_materials, m_materialSets, m_gpuTimer);
     if (m_shadowPass.consumeDescriptorDirty()) {
         updateShadowDescriptors();
-    }    vkutil::transitionImage(cmd, m_hdrTarget.getImage(),
+    }
+
+    m_gpuTimer.writeTimestamp(cmd, "ClusterCull_Begin");
+    m_clusteredLightCullingPass.record(cmd, m_descriptorSet,
+                                       m_clusterCountX, m_clusterCountY, m_clusterCountZ);
+
+    const std::array<VkBufferMemoryBarrier2, 2> clusterBarriers{{
+        {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+            .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+            .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+            .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .buffer = m_clusterGridBuffer.getBuffer(),
+            .offset = 0,
+            .size = m_clusterGridBuffer.getSize(),
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+            .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+            .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+            .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .buffer = m_clusterLightIndexBuffer.getBuffer(),
+            .offset = 0,
+            .size = m_clusterLightIndexBuffer.getSize(),
+        },
+    }};
+    const VkDependencyInfo clusterDep{
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .bufferMemoryBarrierCount = static_cast<uint32_t>(clusterBarriers.size()),
+        .pBufferMemoryBarriers = clusterBarriers.data(),
+    };
+    vkCmdPipelineBarrier2(cmd, &clusterDep);
+    m_gpuTimer.writeTimestamp(cmd, "ClusterCull_End");
+
+    vkutil::transitionImage(cmd, m_hdrTarget.getImage(),
         VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,              0,
         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,   VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
         VK_IMAGE_LAYOUT_UNDEFINED,                          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -1384,6 +1645,11 @@ void Renderer::submitFrame(const RenderFramePacket& packet)
         updateShadowDescriptors();
     }
     uploadLightUBO();
+    if (!packet.pointLights.empty()) {
+        setPointLights(packet.pointLights);
+    } else {
+        uploadClusterMetadata();
+    }
 
     setTonemapParams(packet.tonemap.mode,
                      packet.tonemap.exposure,
