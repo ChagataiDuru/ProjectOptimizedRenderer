@@ -210,6 +210,9 @@ std::vector<VkExtensionProperties> VulkanContext::getDeviceExtensions(VkPhysical
 
 RendererDeviceFeatures VulkanContext::queryRendererDeviceFeatures(VkPhysicalDevice device) const
 {
+    // Capabilities are detected once up front and then cached in
+    // RendererDeviceFeatures so optional systems query centralized state instead
+    // of chaining new Vulkan feature probes later.
     const std::vector<VkExtensionProperties> exts = getDeviceExtensions(device);
     const bool hasFragmentShadingRateExt = hasExtension(exts, VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME);
     const bool hasMeshShaderExt = hasExtension(exts, VK_EXT_MESH_SHADER_EXTENSION_NAME);
@@ -303,7 +306,7 @@ bool VulkanContext::isDeviceSuitable(VkPhysicalDevice device)
     const RendererDeviceFeatures features = queryRendererDeviceFeatures(device);
 
     return features.dynamicRendering &&
-           features.dynamicRenderingLocalRead;
+           features.synchronization2;
 }
 
 void VulkanContext::selectPhysicalDevice()
@@ -349,8 +352,8 @@ void VulkanContext::selectPhysicalDevice()
 
     if (best == VK_NULL_HANDLE)
         throw std::runtime_error(
-            "No suitable GPU found: Vulkan 1.4 + dynamicRendering + "
-            "dynamicRenderingLocalRead are required");
+            "No suitable GPU found: Vulkan 1.3+ dynamicRendering and synchronization2 "
+            "are required by the current renderer baseline");
 
     m_physicalDevice = best;
     m_deviceFeatures = queryRendererDeviceFeatures(m_physicalDevice);
@@ -411,11 +414,6 @@ void VulkanContext::createLogicalDevice()
         });
     }
 
-    if (!m_deviceFeatures.dynamicRendering && !m_deviceFeatures.dynamicRenderingLocalRead) {
-        m_deviceFeatures = queryRendererDeviceFeatures(m_physicalDevice);
-        m_meshShaderProperties = queryMeshShaderProperties(m_physicalDevice, m_deviceFeatures);
-    }
-
     // Build enabled feature chain: Features2 -> Vk14 -> Vk13 -> Vk12
     m_vulkan12Features = {
         .sType              = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
@@ -436,7 +434,7 @@ void VulkanContext::createLogicalDevice()
     m_vulkan14Features = {
         .sType                    = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
         .pNext                    = &m_vulkan13Features,
-        .dynamicRenderingLocalRead = VK_TRUE,                         // SMAA tile-local
+        .dynamicRenderingLocalRead = m_deviceFeatures.dynamicRenderingLocalRead ? VK_TRUE : VK_FALSE,
         .pushDescriptor           = m_deviceFeatures.pushDescriptor ? VK_TRUE : VK_FALSE,
     };
 
@@ -580,27 +578,66 @@ void VulkanContext::logDeviceInfo() const
                                              VK_API_VERSION_MINOR(drv),
                                              VK_API_VERSION_PATCH(drv));
 #endif
-    spdlog::info("  Features:");
-    spdlog::info("    dynamicRenderingLocalRead : {}",
-        hasFeature_DynamicRenderingLocalRead() ? "YES" : "NO");
-    spdlog::info("    pushDescriptor            : {}",
-        hasFeature_PushDescriptor() ? "YES" : "NO");
+    spdlog::info("  Baseline renderer requirements:");
     spdlog::info("    dynamicRendering          : {}",
         m_deviceFeatures.dynamicRendering ? "YES" : "NO");
     spdlog::info("    synchronization2          : {}",
         m_deviceFeatures.synchronization2 ? "YES" : "NO");
-    spdlog::info("    descriptorIndexing        : {}",
-        m_deviceFeatures.descriptorIndexing ? "YES" : "NO");
-    spdlog::info("    timelineSemaphore         : {}",
-        m_deviceFeatures.timelineSemaphore ? "YES" : "NO");
+    spdlog::info("    scalarBlockLayout         : {}",
+        m_vulkan12Features.scalarBlockLayout == VK_TRUE ? "YES" : "NO");
+    spdlog::info("  Optional features enabled on this device:");
+    if (m_deviceFeatures.dynamicRenderingLocalRead) {
+        spdlog::info("    dynamicRenderingLocalRead");
+    }
+    if (m_deviceFeatures.pushDescriptor) {
+        spdlog::info("    pushDescriptor");
+    }
+    if (m_deviceFeatures.descriptorIndexing) {
+        spdlog::info("    descriptorIndexing");
+    }
+    if (m_deviceFeatures.timelineSemaphore) {
+        spdlog::info("    timelineSemaphore");
+    }
+    if (m_deviceFeatures.fragmentShadingRate) {
+        spdlog::info("    fragmentShadingRate");
+    }
+    if (m_deviceFeatures.meshShader) {
+        spdlog::info("    meshShader");
+    }
+    if (m_deviceFeatures.taskShader) {
+        spdlog::info("    taskShader");
+    }
+    spdlog::info("  Optional features unavailable on this device:");
+    if (!m_deviceFeatures.dynamicRenderingLocalRead) {
+        spdlog::info("    dynamicRenderingLocalRead");
+    }
+    if (!m_deviceFeatures.pushDescriptor) {
+        spdlog::info("    pushDescriptor");
+    }
+    if (!m_deviceFeatures.descriptorIndexing) {
+        spdlog::info("    descriptorIndexing");
+    }
+    if (!m_deviceFeatures.timelineSemaphore) {
+        spdlog::info("    timelineSemaphore");
+    }
+    if (!m_deviceFeatures.fragmentShadingRate) {
+        spdlog::info("    fragmentShadingRate");
+    }
+    if (!m_deviceFeatures.meshShader) {
+        spdlog::info("    meshShader");
+    }
+    if (!m_deviceFeatures.taskShader) {
+        spdlog::info("    taskShader");
+    }
+    spdlog::info("  Future-use capability queries should use RendererDeviceFeatures:");
+    spdlog::info("    dynamicRenderingLocalRead : {}",
+        hasFeature_DynamicRenderingLocalRead() ? "YES" : "NO");
     spdlog::info("    fragmentShadingRate       : {}",
         m_deviceFeatures.fragmentShadingRate ? "YES" : "NO");
     spdlog::info("    meshShader                : {}",
         m_deviceFeatures.meshShader ? "YES" : "NO");
     spdlog::info("    taskShader                : {}",
         m_deviceFeatures.taskShader ? "YES" : "NO");
-    spdlog::info("    scalarBlockLayout         : {}",
-        m_vulkan12Features.scalarBlockLayout == VK_TRUE ? "YES" : "NO");
     if (m_deviceFeatures.meshShader) {
         spdlog::info("  Mesh shader properties:");
         spdlog::info("    maxTaskWorkGroupInvocations      : {}",

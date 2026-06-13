@@ -251,11 +251,11 @@ A practical status read of the roadmap is:
 |---|---|---|
 | Viewer shell separation | Partial | `ViewerPanels` extracted, but `main.cpp` still owns lifecycle and input flow. |
 | Renderer settings structs | Done (initial) | `RenderSettings.h` exists and is in active use. |
-| Internal frame packet | Partial | `RenderFramePacket` exists and `submitFrame` exists, but packet ownership is not yet the only submission path. |
+| Internal frame packet | Done, internal-only | `RenderFramePacket` is the primary per-frame submission path and now pairs with sticky `RenderScenePacket` scene submission. |
 | Resource handle model | Partial | `MeshHandle`, `MaterialHandle`, `TextureHandle` exist; generation/versioning and public resource APIs do not. |
 | Pass ownership extraction | Partial, meaningful | `TonemapPass`, `ShadowPass`, `SkyPass`, and clustered light culling pass exist. |
 | Shader interface validation | Partial | Centralized constants and static asserts exist; reflection/codegen does not. |
-| Capability-driven optional features | Started well | `RendererDeviceFeatures` is now a real foundation for VRS and mesh-shader experiments. |
+| Capability-driven optional features | Established foundation | `RendererDeviceFeatures` is a centralized detect-once snapshot with baseline-vs-optional policy clarified in code and logging. |
 | SMAA | Not started | Still a next major renderer-feature milestone. |
 | Perceptual VRS | Not started, groundwork present | Capability query and optional feature gating now exist. |
 | C ABI boundary | Not started | Still documentation-first, not implementation-ready. |

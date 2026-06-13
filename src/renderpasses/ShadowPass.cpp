@@ -227,7 +227,6 @@ glm::vec3 ShadowPass::safeNormalizeDirection(glm::vec3 v, glm::vec3 fallback)
 ShadowPass::ShadowPass(VulkanContext& ctx)
     : m_ctx(ctx)
     , m_shadowMap(ctx)
-    , m_shadowUBOBuffer(ctx)
     , m_fallbackMoments(ctx)
     , m_shadowMoments(ctx)
     , m_shadowMomentsTemp(ctx)
@@ -240,20 +239,25 @@ ShadowPass::~ShadowPass()
 }
 
 void ShadowPass::init(VkPipelineLayout sharedPipelineLayout,
-                      VkDescriptorSet sceneDescriptorSet,
+                      uint32_t framesInFlight,
                       const std::string& shaderDir)
 {
     m_pipelineLayout = sharedPipelineLayout;
-    m_sceneDescriptorSet = sceneDescriptorSet;
     m_shaderDir = shaderDir;
     m_cascadeSize = resolutionForPreset(m_settings.qualityPreset);
+    m_frameResources.clear();
+    m_frameResources.reserve(framesInFlight);
+    for (uint32_t i = 0; i < framesInFlight; ++i) {
+        m_frameResources.emplace_back(m_ctx);
+        m_frameResources.back().shadowUBO.createHostVisible(
+            sizeof(shader_interface::ShadowCascadeUBO),
+            VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+    }
 
     createDepthResources();
     createFallbackMoments();
     createPipelines();
-    m_shadowUBOBuffer.createHostVisible(sizeof(shader_interface::ShadowCascadeUBO),
-                                        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
-    updateMatrices();
+    updateMatrices(0);
     updateDebugMemoryEstimate();
 }
 
@@ -305,7 +309,7 @@ void ShadowPass::shutdown(VkDevice device)
         m_momentsSampler = VK_NULL_HANDLE;
     }
     m_fallbackMoments.destroy();
-    m_shadowUBOBuffer.destroy();
+    m_frameResources.clear();
 }
 
 bool ShadowPass::updateSettings(const ShadowSettings& settings)
@@ -810,8 +814,20 @@ void ShadowPass::updateDebugMemoryEstimate()
     m_debugInfo.maxDistance = m_settings.maxDistance;
 }
 
-void ShadowPass::updateMatrices()
+VkBuffer ShadowPass::getShadowUBOBuffer(uint32_t frameIndex) const
 {
+    if (frameIndex >= m_frameResources.size()) {
+        return VK_NULL_HANDLE;
+    }
+    return m_frameResources[frameIndex].shadowUBO.getBuffer();
+}
+
+void ShadowPass::updateMatrices(uint32_t frameIndex)
+{
+    if (frameIndex >= m_frameResources.size()) {
+        return;
+    }
+
     const glm::vec3 lightDir = safeNormalizeDirection(m_lightDirection, glm::vec3(0.577f));
     const glm::vec3 up = (std::abs(lightDir.y) > 0.9f)
         ? glm::vec3(1.0f, 0.0f, 0.0f)
@@ -872,10 +888,12 @@ void ShadowPass::updateMatrices()
     m_lastShadowUBO = ubo;
     m_debugInfo.splitDepths = ubo.splitDepths;
     m_debugInfo.maxDistance = f;
-    m_shadowUBOBuffer.upload(&ubo, sizeof(ubo));
+    m_frameResources[frameIndex].shadowUBO.upload(&ubo, sizeof(ubo));
 }
 
 void ShadowPass::record(VkCommandBuffer cmd,
+                        VkDescriptorSet sceneDescriptorSet,
+                        uint32_t frameIndex,
                         const Buffer& vertexBuffer,
                         const Buffer& indexBuffer,
                         const std::vector<DrawCommand>& drawCommands,
@@ -884,7 +902,11 @@ void ShadowPass::record(VkCommandBuffer cmd,
                         const std::vector<VkDescriptorSet>& materialSets,
                         GPUTimer& gpuTimer)
 {
-    updateMatrices();
+    if (sceneDescriptorSet == VK_NULL_HANDLE || frameIndex >= m_frameResources.size()) {
+        return;
+    }
+
+    updateMatrices(frameIndex);
     if (m_settings.filterMode == 2 && !m_vsmAllocated) {
         createVsmResources();
         m_descriptorDirty = true;
@@ -909,7 +931,7 @@ void ShadowPass::record(VkCommandBuffer cmd,
     gpuTimer.writeTimestamp(cmd, "ShadowPass_Begin");
 
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout,
-                            shader_interface::kSceneSet, 1, &m_sceneDescriptorSet, 0, nullptr);
+                            shader_interface::kSceneSet, 1, &sceneDescriptorSet, 0, nullptr);
     const VkBuffer vertexBuf = vertexBuffer.getBuffer();
     const VkDeviceSize zeroOffset = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuf, &zeroOffset);

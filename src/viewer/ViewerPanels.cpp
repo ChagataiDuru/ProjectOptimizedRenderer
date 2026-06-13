@@ -325,7 +325,7 @@ void registerViewerPanels(ImGuiManager& imguiManager,
     }, DockLocation::Bottom);
 
     imguiManager.registerPanel(ICON_FA_SITEMAP " Scene", [&]() {
-        const auto& model = renderer.getModel();
+        const auto& model = renderer.getImportedModel();
         const auto& stats = renderer.getRenderStats();
 
         ImGui::Text("%zu meshes, %u materials", model.meshes.size(), stats.materialCount);
@@ -359,7 +359,7 @@ void registerViewerPanels(ImGuiManager& imguiManager,
     }, DockLocation::Right);
 
     imguiManager.registerPanel(ICON_FA_SLIDERS " Properties", [&]() {
-        const auto& model     = renderer.getModel();
+        const auto& model     = renderer.getImportedModel();
         const auto& sceneInfo = renderer.getSceneInfo();
 
         ImGui::Text(ICON_FA_CUBE " Scene Bounds");

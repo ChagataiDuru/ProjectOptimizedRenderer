@@ -30,9 +30,8 @@ public:
     ShadowPass& operator=(const ShadowPass&) = delete;
 
     void init(VkPipelineLayout sharedPipelineLayout,
-              VkDescriptorSet sceneDescriptorSet,
+              uint32_t framesInFlight,
               const std::string& shaderDir);
-    void setSceneDescriptorSet(VkDescriptorSet sceneDescriptorSet) { m_sceneDescriptorSet = sceneDescriptorSet; }
     void shutdown(VkDevice device);
 
     // Returns true when image/sampler descriptors should be rewritten.
@@ -44,8 +43,9 @@ public:
                       float farZ,
                       const glm::vec3& cameraPos);
 
-    void updateMatrices();
     void record(VkCommandBuffer cmd,
+                VkDescriptorSet sceneDescriptorSet,
+                uint32_t frameIndex,
                 const Buffer& vertexBuffer,
                 const Buffer& indexBuffer,
                 const std::vector<DrawCommand>& drawCommands,
@@ -57,7 +57,7 @@ public:
     const shader_interface::ShadowCascadeUBO& getLastShadowUBO() const { return m_lastShadowUBO; }
     const ShadowDebugInfo& getDebugInfo() const { return m_debugInfo; }
 
-    VkBuffer getShadowUBOBuffer() const { return m_shadowUBOBuffer.getBuffer(); }
+    VkBuffer getShadowUBOBuffer(uint32_t frameIndex) const;
     VkSampler getDepthSampler() const { return m_shadowSampler; }
     VkImageView getDepthImageView() const { return m_shadowMap.getImageView(); }
     VkImageLayout getDepthSampleLayout() const { return VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL; }
@@ -79,16 +79,30 @@ private:
     void destroyDepthResources(VkDevice device);
     void recreateForResolution(uint32_t newSize);
     void updateDebugMemoryEstimate();
+    void updateMatrices(uint32_t frameIndex);
+
+    struct FrameResources {
+        explicit FrameResources(VulkanContext& ctx)
+            : shadowUBO(ctx)
+        {
+        }
+
+        FrameResources(FrameResources&&) noexcept = default;
+        FrameResources& operator=(FrameResources&&) noexcept = default;
+        FrameResources(const FrameResources&) = delete;
+        FrameResources& operator=(const FrameResources&) = delete;
+
+        Buffer shadowUBO;
+    };
 
     VulkanContext& m_ctx;
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
-    VkDescriptorSet m_sceneDescriptorSet = VK_NULL_HANDLE;
     std::string m_shaderDir;
 
     Image m_shadowMap;
     std::array<VkImageView, CASCADE_COUNT> m_shadowLayerViews = {};
     VkSampler m_shadowSampler = VK_NULL_HANDLE;
-    Buffer m_shadowUBOBuffer;
+    std::vector<FrameResources> m_frameResources;
 
     Image m_fallbackMoments;
     VkSampler m_momentsSampler = VK_NULL_HANDLE;

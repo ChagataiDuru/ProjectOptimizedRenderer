@@ -238,11 +238,10 @@ int main()
             drawSunDirectionOverlay(camera, window, viewerState);
             imguiManager.endFrame();
 
-            renderer.submitFrame(buildRenderFramePacket(camera, viewerState));
-
             if (!renderer.beginFrame()) {
                 continue;
             }
+            renderer.submitFrame(buildRenderFramePacket(camera, viewerState));
             renderer.endFrame();
         }
 

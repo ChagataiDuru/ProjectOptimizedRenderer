@@ -16,6 +16,9 @@
         }                                                                           \
     } while (0)
 
+// Renderer capability snapshot detected once during physical-device selection.
+// Baseline requirements are enforced explicitly by the renderer; optional
+// features stay queryable here so future systems never need to reprobe Vulkan.
 struct RendererDeviceFeatures {
     bool dynamicRendering = false;
     bool dynamicRenderingLocalRead = false;

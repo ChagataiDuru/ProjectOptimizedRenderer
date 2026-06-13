@@ -7,6 +7,7 @@
 #include "core/FrameSync.h"
 #include "core/MeshRenderData.h"
 #include "core/RenderFramePacket.h"
+#include "core/RenderScenePacket.h"
 #include "core/ShaderInterface.h"
 #include "debug/GPUTimer.h"
 #include "debug/Screenshot.h"
@@ -47,27 +48,7 @@ public:
     void endFrame();
 
     void submitFrame(const RenderFramePacket& packet);
-
-    void setCameraMatrices(const glm::mat4& view, const glm::mat4& projection,
-                           const glm::vec3& cameraPos);
-
-    // Phase 4.3: expose camera frustum planes so CSM splits stay in sync
-    void setCameraFrustum(float nearZ, float farZ);
-
-    void setLightParameters(const glm::vec3& direction, const glm::vec3& color,
-                            float intensity, float ambient);
-    void setPointLights(const std::vector<shader_interface::GpuPointLight>& pointLights);
-
-    // Phase 4.3: CSM controls
-    void setCsmLambda(float lambda)            { m_shadowSettings.csmLambda = lambda; }
-    void setCascadeDebugEnabled(bool enabled);
-    bool isCascadeDebugEnabled() const         { return m_shadowSettings.debugCascades; }
-
-    // Phase 4.4-4.6: shadow filter mode and per-mode settings
-    void setShadowFilterMode(int32_t mode);    // 0=None, 1=PCF, 2=VSM
-    void setPcfSpreadRadius(float radius);
-    void setVsmBleedReduction(float reduction);
-    int32_t getShadowFilterMode() const        { return m_shadowSettings.filterMode; }
+    void submitScene(RenderScenePacket scene);
 
     // Unload current model and load a new glTF at the given path.
     // Destroys model-dependent GPU resources, loads new model, recreates descriptors.
@@ -78,14 +59,8 @@ public:
     void setImGuiManager(ImGuiManager* mgr) { m_imguiManager = mgr; }
 
     // Read-only access for UI panels
-    const Model&     getModel()     const { return m_model; }
-    const SceneInfo& getSceneInfo() const { return m_sceneInfo; }
-
-    // Rendering toggles — stored here, applied when pipeline variants are added
-    void setWireframeEnabled(bool enabled) { m_wireframe   = enabled; }
-    void setNormalVisualization(bool enabled) { m_showNormals = enabled; }
-    bool isWireframeEnabled()     const { return m_wireframe; }
-    bool isNormalVisualization()  const { return m_showNormals; }
+    const Model&     getImportedModel() const { return m_importedModel; }
+    const SceneInfo& getSceneInfo()     const { return m_sceneInfo; }
 
     // Phase 4.3: cascade shadow map constants
     static constexpr uint32_t CASCADE_COUNT = shader_interface::kCascadeCount;
@@ -95,25 +70,6 @@ public:
     const std::array<uint32_t, CASCADE_COUNT>& getShadowCulledMeshes() const { return m_shadowPass.getDebugInfo().culledMeshes; }
     const std::array<uint32_t, CASCADE_COUNT>& getShadowTotalMeshes()  const { return m_shadowPass.getDebugInfo().totalMeshes; }
     const ShadowDebugInfo& getShadowDebugInfo() const { return m_shadowPass.getDebugInfo(); }
-
-    // Phase 5/6: tone mapping controls
-    void setExposure(float ev)           { m_exposure = ev; }
-    float getExposure()   const          { return m_exposure; }
-    int32_t getTonemapMode() const       { return m_tonemapMode; }
-
-    // Phase 6: unified setter for all tonemap params (pushed as one PC struct each frame)
-    void setTonemapParams(int32_t mode, float exposure, bool splitScreen, int32_t splitRightMode) {
-        m_tonemapMode      = mode;
-        m_exposure         = exposure;
-        m_splitScreenMode  = splitScreen ? 1 : 0;
-        m_splitRightMode   = splitRightMode;
-    }
-
-    // Phase 6.5: sky controls
-    void setSkyEnabled(bool enabled)     { m_skyEnabled = enabled; }
-    bool isSkyEnabled()     const        { return m_skyEnabled; }
-    void setSkyMode(int32_t mode)        { m_skyMode = mode; }
-    int32_t getSkyMode()    const        { return m_skyMode; }
     void loadHdrPanorama(const std::string& path);
 
     // Phase 2.6: render statistics — populated each frame in render()
@@ -134,48 +90,7 @@ public:
     void requestScreenshot(const std::string& filename = "");
 
 private:
-    void render();
-    void handleResize();
-    void createResizeDependentResources();
-    void destroyResizeDependentResources();
-    void recreateResizeDependentResources();
-    void createPbrPipeline();
-    void loadModel(const std::string& modelPath);
-    void rebuildDrawCommands();
-    void destroyPipeline();
-    void refreshRenderStats();
-
-    static std::vector<uint32_t> loadSpv(const std::string& path);
-
-    VulkanContext& m_ctx;
-    Swapchain&     m_swapchain;
-    CommandBuffer  m_commandBuffer;
-    FrameSync      m_frameSync;
-
-    // Geometry buffers
-    Buffer m_vertexBuffer;
-    Buffer m_indexBuffer;
-
-    // Phase 1.3: model and per-mesh draw data
-    Model                       m_model;
-    SceneInfo                   m_sceneInfo;    // Phase 3.7: normalization transform
-    std::vector<MeshRenderData> m_meshes;
-    std::vector<Material>       m_materials;
-    std::vector<DrawCommand>    m_drawCommands;
-
-    // Pipeline resources
-    VkPipeline            m_pipeline           = VK_NULL_HANDLE;
-    VkPipeline            m_wireframePipeline  = VK_NULL_HANDLE;
-    VkPipeline            m_normalsPipeline    = VK_NULL_HANDLE;
-    VkPipelineLayout      m_pipelineLayout     = VK_NULL_HANDLE;
-    VkDescriptorSetLayout m_cameraSetLayout    = VK_NULL_HANDLE;
-    VkDescriptorSetLayout m_materialSetLayout  = VK_NULL_HANDLE;
-    VkShaderModule        m_vertModule         = VK_NULL_HANDLE;
-    VkShaderModule        m_fragModule         = VK_NULL_HANDLE;
-    VkShaderModule        m_normalsFragModule  = VK_NULL_HANDLE;
-
-    // Material descriptor sets (one per Model::materials entry)
-    std::vector<VkDescriptorSet> m_materialSets;
+    static constexpr uint32_t kFramesInFlight = 3;
 
     // Push constant: bytes 64-95 in the pipeline layout (after 64-byte model matrix)
     using MaterialPushConstants = shader_interface::MaterialPushConstants;
@@ -189,13 +104,83 @@ private:
     using ShadowCascadeUBO = shader_interface::ShadowCascadeUBO;
     using ClusterMetadataUBO = shader_interface::ClusterMetadataUBO;
 
-    Buffer           m_cameraUBOBuffer;
-    Buffer           m_lightUBOBuffer;
+    struct FrameResources {
+        explicit FrameResources(VulkanContext& ctx)
+            : cameraUBO(ctx)
+            , lightUBO(ctx)
+            , clusterMetadataUBO(ctx)
+        {
+        }
+
+        FrameResources(FrameResources&&) noexcept = default;
+        FrameResources& operator=(FrameResources&&) noexcept = default;
+        FrameResources(const FrameResources&) = delete;
+        FrameResources& operator=(const FrameResources&) = delete;
+
+        Buffer cameraUBO;
+        Buffer lightUBO;
+        Buffer clusterMetadataUBO;
+        VkDescriptorSet sceneDescriptorSet = VK_NULL_HANDLE;
+    };
+
+    void render();
+    void handleResize();
+    void createResizeDependentResources();
+    void destroyResizeDependentResources();
+    void recreateResizeDependentResources();
+    void createPbrPipeline();
+    void loadImportedModel(const std::string& modelPath);
+    RenderScenePacket rebuildSceneSubmissionFromImportedModel();
+    void destroyPipeline();
+    void refreshRenderStats();
+    void createFrameResources();
+    void uploadCurrentFrameCameraState(const CameraData& camera);
+    void uploadCurrentFrameLightState();
+    void uploadActiveScenePointLights();
+    void uploadCurrentClusterMetadata();
+
+    static std::vector<uint32_t> loadSpv(const std::string& path);
+
+    FrameResources& currentFrameResources();
+    const FrameResources& currentFrameResources() const;
+    CameraUBO buildCurrentCameraUBO() const;
+    LightUBO buildCurrentLightUBO() const;
+    ClusterMetadataUBO buildCurrentClusterMetadata() const;
+
+    VulkanContext& m_ctx;
+    Swapchain&     m_swapchain;
+    CommandBuffer  m_commandBuffer;
+    FrameSync      m_frameSync;
+
+    // Geometry buffers
+    Buffer m_vertexBuffer;
+    Buffer m_indexBuffer;
+
+    // Imported glTF data is a bridge input, not the renderer's scene model.
+    Model                       m_importedModel;
+    SceneInfo                   m_sceneInfo;
+    std::vector<MeshRenderData> m_meshRenderData;
+    std::vector<Material>       m_renderMaterials;
+    RenderScenePacket           m_activeScene;
+
+    // Pipeline resources
+    VkPipeline            m_pipeline           = VK_NULL_HANDLE;
+    VkPipeline            m_wireframePipeline  = VK_NULL_HANDLE;
+    VkPipeline            m_normalsPipeline    = VK_NULL_HANDLE;
+    VkPipelineLayout      m_pipelineLayout     = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_sceneSetLayout     = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_materialSetLayout  = VK_NULL_HANDLE;
+    VkShaderModule        m_vertModule         = VK_NULL_HANDLE;
+    VkShaderModule        m_fragModule         = VK_NULL_HANDLE;
+    VkShaderModule        m_normalsFragModule  = VK_NULL_HANDLE;
+
+    // Renderer-owned material bindings produced from imported material resources.
+    std::vector<VkDescriptorSet> m_materialDescriptorSets;
+
+    std::vector<FrameResources> m_frameResources;
     Buffer           m_pointLightBuffer;
     Buffer           m_clusterGridBuffer;
     Buffer           m_clusterLightIndexBuffer;
-    Buffer           m_clusterMetadataBuffer;
-    std::vector<shader_interface::GpuPointLight> m_pointLights;
     uint32_t         m_maxPointLights = 1024;
     uint32_t         m_clusterCountX = 0;
     uint32_t         m_clusterCountY = 0;
@@ -224,7 +209,6 @@ private:
     int32_t m_splitRightMode   = 1;     // comparison operator for right half (default AgX)
 
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
-    VkDescriptorSet  m_descriptorSet  = VK_NULL_HANDLE;
 
     // Phase 2.5: optional ImGui overlay
     ImGuiManager*    m_imguiManager   = nullptr;
@@ -244,7 +228,7 @@ private:
     float     m_lightIntensity    = 1.0f;
     float     m_ambientIntensity  = 0.1f;
 
-    // Camera frustum — updated by setCameraFrustum() for CSM split computation
+    // Cached from the last submitFrame() so CSM split computation stays in sync.
     glm::mat4 m_viewMatrix  = glm::mat4(1.0f);
     glm::mat4 m_projMatrix  = glm::mat4(1.0f);
     float     m_cameraNearZ = 0.01f;
@@ -263,20 +247,14 @@ private:
 
     glm::vec3 m_cameraPos = glm::vec3(0.0f);
 
-    void createCameraUBO();
-    void createLightUBO();
-    void uploadLightUBO();   // re-upload m_lightUBOBuffer from stored params
-    void createDefaultPointLights();
+    void updateSceneShadowDescriptors();
     void createClusteredLightResources();
     void destroyClusteredLightResources();
     void resizeClusteredLightResources();
-    void uploadPointLightBuffer();
-    void uploadClusterMetadata();
-    void updateClusterDescriptors();
+    void updateSceneClusterDescriptors();
     void createDepthImage();
     void createHdrTarget();
-    void createDescriptorPool();
-    void createDescriptorSet();
-    void updateShadowDescriptors();
+    void createSceneDescriptorPool();
+    void createSceneDescriptorSets();
     void createMaterialDescriptorSets();
 };

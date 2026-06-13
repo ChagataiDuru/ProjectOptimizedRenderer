@@ -15,6 +15,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 #ifndef SHADER_DIR
 #define SHADER_DIR "shaders"
@@ -49,6 +50,21 @@ static glm::vec3 safeNormalizeDirection(glm::vec3 v, glm::vec3 fallback)
         return glm::normalize(fallback);
     }
     return v * glm::inversesqrt(len2);
+}
+
+static std::vector<shader_interface::GpuPointLight> buildDefaultScenePointLights(float normalizedRadius)
+{
+    const float r = std::max(normalizedRadius, 1.0f);
+    const float y = 1.8f;
+    const float radius = r * 0.45f;
+    const float intensity = 22.0f;
+
+    return {
+        { glm::vec4(-0.45f * r, y, -0.35f * r, radius), glm::vec4(1.0f, 0.45f, 0.30f, intensity) },
+        { glm::vec4( 0.45f * r, y, -0.35f * r, radius), glm::vec4(0.35f, 0.65f, 1.0f, intensity) },
+        { glm::vec4(-0.45f * r, y,  0.35f * r, radius), glm::vec4(0.45f, 1.0f, 0.55f, intensity) },
+        { glm::vec4( 0.45f * r, y,  0.35f * r, radius), glm::vec4(1.0f, 0.80f, 0.35f, intensity) },
+    };
 }
 
 static VkShaderModule makeShaderModule(VkDevice device, const std::vector<uint32_t>& code)
@@ -104,12 +120,9 @@ Renderer::Renderer(VulkanContext& ctx, Swapchain& swapchain)
     , m_frameSync(ctx)
     , m_vertexBuffer(ctx)
     , m_indexBuffer(ctx)
-    , m_cameraUBOBuffer(ctx)
-    , m_lightUBOBuffer(ctx)
     , m_pointLightBuffer(ctx)
     , m_clusterGridBuffer(ctx)
     , m_clusterLightIndexBuffer(ctx)
-    , m_clusterMetadataBuffer(ctx)
     , m_samplerCache(ctx)
     , m_fallbackWhite(ctx)
     , m_depthImage(ctx)
@@ -129,30 +142,28 @@ Renderer::~Renderer()
 
 void Renderer::init()
 {
-    loadModel(std::string(ASSET_DIR) + "/source/Sponza.gltf");
-    m_sceneInfo = computeSceneInfo(m_model.boundsMin, m_model.boundsMax);
+    loadImportedModel(std::string(ASSET_DIR) + "/source/Sponza.gltf");
+    m_sceneInfo = computeSceneInfo(m_importedModel.boundsMin, m_importedModel.boundsMax);
     spdlog::info("Scene normalized: scale={:.4f}, radius={:.2f}",
                  m_sceneInfo.scaleFactor, m_sceneInfo.normalizedRadius);
-    createDefaultPointLights();
-    rebuildDrawCommands();
+    submitScene(rebuildSceneSubmissionFromImportedModel());
 
-    m_frameSync.init(3);
-    m_commandBuffer.init(m_ctx.getGraphicsQueueFamily(), 3);
+    m_frameSync.init(kFramesInFlight);
+    m_commandBuffer.init(m_ctx.getGraphicsQueueFamily(), kFramesInFlight);
     m_tonemapPass.init(m_ctx.getDevice(), m_swapchain.getFormat(), SHADER_DIR);
     createResizeDependentResources();
     createPbrPipeline();
-    m_clusteredLightCullingPass.init(m_cameraSetLayout, SHADER_DIR);
-    m_skyPass.init(m_ctx, m_cameraSetLayout,
+    m_clusteredLightCullingPass.init(m_sceneSetLayout, SHADER_DIR);
+    m_skyPass.init(m_ctx, m_sceneSetLayout,
                    VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT,
                    SHADER_DIR);
-    createCameraUBO();
-    createLightUBO();
+    createFrameResources();
     createClusteredLightResources();
-    m_shadowPass.init(m_pipelineLayout, VK_NULL_HANDLE, SHADER_DIR);
-    createDescriptorPool();
-    createDescriptorSet();
-    m_shadowPass.setSceneDescriptorSet(m_descriptorSet);
+    m_shadowPass.init(m_pipelineLayout, kFramesInFlight, SHADER_DIR);
+    createSceneDescriptorPool();
+    createSceneDescriptorSets();
     createMaterialDescriptorSets();
+    uploadActiveScenePointLights();
     m_gpuTimer.init(24);
 
     // Populate static render stats (counts that don't change after load)
@@ -172,13 +183,15 @@ void Renderer::reloadModel(const std::string& modelPath)
     vkDeviceWaitIdle(m_ctx.getDevice());
 
     // ── Destroy model-dependent resources ────────────────────────────────────────
-    // Descriptor pool destruction implicitly frees m_descriptorSet and all m_materialSets.
+    // Descriptor pool destruction implicitly frees frame scene sets and material sets.
     if (m_descriptorPool != VK_NULL_HANDLE) {
         vkDestroyDescriptorPool(m_ctx.getDevice(), m_descriptorPool, nullptr);
         m_descriptorPool = VK_NULL_HANDLE;
-        m_descriptorSet  = VK_NULL_HANDLE;
     }
-    m_materialSets.clear();
+    for (auto& frame : m_frameResources) {
+        frame.sceneDescriptorSet = VK_NULL_HANDLE;
+    }
+    m_materialDescriptorSets.clear();
 
     for (auto& tex : m_textures)
         tex.destroy();
@@ -190,19 +203,19 @@ void Renderer::reloadModel(const std::string& modelPath)
     m_indexBuffer.destroy();
     m_vertexBuffer.destroy();
 
-    m_meshes.clear();
-    m_materials.clear();
-    m_drawCommands.clear();
-    m_model = Model{};
+    m_meshRenderData.clear();
+    m_renderMaterials.clear();
+    m_activeScene = {};
+    m_importedModel = Model{};
 
     // ── Load new model and upload resources ──────────────────────────────────────
     try {
-        loadModel(modelPath);
+        loadImportedModel(modelPath);
     } catch (const std::exception& e) {
         spdlog::error("Failed to load model '{}': {}", modelPath, e.what());
         spdlog::info("Falling back to Sponza");
         try {
-            loadModel(std::string(ASSET_DIR) + "/source/Sponza.gltf");
+            loadImportedModel(std::string(ASSET_DIR) + "/source/Sponza.gltf");
         } catch (const std::exception& e2) {
             spdlog::critical("Failed to load fallback model: {}", e2.what());
             throw;  // Unrecoverable
@@ -210,19 +223,16 @@ void Renderer::reloadModel(const std::string& modelPath)
     }
 
     // ── Compute normalization transform for the new model ────────────────────────
-    m_sceneInfo = computeSceneInfo(m_model.boundsMin, m_model.boundsMax);
+    m_sceneInfo = computeSceneInfo(m_importedModel.boundsMin, m_importedModel.boundsMax);
     spdlog::info("Scene normalized: scale={:.4f}, radius={:.2f}",
                  m_sceneInfo.scaleFactor, m_sceneInfo.normalizedRadius);
-    createDefaultPointLights();
-    uploadPointLightBuffer();
-    uploadClusterMetadata();
-    rebuildDrawCommands();
+    submitScene(rebuildSceneSubmissionFromImportedModel());
 
     // ── Recreate descriptors for the new model ───────────────────────────────────
-    createDescriptorPool();
-    createDescriptorSet();
-    m_shadowPass.setSceneDescriptorSet(m_descriptorSet);
+    createSceneDescriptorPool();
+    createSceneDescriptorSets();
     createMaterialDescriptorSets();
+    uploadActiveScenePointLights();
 
     // ── Update render stats ──────────────────────────────────────────────────────
     refreshRenderStats();
@@ -257,17 +267,16 @@ void Renderer::shutdown()
     for (auto& tex : m_textures)
         tex.destroy();
     m_textures.clear();
-    m_meshes.clear();
-    m_materials.clear();
-    m_drawCommands.clear();
+    m_meshRenderData.clear();
+    m_renderMaterials.clear();
+    m_activeScene = {};
     m_samplerCache.shutdown();
 
     m_shadowPass.shutdown(m_ctx.getDevice());
 
     // Destroy GPU resources that hold VMA allocations
     destroyClusteredLightResources();
-    m_lightUBOBuffer.destroy();
-    m_cameraUBOBuffer.destroy();
+    m_frameResources.clear();
     m_indexBuffer.destroy();
     m_vertexBuffer.destroy();
 
@@ -277,8 +286,8 @@ void Renderer::shutdown()
 
 void Renderer::refreshRenderStats()
 {
-    m_renderStats.meshCount          = static_cast<uint32_t>(m_meshes.size());
-    m_renderStats.materialCount      = static_cast<uint32_t>(m_materials.size());
+    m_renderStats.meshCount          = static_cast<uint32_t>(m_meshRenderData.size());
+    m_renderStats.materialCount      = static_cast<uint32_t>(m_renderMaterials.size());
     m_renderStats.textureCount       = static_cast<uint32_t>(m_textures.size());
     m_renderStats.textureMemoryBytes = 0;
     for (const auto& tex : m_textures) {
@@ -292,12 +301,13 @@ void Renderer::refreshRenderStats()
 
 // ── Geometry ──────────────────────────────────────────────────────────────────
 
-void Renderer::loadModel(const std::string& modelPath)
+void Renderer::loadImportedModel(const std::string& modelPath)
 {
-    m_model = GLTFLoader::loadGLTF(modelPath);
-    m_meshes.clear();
-    m_materials = m_model.materials;
-    m_drawCommands.clear();
+    // Imported asset data is the bridge input. Renderer-owned resources and the
+    // sticky RenderScenePacket are derived from this model after upload.
+    m_importedModel = GLTFLoader::loadGLTF(modelPath);
+    m_meshRenderData.clear();
+    m_renderMaterials = m_importedModel.materials;
 
     // Flatten all mesh vertex/index data into single contiguous arrays.
     // Each mesh's indices are already absolute (offset applied in GLTFLoader)
@@ -307,11 +317,11 @@ void Renderer::loadModel(const std::string& modelPath)
     std::vector<uint32_t> allIndices;
     uint32_t vertexBase = 0;
 
-    for (const auto& mesh : m_model.meshes) {
+    for (const auto& mesh : m_importedModel.meshes) {
         MeshRenderData data{};
         data.firstIndex    = static_cast<uint32_t>(allIndices.size());
         data.indexCount    = static_cast<uint32_t>(mesh.indices.size());
-        m_meshes.push_back(data);
+        m_meshRenderData.push_back(data);
 
         allVertices.insert(allVertices.end(), mesh.vertices.begin(), mesh.vertices.end());
 
@@ -341,8 +351,8 @@ void Renderer::loadModel(const std::string& modelPath)
 
     m_fallbackWhite.createSolidColor(255, 255, 255, 255, transferCmd, m_samplerCache);
 
-    m_textures.reserve(m_model.textures.size());
-    for (const auto& texEntry : m_model.textures) {
+    m_textures.reserve(m_importedModel.textures.size());
+    for (const auto& texEntry : m_importedModel.textures) {
         m_textures.emplace_back(m_ctx);
         auto& tex = m_textures.back();
 
@@ -371,22 +381,25 @@ void Renderer::loadModel(const std::string& modelPath)
         tex.releaseStaging();
 
     spdlog::info("Model uploaded: {} meshes, {} vertices, {} indices",
-                 m_model.meshes.size(), allVertices.size(), allIndices.size());
+                 m_importedModel.meshes.size(), allVertices.size(), allIndices.size());
 }
 
-void Renderer::rebuildDrawCommands()
+RenderScenePacket Renderer::rebuildSceneSubmissionFromImportedModel()
 {
-    m_drawCommands.clear();
-    m_drawCommands.reserve(m_model.meshes.size());
+    // Imported mesh/material data stays a bridge. This step builds explicit
+    // scene submission from that bridge without making the imported model the
+    // renderer's scene representation.
+    RenderScenePacket scene{};
+    scene.draws.reserve(m_importedModel.meshes.size());
 
     const glm::mat4& transform = m_sceneInfo.modelMatrix;
 
-    for (size_t i = 0; i < m_model.meshes.size() && i < m_meshes.size(); ++i) {
-        const Mesh& srcMesh = m_model.meshes[i];
-        MeshRenderData& dstMesh = m_meshes[i];
+    for (size_t i = 0; i < m_importedModel.meshes.size() && i < m_meshRenderData.size(); ++i) {
+        const Mesh& importedMesh = m_importedModel.meshes[i];
+        MeshRenderData& meshRenderData = m_meshRenderData[i];
 
-        const glm::vec3& lo = srcMesh.boundsMin;
-        const glm::vec3& hi = srcMesh.boundsMax;
+        const glm::vec3& lo = importedMesh.boundsMin;
+        const glm::vec3& hi = importedMesh.boundsMax;
         glm::vec3 wMin(std::numeric_limits<float>::max());
         glm::vec3 wMax(-std::numeric_limits<float>::max());
 
@@ -399,21 +412,24 @@ void Renderer::rebuildDrawCommands()
             wMax = glm::max(wMax, world);
         }
 
-        dstMesh.worldBoundsMin = wMin;
-        dstMesh.worldBoundsMax = wMax;
+        meshRenderData.worldBoundsMin = wMin;
+        meshRenderData.worldBoundsMax = wMax;
 
         MaterialHandle material{};
-        if (srcMesh.materialIndex >= 0 &&
-            srcMesh.materialIndex < static_cast<int32_t>(m_materials.size())) {
-            material.index = static_cast<uint32_t>(srcMesh.materialIndex);
+        if (importedMesh.materialIndex >= 0 &&
+            importedMesh.materialIndex < static_cast<int32_t>(m_renderMaterials.size())) {
+            material.index = static_cast<uint32_t>(importedMesh.materialIndex);
         }
 
-        m_drawCommands.push_back(DrawCommand{
+        scene.draws.push_back(DrawCommand{
             .transform = transform,
             .mesh = MeshHandle{ static_cast<uint32_t>(i) },
             .material = material,
         });
     }
+
+    scene.pointLights = buildDefaultScenePointLights(m_sceneInfo.normalizedRadius);
+    return scene;
 }
 
 // ── Pipeline ──────────────────────────────────────────────────────────────────
@@ -588,7 +604,7 @@ void Renderer::createPbrPipeline()
         .bindingCount = static_cast<uint32_t>(setBindings.size()),
         .pBindings    = setBindings.data(),
     };
-    VK_CHECK(vkCreateDescriptorSetLayout(m_ctx.getDevice(), &setLayoutInfo, nullptr, &m_cameraSetLayout));
+    VK_CHECK(vkCreateDescriptorSetLayout(m_ctx.getDevice(), &setLayoutInfo, nullptr, &m_sceneSetLayout));
 
     // ── Material texture set layout (set=1) ──────────────────────────────────
     // 3 combined image samplers: albedo (b0), normal map (b1), metallic-roughness (b2).
@@ -622,7 +638,7 @@ void Renderer::createPbrPipeline()
 
     // Pipeline layout: set=0 (camera+light UBOs), set=1 (material textures)
     const std::array<VkDescriptorSetLayout, 2> allSetLayouts = {
-        m_cameraSetLayout,    // set 0
+        m_sceneSetLayout,     // set 0
         m_materialSetLayout,  // set 1
     };
 
@@ -713,8 +729,11 @@ void Renderer::destroyPipeline()
     const VkDevice dev = m_ctx.getDevice();
     // Descriptor pool destruction implicitly frees all sets allocated from it.
     // Pool destruction implicitly frees all allocated descriptor sets.
-    if (m_descriptorPool     != VK_NULL_HANDLE) { vkDestroyDescriptorPool(dev, m_descriptorPool, nullptr);         m_descriptorPool    = VK_NULL_HANDLE; m_descriptorSet = VK_NULL_HANDLE; }
-    m_materialSets.clear();
+    if (m_descriptorPool     != VK_NULL_HANDLE) { vkDestroyDescriptorPool(dev, m_descriptorPool, nullptr);         m_descriptorPool    = VK_NULL_HANDLE; }
+    for (auto& frame : m_frameResources) {
+        frame.sceneDescriptorSet = VK_NULL_HANDLE;
+    }
+    m_materialDescriptorSets.clear();
     if (m_vertModule         != VK_NULL_HANDLE) { vkDestroyShaderModule(dev, m_vertModule, nullptr);               m_vertModule        = VK_NULL_HANDLE; }
     if (m_fragModule         != VK_NULL_HANDLE) { vkDestroyShaderModule(dev, m_fragModule, nullptr);               m_fragModule        = VK_NULL_HANDLE; }
     if (m_normalsFragModule  != VK_NULL_HANDLE) { vkDestroyShaderModule(dev, m_normalsFragModule, nullptr);        m_normalsFragModule = VK_NULL_HANDLE; }
@@ -723,53 +742,33 @@ void Renderer::destroyPipeline()
     if (m_normalsPipeline    != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_normalsPipeline, nullptr);              m_normalsPipeline   = VK_NULL_HANDLE; }
     if (m_pipelineLayout     != VK_NULL_HANDLE) { vkDestroyPipelineLayout(dev, m_pipelineLayout, nullptr);         m_pipelineLayout    = VK_NULL_HANDLE; }
     if (m_materialSetLayout  != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(dev, m_materialSetLayout, nullptr); m_materialSetLayout = VK_NULL_HANDLE; }
-    if (m_cameraSetLayout    != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(dev, m_cameraSetLayout, nullptr);   m_cameraSetLayout   = VK_NULL_HANDLE; }
+    if (m_sceneSetLayout     != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(dev, m_sceneSetLayout, nullptr);    m_sceneSetLayout    = VK_NULL_HANDLE; }
 }
 
-// ── Camera UBO ────────────────────────────────────────────────────────────────
-
-void Renderer::createCameraUBO()
+Renderer::FrameResources& Renderer::currentFrameResources()
 {
-    // Host-visible + persistently mapped: upload is a memcpy, no staging needed.
-    // UBOs change every frame so device-local + staging would be needlessly expensive.
-    m_cameraUBOBuffer.createHostVisible(sizeof(CameraUBO), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
-
-    const CameraUBO initial{ glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f), glm::vec3(0.0f), 0.0f };
-    m_cameraUBOBuffer.upload(&initial, sizeof(CameraUBO));
-
-    spdlog::info("Camera UBO created ({} bytes, host-visible)", sizeof(CameraUBO));
+    return m_frameResources[m_frameSync.getCurrentFrame()];
 }
 
-void Renderer::createLightUBO()
+const Renderer::FrameResources& Renderer::currentFrameResources() const
 {
-    m_lightUBOBuffer.createHostVisible(sizeof(LightUBO), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
-
-    // Default sun: slightly off-vertical, warm white, moderate ambient
-    setLightParameters(
-        glm::normalize(glm::vec3(1.0f, 1.0f, 1.0f)), // Light direction (toward camera)
-        glm::vec3(1.0f, 1.0f, 1.0f),                 // White light
-        3.5f,                                        // Increase intensity
-        0.3f                                         // Ambient light
-    );
-
-    spdlog::info("Light UBO created ({} bytes, host-visible)", sizeof(LightUBO));
+    return m_frameResources[m_frameSync.getCurrentFrame()];
 }
 
-void Renderer::setLightParameters(const glm::vec3& direction, const glm::vec3& color,
-                                   float intensity, float ambient)
+Renderer::CameraUBO Renderer::buildCurrentCameraUBO() const
 {
-    m_lightDirection    = glm::normalize(direction);
-    m_lightColor        = color;
-    m_lightIntensity    = intensity;
-    m_ambientIntensity  = ambient;
-    uploadLightUBO();
-    spdlog::debug("Light updated: dir=({:.2f},{:.2f},{:.2f}), intensity={:.2f}",
-                  direction.x, direction.y, direction.z, intensity);
+    return CameraUBO{
+        m_viewMatrix,
+        m_projMatrix,
+        glm::inverse(m_projMatrix * m_viewMatrix),
+        m_cameraPos,
+        0.0f,
+    };
 }
 
-void Renderer::uploadLightUBO()
+Renderer::LightUBO Renderer::buildCurrentLightUBO() const
 {
-    const LightUBO light{
+    return LightUBO{
         m_lightDirection,
         m_lightIntensity,
         m_lightColor,
@@ -779,22 +778,63 @@ void Renderer::uploadLightUBO()
         m_shadowSettings.pcfSpreadRadius,
         m_shadowSettings.vsmBleedReduction,
     };
-    m_lightUBOBuffer.upload(&light, sizeof(LightUBO));
 }
 
-void Renderer::createDefaultPointLights()
+Renderer::ClusterMetadataUBO Renderer::buildCurrentClusterMetadata() const
 {
-    const float r = std::max(m_sceneInfo.normalizedRadius, 1.0f);
-    const float y = 1.8f;
-    const float radius = r * 0.45f;
-    const float intensity = 22.0f;
-
-    m_pointLights = {
-        { glm::vec4(-0.45f * r, y, -0.35f * r, radius), glm::vec4(1.0f, 0.45f, 0.30f, intensity) },
-        { glm::vec4( 0.45f * r, y, -0.35f * r, radius), glm::vec4(0.35f, 0.65f, 1.0f, intensity) },
-        { glm::vec4(-0.45f * r, y,  0.35f * r, radius), glm::vec4(0.45f, 1.0f, 0.55f, intensity) },
-        { glm::vec4( 0.45f * r, y,  0.35f * r, radius), glm::vec4(1.0f, 0.80f, 0.35f, intensity) },
+    const VkExtent2D ext = m_swapchain.getExtent();
+    return ClusterMetadataUBO{
+        glm::uvec4(m_clusterCountX, m_clusterCountY, m_clusterCountZ,
+                   shader_interface::kMaxLightsPerCluster),
+        glm::uvec4(static_cast<uint32_t>(std::min(m_activeScene.pointLights.size(),
+                                                  static_cast<size_t>(m_maxPointLights))),
+                   0u, 0u, 0u),
+        glm::vec4(static_cast<float>(ext.width),
+                  static_cast<float>(ext.height),
+                  m_cameraNearZ,
+                  m_cameraFarZ),
     };
+}
+
+void Renderer::createFrameResources()
+{
+    m_frameResources.clear();
+    m_frameResources.reserve(kFramesInFlight);
+
+    const CameraUBO initialCamera = buildCurrentCameraUBO();
+    const LightUBO initialLight = buildCurrentLightUBO();
+    const ClusterMetadataUBO initialClusterMetadata = buildCurrentClusterMetadata();
+
+    for (uint32_t i = 0; i < kFramesInFlight; ++i) {
+        m_frameResources.emplace_back(m_ctx);
+        auto& frame = m_frameResources.back();
+        frame.cameraUBO.createHostVisible(sizeof(CameraUBO), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+        frame.lightUBO.createHostVisible(sizeof(LightUBO), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+        frame.clusterMetadataUBO.createHostVisible(sizeof(ClusterMetadataUBO),
+                                                   VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+        frame.cameraUBO.upload(&initialCamera, sizeof(initialCamera));
+        frame.lightUBO.upload(&initialLight, sizeof(initialLight));
+        frame.clusterMetadataUBO.upload(&initialClusterMetadata, sizeof(initialClusterMetadata));
+    }
+
+    spdlog::info("Frame resources created for {} frames in flight", kFramesInFlight);
+}
+
+void Renderer::uploadCurrentFrameCameraState(const CameraData& camera)
+{
+    m_cameraPos  = camera.position;
+    m_viewMatrix = camera.view;
+    m_projMatrix = camera.projection;
+    m_cameraNearZ = camera.nearZ;
+    m_cameraFarZ  = camera.farZ;
+    const CameraUBO cameraUBO = buildCurrentCameraUBO();
+    currentFrameResources().cameraUBO.upload(&cameraUBO, sizeof(cameraUBO));
+}
+
+void Renderer::uploadCurrentFrameLightState()
+{
+    const LightUBO lightUBO = buildCurrentLightUBO();
+    currentFrameResources().lightUBO.upload(&lightUBO, sizeof(lightUBO));
 }
 
 void Renderer::createClusteredLightResources()
@@ -802,11 +842,8 @@ void Renderer::createClusteredLightResources()
     m_pointLightBuffer.createHostVisible(
         static_cast<VkDeviceSize>(m_maxPointLights) * sizeof(shader_interface::GpuPointLight),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    m_clusterMetadataBuffer.createHostVisible(sizeof(ClusterMetadataUBO),
-                                              VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
-
-    uploadPointLightBuffer();
     resizeClusteredLightResources();
+    uploadActiveScenePointLights();
 
     spdlog::info("Clustered Forward+ light resources created: max point lights={}, max lights/cluster={}",
                  m_maxPointLights, shader_interface::kMaxLightsPerCluster);
@@ -816,7 +853,6 @@ void Renderer::destroyClusteredLightResources()
 {
     m_clusterLightIndexBuffer.destroy();
     m_clusterGridBuffer.destroy();
-    m_clusterMetadataBuffer.destroy();
     m_pointLightBuffer.destroy();
 }
 
@@ -844,59 +880,44 @@ void Renderer::resizeClusteredLightResources()
         static_cast<VkDeviceSize>(m_clusterCount) * shader_interface::kMaxLightsPerCluster * sizeof(uint32_t),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
-    uploadClusterMetadata();
-    updateClusterDescriptors();
+    updateSceneClusterDescriptors();
+    if (!m_frameResources.empty()) {
+        const ClusterMetadataUBO metadata = buildCurrentClusterMetadata();
+        for (auto& frame : m_frameResources) {
+            frame.clusterMetadataUBO.upload(&metadata, sizeof(metadata));
+        }
+    }
 
     spdlog::info("Cluster grid resized: {}x{}x{} ({} clusters)",
                  m_clusterCountX, m_clusterCountY, m_clusterCountZ, m_clusterCount);
 }
 
-void Renderer::setPointLights(const std::vector<shader_interface::GpuPointLight>& pointLights)
-{
-    m_pointLights.assign(pointLights.begin(),
-                         pointLights.begin() + std::min(pointLights.size(),
-                                                        static_cast<size_t>(m_maxPointLights)));
-    uploadPointLightBuffer();
-    uploadClusterMetadata();
-}
-
-void Renderer::uploadPointLightBuffer()
+void Renderer::uploadActiveScenePointLights()
 {
     if (m_pointLightBuffer.getBuffer() == VK_NULL_HANDLE) return;
 
     std::vector<shader_interface::GpuPointLight> uploadData(m_maxPointLights);
-    const size_t copyCount = std::min(m_pointLights.size(), uploadData.size());
-    std::copy_n(m_pointLights.data(), copyCount, uploadData.data());
+    const size_t copyCount = std::min(m_activeScene.pointLights.size(), uploadData.size());
+    if (copyCount > 0) {
+        std::copy_n(m_activeScene.pointLights.data(), copyCount, uploadData.data());
+    }
     m_pointLightBuffer.upload(uploadData.data(),
                               static_cast<VkDeviceSize>(uploadData.size() * sizeof(uploadData[0])));
 }
 
-void Renderer::uploadClusterMetadata()
+void Renderer::uploadCurrentClusterMetadata()
 {
-    if (m_clusterMetadataBuffer.getBuffer() == VK_NULL_HANDLE) return;
-
-    const VkExtent2D ext = m_swapchain.getExtent();
-    const ClusterMetadataUBO metadata{
-        glm::uvec4(m_clusterCountX, m_clusterCountY, m_clusterCountZ,
-                   shader_interface::kMaxLightsPerCluster),
-        glm::uvec4(static_cast<uint32_t>(std::min(m_pointLights.size(),
-                                                  static_cast<size_t>(m_maxPointLights))),
-                   0u, 0u, 0u),
-        glm::vec4(static_cast<float>(ext.width),
-                  static_cast<float>(ext.height),
-                  m_cameraNearZ,
-                  m_cameraFarZ),
-    };
-    m_clusterMetadataBuffer.upload(&metadata, sizeof(metadata));
+    if (m_frameResources.empty()) return;
+    const ClusterMetadataUBO metadata = buildCurrentClusterMetadata();
+    currentFrameResources().clusterMetadataUBO.upload(&metadata, sizeof(metadata));
 }
 
-void Renderer::updateClusterDescriptors()
+void Renderer::updateSceneClusterDescriptors()
 {
-    if (m_descriptorSet == VK_NULL_HANDLE ||
+    if (m_frameResources.empty() ||
         m_pointLightBuffer.getBuffer() == VK_NULL_HANDLE ||
         m_clusterGridBuffer.getBuffer() == VK_NULL_HANDLE ||
-        m_clusterLightIndexBuffer.getBuffer() == VK_NULL_HANDLE ||
-        m_clusterMetadataBuffer.getBuffer() == VK_NULL_HANDLE) {
+        m_clusterLightIndexBuffer.getBuffer() == VK_NULL_HANDLE) {
         return;
     }
 
@@ -915,64 +936,47 @@ void Renderer::updateClusterDescriptors()
         .offset = 0,
         .range = m_clusterLightIndexBuffer.getSize(),
     };
-    const VkDescriptorBufferInfo clusterMetadataInfo{
-        .buffer = m_clusterMetadataBuffer.getBuffer(),
-        .offset = 0,
-        .range = sizeof(ClusterMetadataUBO),
-    };
 
-    const std::array<VkWriteDescriptorSet, 4> writes{{
-        { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet = m_descriptorSet,
-          .dstBinding = shader_interface::scene_binding::kPointLights,
-          .descriptorCount = 1,
-          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-          .pBufferInfo = &pointLightInfo },
-        { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet = m_descriptorSet,
-          .dstBinding = shader_interface::scene_binding::kClusterGrid,
-          .descriptorCount = 1,
-          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-          .pBufferInfo = &clusterGridInfo },
-        { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet = m_descriptorSet,
-          .dstBinding = shader_interface::scene_binding::kClusterLightIndices,
-          .descriptorCount = 1,
-          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-          .pBufferInfo = &clusterIndicesInfo },
-        { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet = m_descriptorSet,
-          .dstBinding = shader_interface::scene_binding::kClusterMetadata,
-          .descriptorCount = 1,
-          .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-          .pBufferInfo = &clusterMetadataInfo },
-    }};
-    vkUpdateDescriptorSets(m_ctx.getDevice(), static_cast<uint32_t>(writes.size()),
-                           writes.data(), 0, nullptr);
-}
+    for (auto& frame : m_frameResources) {
+        if (frame.sceneDescriptorSet == VK_NULL_HANDLE) {
+            continue;
+        }
 
-void Renderer::setCascadeDebugEnabled(bool enabled)
-{
-    m_shadowSettings.debugCascades = enabled;
-    uploadLightUBO();
-}
+        const VkDescriptorBufferInfo clusterMetadataInfo{
+            .buffer = frame.clusterMetadataUBO.getBuffer(),
+            .offset = 0,
+            .range = sizeof(ClusterMetadataUBO),
+        };
 
-void Renderer::setShadowFilterMode(int32_t mode)
-{
-    m_shadowSettings.filterMode = mode;
-    uploadLightUBO();
-}
-
-void Renderer::setPcfSpreadRadius(float radius)
-{
-    m_shadowSettings.pcfSpreadRadius = radius;
-    uploadLightUBO();
-}
-
-void Renderer::setVsmBleedReduction(float reduction)
-{
-    m_shadowSettings.vsmBleedReduction = reduction;
-    uploadLightUBO();
+        const std::array<VkWriteDescriptorSet, 4> writes{{
+            { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+              .dstSet = frame.sceneDescriptorSet,
+              .dstBinding = shader_interface::scene_binding::kPointLights,
+              .descriptorCount = 1,
+              .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+              .pBufferInfo = &pointLightInfo },
+            { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+              .dstSet = frame.sceneDescriptorSet,
+              .dstBinding = shader_interface::scene_binding::kClusterGrid,
+              .descriptorCount = 1,
+              .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+              .pBufferInfo = &clusterGridInfo },
+            { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+              .dstSet = frame.sceneDescriptorSet,
+              .dstBinding = shader_interface::scene_binding::kClusterLightIndices,
+              .descriptorCount = 1,
+              .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+              .pBufferInfo = &clusterIndicesInfo },
+            { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+              .dstSet = frame.sceneDescriptorSet,
+              .dstBinding = shader_interface::scene_binding::kClusterMetadata,
+              .descriptorCount = 1,
+              .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+              .pBufferInfo = &clusterMetadataInfo },
+        }};
+        vkUpdateDescriptorSets(m_ctx.getDevice(), static_cast<uint32_t>(writes.size()),
+                               writes.data(), 0, nullptr);
+    }
 }
 
 void Renderer::createDepthImage()
@@ -997,7 +1001,7 @@ void Renderer::createResizeDependentResources()
     createDepthImage();
     createHdrTarget();
     m_tonemapPass.resize(m_ctx.getDevice(), m_hdrSampler, m_hdrTarget.getImageView());
-    if (m_clusterMetadataBuffer.getBuffer() != VK_NULL_HANDLE) {
+    if (m_pointLightBuffer.getBuffer() != VK_NULL_HANDLE) {
         resizeClusteredLightResources();
     }
 }
@@ -1051,21 +1055,18 @@ void Renderer::loadHdrPanorama(const std::string& path)
 {
     m_skyPass.loadHdrPanorama(m_ctx, path);
 }
-void Renderer::createDescriptorPool()
+
+void Renderer::createSceneDescriptorPool()
 {
-    // Pool must hold:
-    //   1 set  × 3 uniform buffers (camera + light + shadow, set=0)
-    //   1 set  × 1 combined image sampler (shadow map, set=0)
-    //   N sets × 3 combined image samplers each (material textures, set=1)
-    const uint32_t materialCount = static_cast<uint32_t>(m_materials.size());
-    const uint32_t maxSets       = 1 + std::max(materialCount, 1u);
-    // 2 samplers in set=0 (depth array b3 + moments array b4) + 3 per material
-    const uint32_t samplerCount  = 2 + 3 * std::max(materialCount, 1u);
+    const uint32_t materialCount = static_cast<uint32_t>(m_renderMaterials.size());
+    const uint32_t sceneSetCount = kFramesInFlight;
+    const uint32_t maxSets = sceneSetCount + std::max(materialCount, 1u);
+    const uint32_t samplerCount = 2 * sceneSetCount + 3 * std::max(materialCount, 1u);
 
     const std::array<VkDescriptorPoolSize, 3> poolSizes{{
         {
             .type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .descriptorCount = 4,  // camera + light + shadow + cluster metadata
+            .descriptorCount = 4 * sceneSetCount,
         },
         {
             .type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -1073,7 +1074,7 @@ void Renderer::createDescriptorPool()
         },
         {
             .type            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .descriptorCount = 3,  // point lights + cluster grid + cluster indices
+            .descriptorCount = 3 * sceneSetCount,
         },
     }};
 
@@ -1085,37 +1086,23 @@ void Renderer::createDescriptorPool()
     };
     VK_CHECK(vkCreateDescriptorPool(m_ctx.getDevice(), &poolCI, nullptr, &m_descriptorPool));
 
-    spdlog::info("Descriptor pool created: {} max sets (4 UBO, 3 SSBO, {} sampler descriptors)",
+    spdlog::info("Descriptor pool created: {} scene/material sets, {} sampler descriptors",
                  maxSets, samplerCount);
 }
 
-void Renderer::createDescriptorSet()
+void Renderer::createSceneDescriptorSets()
 {
-    // m_cameraSetLayout was already created in createPbrPipeline() and
-    // baked into the pipeline layout — reuse it directly (now holds bindings 0 + 1).
+    std::vector<VkDescriptorSetLayout> layouts(kFramesInFlight, m_sceneSetLayout);
+    std::vector<VkDescriptorSet> descriptorSets(kFramesInFlight, VK_NULL_HANDLE);
+
     const VkDescriptorSetAllocateInfo allocInfo{
         .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
         .descriptorPool     = m_descriptorPool,
-        .descriptorSetCount = 1,
-        .pSetLayouts        = &m_cameraSetLayout,
+        .descriptorSetCount = kFramesInFlight,
+        .pSetLayouts        = layouts.data(),
     };
-    VK_CHECK(vkAllocateDescriptorSets(m_ctx.getDevice(), &allocInfo, &m_descriptorSet));
+    VK_CHECK(vkAllocateDescriptorSets(m_ctx.getDevice(), &allocInfo, descriptorSets.data()));
 
-    const VkDescriptorBufferInfo cameraInfo{
-        .buffer = m_cameraUBOBuffer.getBuffer(),
-        .offset = 0,
-        .range  = sizeof(CameraUBO),
-    };
-    const VkDescriptorBufferInfo lightInfo{
-        .buffer = m_lightUBOBuffer.getBuffer(),
-        .offset = 0,
-        .range  = sizeof(LightUBO),
-    };
-    const VkDescriptorBufferInfo shadowUBOInfo{
-        .buffer = m_shadowPass.getShadowUBOBuffer(),
-        .offset = 0,
-        .range  = sizeof(ShadowCascadeUBO),
-    };
     const VkDescriptorImageInfo shadowMapInfo{
         .sampler     = m_shadowPass.getDepthSampler(),
         .imageView   = m_shadowPass.getDepthImageView(),
@@ -1126,70 +1113,132 @@ void Renderer::createDescriptorSet()
         .imageView   = m_shadowPass.getMomentsImageView(),
         .imageLayout = m_shadowPass.getMomentsSampleLayout(),
     };
+    const VkDescriptorBufferInfo pointLightInfo{
+        .buffer = m_pointLightBuffer.getBuffer(),
+        .offset = 0,
+        .range = m_pointLightBuffer.getSize(),
+    };
+    const VkDescriptorBufferInfo clusterGridInfo{
+        .buffer = m_clusterGridBuffer.getBuffer(),
+        .offset = 0,
+        .range = m_clusterGridBuffer.getSize(),
+    };
+    const VkDescriptorBufferInfo clusterIndicesInfo{
+        .buffer = m_clusterLightIndexBuffer.getBuffer(),
+        .offset = 0,
+        .range = m_clusterLightIndexBuffer.getSize(),
+    };
 
-    const std::array<VkWriteDescriptorSet, 5> writes{{
-        {
-            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet          = m_descriptorSet,
-            .dstBinding      = shader_interface::scene_binding::kCamera,
-            .dstArrayElement = 0,
-            .descriptorCount = 1,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .pBufferInfo     = &cameraInfo,
-        },
-        {
-            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet          = m_descriptorSet,
-            .dstBinding      = shader_interface::scene_binding::kLight,
-            .dstArrayElement = 0,
-            .descriptorCount = 1,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .pBufferInfo     = &lightInfo,
-        },
-        {
-            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet          = m_descriptorSet,
-            .dstBinding      = shader_interface::scene_binding::kShadow,
-            .dstArrayElement = 0,
-            .descriptorCount = 1,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .pBufferInfo     = &shadowUBOInfo,
-        },
-        {
-            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet          = m_descriptorSet,
-            .dstBinding      = shader_interface::scene_binding::kShadowMap,
-            .dstArrayElement = 0,
-            .descriptorCount = 1,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .pImageInfo      = &shadowMapInfo,
-        },
-        {
-            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet          = m_descriptorSet,
-            .dstBinding      = shader_interface::scene_binding::kShadowMoments,
-            .dstArrayElement = 0,
-            .descriptorCount = 1,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .pImageInfo      = &momentsInfo,
-        },
-    }};
-    vkUpdateDescriptorSets(m_ctx.getDevice(),
-                           static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
-    updateClusterDescriptors();
+    for (uint32_t i = 0; i < kFramesInFlight; ++i) {
+        auto& frame = m_frameResources[i];
+        frame.sceneDescriptorSet = descriptorSets[i];
 
-    spdlog::info("Descriptor set allocated: camera/light/shadow + clustered light buffers");
+        const VkDescriptorBufferInfo cameraInfo{
+            .buffer = frame.cameraUBO.getBuffer(),
+            .offset = 0,
+            .range  = sizeof(CameraUBO),
+        };
+        const VkDescriptorBufferInfo lightInfo{
+            .buffer = frame.lightUBO.getBuffer(),
+            .offset = 0,
+            .range  = sizeof(LightUBO),
+        };
+        const VkDescriptorBufferInfo shadowUBOInfo{
+            .buffer = m_shadowPass.getShadowUBOBuffer(i),
+            .offset = 0,
+            .range  = sizeof(ShadowCascadeUBO),
+        };
+        const VkDescriptorBufferInfo clusterMetadataInfo{
+            .buffer = frame.clusterMetadataUBO.getBuffer(),
+            .offset = 0,
+            .range = sizeof(ClusterMetadataUBO),
+        };
+
+        const std::array<VkWriteDescriptorSet, 9> writes{{
+            {
+                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet          = frame.sceneDescriptorSet,
+                .dstBinding      = shader_interface::scene_binding::kCamera,
+                .descriptorCount = 1,
+                .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .pBufferInfo     = &cameraInfo,
+            },
+            {
+                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet          = frame.sceneDescriptorSet,
+                .dstBinding      = shader_interface::scene_binding::kLight,
+                .descriptorCount = 1,
+                .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .pBufferInfo     = &lightInfo,
+            },
+            {
+                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet          = frame.sceneDescriptorSet,
+                .dstBinding      = shader_interface::scene_binding::kShadow,
+                .descriptorCount = 1,
+                .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .pBufferInfo     = &shadowUBOInfo,
+            },
+            {
+                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet          = frame.sceneDescriptorSet,
+                .dstBinding      = shader_interface::scene_binding::kShadowMap,
+                .descriptorCount = 1,
+                .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .pImageInfo      = &shadowMapInfo,
+            },
+            {
+                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet          = frame.sceneDescriptorSet,
+                .dstBinding      = shader_interface::scene_binding::kShadowMoments,
+                .descriptorCount = 1,
+                .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .pImageInfo      = &momentsInfo,
+            },
+            {
+                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet          = frame.sceneDescriptorSet,
+                .dstBinding      = shader_interface::scene_binding::kPointLights,
+                .descriptorCount = 1,
+                .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pBufferInfo     = &pointLightInfo,
+            },
+            {
+                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet          = frame.sceneDescriptorSet,
+                .dstBinding      = shader_interface::scene_binding::kClusterGrid,
+                .descriptorCount = 1,
+                .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pBufferInfo     = &clusterGridInfo,
+            },
+            {
+                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet          = frame.sceneDescriptorSet,
+                .dstBinding      = shader_interface::scene_binding::kClusterLightIndices,
+                .descriptorCount = 1,
+                .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pBufferInfo     = &clusterIndicesInfo,
+            },
+            {
+                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet          = frame.sceneDescriptorSet,
+                .dstBinding      = shader_interface::scene_binding::kClusterMetadata,
+                .descriptorCount = 1,
+                .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .pBufferInfo     = &clusterMetadataInfo,
+            },
+        }};
+        vkUpdateDescriptorSets(m_ctx.getDevice(),
+                               static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+    }
+
+    spdlog::info("Scene descriptor sets allocated for {} frames in flight", kFramesInFlight);
 }
 
-void Renderer::updateShadowDescriptors()
+void Renderer::updateSceneShadowDescriptors()
 {
-    if (m_descriptorSet == VK_NULL_HANDLE) return;
+    if (m_frameResources.empty()) return;
 
-    const VkDescriptorBufferInfo shadowUBOInfo{
-        .buffer = m_shadowPass.getShadowUBOBuffer(),
-        .offset = 0,
-        .range = sizeof(ShadowCascadeUBO),
-    };
     const VkDescriptorImageInfo shadowMapInfo{
         .sampler = m_shadowPass.getDepthSampler(),
         .imageView = m_shadowPass.getDepthImageView(),
@@ -1201,43 +1250,56 @@ void Renderer::updateShadowDescriptors()
         .imageLayout = m_shadowPass.getMomentsSampleLayout(),
     };
 
-    const std::array<VkWriteDescriptorSet, 3> writes{{
-        {
-            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet = m_descriptorSet,
-            .dstBinding = shader_interface::scene_binding::kShadow,
-            .descriptorCount = 1,
-            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .pBufferInfo = &shadowUBOInfo,
-        },
-        {
-            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet = m_descriptorSet,
-            .dstBinding = shader_interface::scene_binding::kShadowMap,
-            .descriptorCount = 1,
-            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .pImageInfo = &shadowMapInfo,
-        },
-        {
-            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet = m_descriptorSet,
-            .dstBinding = shader_interface::scene_binding::kShadowMoments,
-            .descriptorCount = 1,
-            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .pImageInfo = &momentsInfo,
-        },
-    }};
-    vkUpdateDescriptorSets(m_ctx.getDevice(), static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+    for (uint32_t i = 0; i < m_frameResources.size(); ++i) {
+        auto& frame = m_frameResources[i];
+        if (frame.sceneDescriptorSet == VK_NULL_HANDLE) {
+            continue;
+        }
+
+        const VkDescriptorBufferInfo shadowUBOInfo{
+            .buffer = m_shadowPass.getShadowUBOBuffer(i),
+            .offset = 0,
+            .range = sizeof(ShadowCascadeUBO),
+        };
+
+        const std::array<VkWriteDescriptorSet, 3> writes{{
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = frame.sceneDescriptorSet,
+                .dstBinding = shader_interface::scene_binding::kShadow,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .pBufferInfo = &shadowUBOInfo,
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = frame.sceneDescriptorSet,
+                .dstBinding = shader_interface::scene_binding::kShadowMap,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .pImageInfo = &shadowMapInfo,
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = frame.sceneDescriptorSet,
+                .dstBinding = shader_interface::scene_binding::kShadowMoments,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .pImageInfo = &momentsInfo,
+            },
+        }};
+        vkUpdateDescriptorSets(m_ctx.getDevice(), static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+    }
 }
 
 void Renderer::createMaterialDescriptorSets()
 {
-    const uint32_t materialCount = static_cast<uint32_t>(m_materials.size());
+    const uint32_t materialCount = static_cast<uint32_t>(m_renderMaterials.size());
     if (materialCount == 0) return;
 
     // Allocate all material sets in one batch — more efficient than N individual calls.
     std::vector<VkDescriptorSetLayout> layouts(materialCount, m_materialSetLayout);
-    m_materialSets.resize(materialCount);
+    m_materialDescriptorSets.resize(materialCount);
 
     const VkDescriptorSetAllocateInfo allocInfo{
         .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
@@ -1245,7 +1307,7 @@ void Renderer::createMaterialDescriptorSets()
         .descriptorSetCount = materialCount,
         .pSetLayouts        = layouts.data(),
     };
-    VK_CHECK(vkAllocateDescriptorSets(m_ctx.getDevice(), &allocInfo, m_materialSets.data()));
+    VK_CHECK(vkAllocateDescriptorSets(m_ctx.getDevice(), &allocInfo, m_materialDescriptorSets.data()));
 
     // Helpers: resolve a texture index to its view/sampler, falling back to white.
     auto getView = [&](int32_t idx) -> VkImageView {
@@ -1262,7 +1324,7 @@ void Renderer::createMaterialDescriptorSets()
     };
 
     for (uint32_t i = 0; i < materialCount; ++i) {
-        const Material& mat = m_materials[i];
+        const Material& mat = m_renderMaterials[i];
 
         const VkDescriptorImageInfo albedoInfo{
             .sampler     = getSampler(mat.albedoTextureIndex),
@@ -1283,7 +1345,7 @@ void Renderer::createMaterialDescriptorSets()
         const std::array<VkWriteDescriptorSet, 3> writes{{
             {
                 .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .dstSet          = m_materialSets[i],
+                .dstSet          = m_materialDescriptorSets[i],
                 .dstBinding      = shader_interface::material_binding::kAlbedo,
                 .dstArrayElement = 0,
                 .descriptorCount = 1,
@@ -1292,7 +1354,7 @@ void Renderer::createMaterialDescriptorSets()
             },
             {
                 .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .dstSet          = m_materialSets[i],
+                .dstSet          = m_materialDescriptorSets[i],
                 .dstBinding      = shader_interface::material_binding::kNormal,
                 .dstArrayElement = 0,
                 .descriptorCount = 1,
@@ -1301,7 +1363,7 @@ void Renderer::createMaterialDescriptorSets()
             },
             {
                 .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .dstSet          = m_materialSets[i],
+                .dstSet          = m_materialDescriptorSets[i],
                 .dstBinding      = shader_interface::material_binding::kMetallicRoughness,
                 .dstArrayElement = 0,
                 .descriptorCount = 1,
@@ -1371,6 +1433,7 @@ bool Renderer::beginFrame()
 void Renderer::render()
 {
     VkCommandBuffer cmd = m_commandBuffer.getFrameCommandBuffer();
+    FrameResources& frame = currentFrameResources();
 
     const VkCommandBufferBeginInfo beginInfo{
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -1388,14 +1451,22 @@ void Renderer::render()
 
     // update shadow matrices each frame so the shadow follows the camera.
     // Also recalculates shadowRadius/shadowDepth from m_sceneInfo.normalizedRadius.
-    m_shadowPass.record(cmd, m_vertexBuffer, m_indexBuffer, m_drawCommands,
-                        m_meshes, m_materials, m_materialSets, m_gpuTimer);
+    m_shadowPass.record(cmd,
+                        frame.sceneDescriptorSet,
+                        m_frameSync.getCurrentFrame(),
+                        m_vertexBuffer,
+                        m_indexBuffer,
+                        m_activeScene.draws,
+                        m_meshRenderData,
+                        m_renderMaterials,
+                        m_materialDescriptorSets,
+                        m_gpuTimer);
     if (m_shadowPass.consumeDescriptorDirty()) {
-        updateShadowDescriptors();
+        updateSceneShadowDescriptors();
     }
 
     m_gpuTimer.writeTimestamp(cmd, "ClusterCull_Begin");
-    m_clusteredLightCullingPass.record(cmd, m_descriptorSet,
+    m_clusteredLightCullingPass.record(cmd, frame.sceneDescriptorSet,
                                        m_clusterCountX, m_clusterCountY, m_clusterCountZ);
 
     const std::array<VkBufferMemoryBarrier2, 2> clusterBarriers{{
@@ -1498,7 +1569,7 @@ void Renderer::render()
     // ── Sky pass: fullscreen triangle at reverse-Z far plane (z = 0) ─────────
     // GREATER_OR_EQUAL depth: passes where depth == 0.0 (clear value, no geometry yet).
     // Drawn first — PBR geometry (GREATER at z > 0) overwrites sky on covered pixels.
-    m_skyPass.record(cmd, m_descriptorSet, ext, m_skyEnabled, m_skyMode);
+    m_skyPass.record(cmd, frame.sceneDescriptorSet, ext, m_skyEnabled, m_skyMode);
 
     // ── PBR geometry pass ─────────────────────────────────────────────────────
     VkPipeline activePipeline = m_pipeline;
@@ -1510,7 +1581,7 @@ void Renderer::render()
 
     // Bind camera UBO descriptor set (set=0, binding=0 — view/projection matrices)
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout,
-                            shader_interface::kSceneSet, 1, &m_descriptorSet, 0, nullptr);
+                            shader_interface::kSceneSet, 1, &frame.sceneDescriptorSet, 0, nullptr);
 
     // Bind vertex and index buffers
     const VkDeviceSize vertexOffset = 0;
@@ -1519,28 +1590,28 @@ void Renderer::render()
     vkCmdBindIndexBuffer(cmd, m_indexBuffer.getBuffer(), 0, VK_INDEX_TYPE_UINT32);
 
     // Push normalization model matrix (bytes 0–63): same transform as shadow pass.
-    for (const DrawCommand& draw : m_drawCommands) {
-        if (!draw.mesh.isValid() || draw.mesh.index >= m_meshes.size())
+    for (const DrawCommand& draw : m_activeScene.draws) {
+        if (!draw.mesh.isValid() || draw.mesh.index >= m_meshRenderData.size())
             continue;
 
-        const MeshRenderData& mesh = m_meshes[draw.mesh.index];
+        const MeshRenderData& mesh = m_meshRenderData[draw.mesh.index];
 
         vkCmdPushConstants(cmd, m_pipelineLayout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            shader_interface::kModelMatrixPcOffset, sizeof(glm::mat4), &draw.transform);
 
         if (draw.material.isValid() &&
-            draw.material.index < m_materialSets.size() &&
-            draw.material.index < m_materials.size()) {
+            draw.material.index < m_materialDescriptorSets.size() &&
+            draw.material.index < m_renderMaterials.size()) {
 
             // Bind material texture set (set=1) — set=0 remains bound and unaffected.
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     m_pipelineLayout,
-                                    shader_interface::kMaterialSet, 1, &m_materialSets[draw.material.index],
+                                    shader_interface::kMaterialSet, 1, &m_materialDescriptorSets[draw.material.index],
                                     0, nullptr);
 
             // Push material factors to fragment stage (offset 64, after model matrix).
-            const Material& mat = m_materials[draw.material.index];
+            const Material& mat = m_renderMaterials[draw.material.index];
             const MaterialPushConstants matPC{
                 .baseColorFactor  = mat.baseColorFactor,
                 .metallicFactor   = mat.metallicFactor,
@@ -1619,58 +1690,49 @@ void Renderer::requestScreenshot(const std::string& filename)
     m_screenshotFilename  = filename;
 }
 
+void Renderer::submitScene(RenderScenePacket scene)
+{
+    // Scene submission is sticky until the caller resubmits a new packet.
+    m_activeScene = std::move(scene);
+    uploadActiveScenePointLights();
+    if (!m_frameResources.empty()) {
+        const ClusterMetadataUBO metadata = buildCurrentClusterMetadata();
+        for (auto& frame : m_frameResources) {
+            frame.clusterMetadataUBO.upload(&metadata, sizeof(metadata));
+        }
+    }
+}
+
 void Renderer::submitFrame(const RenderFramePacket& packet)
 {
-    setCameraMatrices(packet.camera.view, packet.camera.projection, packet.camera.position);
-    setCameraFrustum(packet.camera.nearZ, packet.camera.farZ);
-
+    // Normal rendering uses a single per-frame packet handoff after beginFrame().
+    uploadCurrentFrameCameraState(packet.camera);
     m_lightDirection    = safeNormalizeDirection(packet.light.direction, glm::vec3(0.577f));
     m_lightColor        = packet.light.color;
     m_lightIntensity    = packet.light.intensity;
     m_ambientIntensity  = packet.light.ambient;
-
     m_shadowSettings = packet.shadow;
+
     m_shadowPass.updateCamera(m_viewMatrix, m_projMatrix, m_cameraNearZ, m_cameraFarZ, m_cameraPos);
     m_shadowPass.updateLightDirection(m_lightDirection);
     const bool shadowResourcesChanged = m_shadowPass.updateSettings(m_shadowSettings);
     const bool shadowDescriptorsDirty = m_shadowPass.consumeDescriptorDirty();
     if (shadowResourcesChanged || shadowDescriptorsDirty) {
-        updateShadowDescriptors();
+        updateSceneShadowDescriptors();
     }
-    uploadLightUBO();
-    if (!packet.pointLights.empty()) {
-        setPointLights(packet.pointLights);
-    } else {
-        uploadClusterMetadata();
-    }
+    uploadCurrentFrameLightState();
+    uploadCurrentClusterMetadata();
 
-    setTonemapParams(packet.tonemap.mode,
-                     packet.tonemap.exposure,
-                     packet.tonemap.splitScreen,
-                     packet.tonemap.splitRightMode);
+    m_tonemapMode = packet.tonemap.mode;
+    m_exposure = packet.tonemap.exposure;
+    m_splitScreenMode = packet.tonemap.splitScreen ? 1 : 0;
+    m_splitRightMode = packet.tonemap.splitRightMode;
 
     m_skyEnabled = packet.sky.enabled;
     m_skyMode    = packet.sky.mode;
 
     m_wireframe   = packet.debug.wireframe;
     m_showNormals = packet.debug.showNormals;
-}
-
-void Renderer::setCameraMatrices(const glm::mat4& view, const glm::mat4& projection,
-                                  const glm::vec3& cameraPos)
-{
-    m_cameraPos  = cameraPos;
-    m_viewMatrix = view;
-    m_projMatrix = projection;
-    // inverseVP used by sky.vert to reconstruct world-space ray directions from clip space.
-    const CameraUBO ubo{ view, projection, glm::inverse(projection * view), cameraPos, 0.0f };
-    m_cameraUBOBuffer.upload(&ubo, sizeof(CameraUBO));
-}
-
-void Renderer::setCameraFrustum(float nearZ, float farZ)
-{
-    m_cameraNearZ = nearZ;
-    m_cameraFarZ  = farZ;
 }
 
 void Renderer::endFrame()

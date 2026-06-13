@@ -62,7 +62,7 @@ Implemented or partially implemented systems include:
 - extracted render passes for tone mapping, sky, shadows, and clustered light culling
 - centralized shader interface/binding definitions
 - internal render settings structs
-- internal frame packet and draw-command groundwork
+- internal frame packet plus sticky scene packet submission
 - device capability modeling for optional feature gating
 
 Planned research directions include:
@@ -241,6 +241,7 @@ C++ Research Viewer
 
 Renderer Orchestration Layer
   - RenderFramePacket
+  - RenderScenePacket
   - RenderSettings
   - DrawCommand
   - frame submission flow
@@ -261,10 +262,23 @@ Future work should gradually move toward:
 
 - grouped renderer settings structs as the dominant state handoff
 - internal frame packet abstraction as the primary submission path
+- explicit scene packet submission beside frame submission
 - resource handles for mesh/material/texture objects
 - clearer pass ownership
 - explicit resize pathway
 - eventual C ABI boundary
+
+## Capability Policy
+
+Runtime feature handling follows a simple renderer policy:
+
+- detect capabilities once during device selection
+- store them centrally in `RendererDeviceFeatures`
+- enforce only the current renderer baseline at startup
+- keep unsupported optional features functional via fallback behavior
+- have future systems query cached capability state instead of reprobeing Vulkan ad hoc
+
+This keeps optional work such as SMAA/VRS research additive without quietly turning it into a new startup requirement.
 
 ## Future Odin Host Direction
 
