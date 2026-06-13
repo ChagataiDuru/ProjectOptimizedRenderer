@@ -46,6 +46,7 @@ Implemented or partially implemented systems include:
 - material descriptor sets
 - Cook-Torrance PBR direct lighting
 - normal mapping
+- clustered forward-plus point lights
 - HDR offscreen rendering
 - Reinhard, AgX, and Khronos PBR Neutral tone mapping
 - split-screen tone map comparison
@@ -58,6 +59,11 @@ Implemented or partially implemented systems include:
 - render statistics
 - screenshot support
 - runtime model reload
+- extracted render passes for tone mapping, sky, shadows, and clustered light culling
+- centralized shader interface/binding definitions
+- internal render settings structs
+- internal frame packet and draw-command groundwork
+- device capability modeling for optional feature gating
 
 Planned research directions include:
 
@@ -179,6 +185,7 @@ Currently referenced shader stages include:
 - normal visualization fragment
 - shadow vertex/fragment
 - VSM blur compute
+- clustered light culling compute
 - tone map vertex/fragment
 - sky vertex/fragment
 
@@ -222,7 +229,7 @@ The ImGui overlay exposes panels for:
 
 ## Architecture Notes
 
-The current codebase should be understood as two conceptual layers:
+The current codebase should be understood as three conceptual layers:
 
 ```txt
 C++ Research Viewer
@@ -232,9 +239,16 @@ C++ Research Viewer
   - file dialogs
   - debug interaction
 
-C++ Vulkan Renderer Backend
+Renderer Orchestration Layer
+  - RenderFramePacket
+  - RenderSettings
+  - DrawCommand
+  - frame submission flow
+  - renderer-owned scene/resource coordination
+
+C++ Vulkan Pass/Backend Layer
   - Vulkan resources
-  - render passes
+  - pass objects
   - shaders/pipelines
   - frame synchronization
   - GPU profiling
@@ -245,8 +259,8 @@ The viewer is useful and should remain, but it is not the final engine/editor la
 
 Future work should gradually move toward:
 
-- grouped renderer settings structs
-- internal frame packet abstraction
+- grouped renderer settings structs as the dominant state handoff
+- internal frame packet abstraction as the primary submission path
 - resource handles for mesh/material/texture objects
 - clearer pass ownership
 - explicit resize pathway
@@ -307,19 +321,17 @@ Agent/project guidance:
 
 Recommended next engineering direction:
 
-1. Stabilize current renderer baseline.
-2. Document current frame flow and pass flow.
-3. Separate viewer panel code from `main.cpp`.
-4. Introduce grouped renderer settings structs.
-5. Introduce an internal `RenderFramePacket` concept.
-6. Extract post-processing pass ownership, starting with tone mapping.
-7. Implement SMAA as explicit post-process passes.
-8. Add VRS as an optional, capability-driven feature.
-9. Introduce renderer resource handles before real external host integration.
-10. Draft the C ABI only after internal concepts stabilize.
+1. Consolidate `RenderFramePacket` as the main internal submission path.
+2. Decide how `DrawCommand` participates in scene/frame submission.
+3. Continue extracting pass-local ownership from `Renderer`.
+4. Document capability-driven optional feature policy for unsupported platforms.
+5. Implement SMAA as the first major feature on top of the new pass architecture.
+6. Add VRS only as an optional, capability-gated research path.
+7. Introduce stronger resource-handle semantics before real external host integration.
+8. Draft the public C ABI only after internal concepts stabilize.
 
 ## Status
 
 This is an active renderer research and architecture project. APIs, file structure, and feature boundaries are expected to evolve.
 
-The current priority is to keep renderer development fast while documenting architectural decisions clearly enough that the project can grow into an engine-ready renderer backend later.
+The current priority is to keep renderer development fast while consolidating the new architecture direction clearly enough that the project can grow into an engine-ready renderer backend later.
