@@ -182,9 +182,39 @@ else()
 endif()
 
 if(APPLE)
+    find_library(POR_VULKAN_LOADER_LIBRARY
+        NAMES vulkan.1 vulkan
+        PATHS
+            "${HOMEBREW_PREFIX}/lib"
+            "$ENV{VULKAN_SDK}/lib"
+        NO_DEFAULT_PATH
+    )
+    find_file(POR_MOLTENVK_ICD_JSON
+        NAMES MoltenVK_icd.json
+        PATHS
+            "${HOMEBREW_PREFIX}/etc/vulkan/icd.d"
+            "$ENV{VULKAN_SDK}/share/vulkan/icd.d"
+        NO_DEFAULT_PATH
+    )
+
     target_compile_definitions(ProjectOptimizedRenderer PRIVATE
         VK_USE_PLATFORM_MACOS_MVK
     )
+    if(POR_VULKAN_LOADER_LIBRARY)
+        target_compile_definitions(ProjectOptimizedRenderer PRIVATE
+            POR_VULKAN_LOADER_PATH="${POR_VULKAN_LOADER_LIBRARY}"
+        )
+    endif()
+    if(POR_MOLTENVK_ICD_JSON)
+        target_compile_definitions(ProjectOptimizedRenderer PRIVATE
+            POR_MOLTENVK_ICD_JSON_PATH="${POR_MOLTENVK_ICD_JSON}"
+        )
+    endif()
+    if(MOLTEN_VK_LIBRARY)
+        target_compile_definitions(ProjectOptimizedRenderer PRIVATE
+            POR_MOLTENVK_LIBRARY_PATH="${MOLTEN_VK_LIBRARY}"
+        )
+    endif()
 elseif(WIN32)
     target_compile_definitions(ProjectOptimizedRenderer PRIVATE
         VK_USE_PLATFORM_WIN32_KHR

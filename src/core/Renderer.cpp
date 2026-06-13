@@ -626,34 +626,24 @@ void Renderer::createPbrPipeline()
         m_materialSetLayout,  // set 1
     };
 
-    // Three non-overlapping push constant ranges:
-    //   bytes  0–63:  mat4 model matrix (vertex stage)
-    //   bytes 64–95:  MaterialPushConstants — factors (fragment stage)
-    //   bytes 96–99:  uint cascadeIndex (vertex+fragment — shadow pass selects lightViewProj)
-    const std::array<VkPushConstantRange, 3> pushRanges{{
-        {
-            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
-            .offset     = shader_interface::kModelMatrixPcOffset,
-            .size       = sizeof(glm::mat4),
-        },
-        {
-            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-            .offset     = shader_interface::kMaterialPcOffset,
-            .size       = sizeof(MaterialPushConstants),
-        },
-        {
-            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-            .offset     = shader_interface::kCascadeIndexPcOffset,
-            .size       = sizeof(uint32_t),
-        },
-    }};
+    // Shadow and PBR shaders share one physical push-constant block:
+    //   bytes  0–63 : model matrix
+    //   bytes 64–95 : material factors
+    //   bytes 96–99 : cascade index
+    // Keep this as one vertex+fragment range so separate push calls for model,
+    // material, and cascade index stay validation-clean on all drivers.
+    const VkPushConstantRange pushRange{
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        .offset     = shader_interface::kModelMatrixPcOffset,
+        .size       = shader_interface::kCascadeIndexPcOffset + sizeof(uint32_t),
+    };
 
     const VkPipelineLayoutCreateInfo layoutInfo{
         .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount         = static_cast<uint32_t>(allSetLayouts.size()),
         .pSetLayouts            = allSetLayouts.data(),
-        .pushConstantRangeCount = static_cast<uint32_t>(pushRanges.size()),
-        .pPushConstantRanges    = pushRanges.data(),
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges    = &pushRange,
     };
     VK_CHECK(vkCreatePipelineLayout(m_ctx.getDevice(), &layoutInfo, nullptr, &m_pipelineLayout));
 
@@ -1535,7 +1525,8 @@ void Renderer::render()
 
         const MeshRenderData& mesh = m_meshes[draw.mesh.index];
 
-        vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
+        vkCmdPushConstants(cmd, m_pipelineLayout,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            shader_interface::kModelMatrixPcOffset, sizeof(glm::mat4), &draw.transform);
 
         if (draw.material.isValid() &&
@@ -1557,12 +1548,14 @@ void Renderer::render()
                 .alphaCutoff      = (mat.alphaMode == Material::AlphaMode::Mask)
                                     ? mat.alphaCutoff : 0.0f,
             };
-            vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
+            vkCmdPushConstants(cmd, m_pipelineLayout,
+                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                shader_interface::kMaterialPcOffset, sizeof(MaterialPushConstants), &matPC);
         } else {
             // No material — push default white/neutral factors.
             const MaterialPushConstants defaultPC{};
-            vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
+            vkCmdPushConstants(cmd, m_pipelineLayout,
+                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                shader_interface::kMaterialPcOffset, sizeof(MaterialPushConstants), &defaultPC);
         }
 

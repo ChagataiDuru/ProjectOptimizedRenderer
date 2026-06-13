@@ -1,8 +1,83 @@
 #include "core/Window.h"
 
+#include <SDL3/SDL_vulkan.h>
 #include <spdlog/spdlog.h>
+#include <cstdlib>
 #include <stdexcept>
+#include <string_view>
 #include <string>
+
+#if defined(__APPLE__)
+#include <array>
+#include <filesystem>
+#endif
+
+namespace {
+
+#if defined(__APPLE__)
+const char* selectMacVulkanLoaderPath()
+{
+#ifdef POR_VULKAN_LOADER_PATH
+    constexpr std::string_view configuredPath = POR_VULKAN_LOADER_PATH;
+    if (!configuredPath.empty() && std::filesystem::exists(configuredPath)) {
+        return POR_VULKAN_LOADER_PATH;
+    }
+#endif
+
+    static constexpr std::array<const char*, 4> kFallbackPaths{{
+        "/opt/homebrew/lib/libvulkan.1.dylib",
+        "/opt/homebrew/lib/libvulkan.dylib",
+        "/usr/local/lib/libvulkan.1.dylib",
+        "/usr/local/lib/libvulkan.dylib",
+    }};
+
+    for (const char* candidate : kFallbackPaths) {
+        if (std::filesystem::exists(candidate)) {
+            return candidate;
+        }
+    }
+
+    return nullptr;
+}
+
+const char* selectMacMoltenVkIcdPath()
+{
+#ifdef POR_MOLTENVK_ICD_JSON_PATH
+    constexpr std::string_view configuredPath = POR_MOLTENVK_ICD_JSON_PATH;
+    if (!configuredPath.empty() && std::filesystem::exists(configuredPath)) {
+        return POR_MOLTENVK_ICD_JSON_PATH;
+    }
+#endif
+
+    static constexpr std::array<const char*, 3> kFallbackPaths{{
+        "/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json",
+        "/opt/homebrew/Cellar/molten-vk/1.4.1/etc/vulkan/icd.d/MoltenVK_icd.json",
+        "/usr/local/share/vulkan/icd.d/MoltenVK_icd.json",
+    }};
+
+    for (const char* candidate : kFallbackPaths) {
+        if (std::filesystem::exists(candidate)) {
+            return candidate;
+        }
+    }
+
+    return nullptr;
+}
+
+void configureMacVulkanEnvironment()
+{
+    if (const char* icdPath = selectMacMoltenVkIcdPath()) {
+        if (setenv("VK_DRIVER_FILES", icdPath, 1) != 0 ||
+            setenv("VK_ICD_FILENAMES", icdPath, 1) != 0) {
+            throw std::runtime_error(
+                std::string("Failed to pin MoltenVK ICD manifest: ") + icdPath);
+        }
+        spdlog::info("Vulkan ICD pinned to {}", icdPath);
+    }
+}
+#endif
+
+} // namespace
 
 Window::Window(uint32_t width, uint32_t height, const char* title)
     : m_width(width), m_height(height), m_title(title)
@@ -16,8 +91,31 @@ Window::~Window()
 
 void Window::init()
 {
+#if defined(__APPLE__)
+    configureMacVulkanEnvironment();
+#endif
+
     if (!SDL_Init(SDL_INIT_VIDEO))
         throw std::runtime_error(std::string("SDL_Init failed: ") + SDL_GetError());
+
+#if defined(__APPLE__)
+    const char* vulkanLibraryPath = selectMacVulkanLoaderPath();
+    if (!vulkanLibraryPath) {
+#ifdef POR_MOLTENVK_LIBRARY_PATH
+        vulkanLibraryPath = POR_MOLTENVK_LIBRARY_PATH;
+#endif
+    }
+
+    if (vulkanLibraryPath) {
+        if (!SDL_Vulkan_LoadLibrary(vulkanLibraryPath)) {
+            throw std::runtime_error(
+                std::string("SDL_Vulkan_LoadLibrary failed for '") +
+                vulkanLibraryPath + "': " + SDL_GetError());
+        }
+        m_vulkanLibraryLoaded = true;
+        spdlog::info("SDL Vulkan loader pinned to {}", vulkanLibraryPath);
+    }
+#endif
 
     m_window = SDL_CreateWindow(
         m_title,
@@ -44,6 +142,10 @@ void Window::shutdown()
     if (m_window) {
         SDL_DestroyWindow(m_window);
         m_window = nullptr;
+    }
+    if (m_vulkanLibraryLoaded) {
+        SDL_Vulkan_UnloadLibrary();
+        m_vulkanLibraryLoaded = false;
     }
     SDL_Quit();
 }

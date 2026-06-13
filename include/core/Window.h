@@ -29,4 +29,5 @@ private:
     uint32_t    m_height;
     const char* m_title;
     bool        m_shouldClose = false;
+    bool        m_vulkanLibraryLoaded = false;
 };

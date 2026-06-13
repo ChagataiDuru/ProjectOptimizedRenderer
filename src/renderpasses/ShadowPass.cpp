@@ -991,7 +991,8 @@ void ShadowPass::record(VkCommandBuffer cmd,
                 ? (alphaMasked ? m_shadowVsmAlphaPipeline : m_shadowVsmPipeline)
                 : (alphaMasked ? m_shadowAlphaPipeline : m_shadowPipeline));
 
-            vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
+            vkCmdPushConstants(cmd, m_pipelineLayout,
+                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                shader_interface::kModelMatrixPcOffset, sizeof(glm::mat4), &draw.transform);
 
             if (alphaMasked) {
@@ -1006,7 +1007,8 @@ void ShadowPass::record(VkCommandBuffer cmd,
                     .roughnessFactor = mat.roughnessFactor,
                     .alphaCutoff = mat.alphaCutoff,
                 };
-                vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                vkCmdPushConstants(cmd, m_pipelineLayout,
+                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                    shader_interface::kMaterialPcOffset, sizeof(matPC), &matPC);
             }
 
