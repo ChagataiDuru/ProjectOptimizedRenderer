@@ -897,6 +897,7 @@ void ShadowPass::record(VkCommandBuffer cmd,
                         const Buffer& vertexBuffer,
                         const Buffer& indexBuffer,
                         const std::vector<DrawCommand>& drawCommands,
+                        const std::vector<SceneDrawBounds>& drawBounds,
                         const std::vector<MeshRenderData>& meshes,
                         const std::vector<Material>& materials,
                         const std::vector<VkDescriptorSet>& materialSets,
@@ -993,12 +994,16 @@ void ShadowPass::record(VkCommandBuffer cmd,
             }
         };
 
-        for (const DrawCommand& draw : drawCommands) {
+        for (size_t drawIndex = 0; drawIndex < drawCommands.size(); ++drawIndex) {
+            const DrawCommand& draw = drawCommands[drawIndex];
             if (!draw.mesh.isValid() || draw.mesh.index >= meshes.size()) continue;
             const MeshRenderData& mesh = meshes[draw.mesh.index];
+            const SceneDrawBounds* bounds =
+                (drawIndex < drawBounds.size()) ? &drawBounds[drawIndex] : nullptr;
             if (m_settings.enableCasterCulling &&
+                bounds != nullptr &&
                 !m_shadowCullPlanes[c].empty() &&
-                !aabbSurvivesCulling(mesh.worldBoundsMin, mesh.worldBoundsMax, m_shadowCullPlanes[c])) {
+                !aabbSurvivesCulling(bounds->worldMin, bounds->worldMax, m_shadowCullPlanes[c])) {
                 ++culled;
                 continue;
             }

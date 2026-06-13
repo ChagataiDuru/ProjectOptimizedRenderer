@@ -48,10 +48,13 @@ public:
     void endFrame();
 
     void submitFrame(const RenderFramePacket& packet);
+    // Sticky scene submission remains active until the caller submits a replacement packet.
     void submitScene(RenderScenePacket scene);
 
     // Unload current model and load a new glTF at the given path.
-    // Destroys model-dependent GPU resources, loads new model, recreates descriptors.
+    // Destroys model-dependent GPU resources, loads new model data, and recreates
+    // renderer-owned descriptors. The caller must submit a new RenderScenePacket
+    // after this returns to reactivate scene content.
     // Must be called on the main thread while no frames are in flight.
     void reloadModel(const std::string& modelPath);
 
@@ -104,6 +107,7 @@ private:
     using ShadowCascadeUBO = shader_interface::ShadowCascadeUBO;
     using ClusterMetadataUBO = shader_interface::ClusterMetadataUBO;
 
+    // Frame-owned resources that are rewritten as the current slot advances.
     struct FrameResources {
         explicit FrameResources(VulkanContext& ctx)
             : cameraUBO(ctx)
@@ -120,7 +124,13 @@ private:
         Buffer cameraUBO;
         Buffer lightUBO;
         Buffer clusterMetadataUBO;
+        // Frame-owned scene descriptor set binds this slot's UBOs plus shared scene inputs.
         VkDescriptorSet sceneDescriptorSet = VK_NULL_HANDLE;
+    };
+
+    struct ActiveSceneState {
+        RenderScenePacket submission;
+        std::vector<SceneDrawBounds> drawBounds;
     };
 
     void render();
@@ -128,16 +138,20 @@ private:
     void createResizeDependentResources();
     void destroyResizeDependentResources();
     void recreateResizeDependentResources();
+    void refreshResizeDependentBindings();
     void createPbrPipeline();
     void loadImportedModel(const std::string& modelPath);
-    RenderScenePacket rebuildSceneSubmissionFromImportedModel();
     void destroyPipeline();
+    void destroyRendererDescriptorPools();
     void refreshRenderStats();
     void createFrameResources();
+    void applyFrameSubmission(const RenderFramePacket& packet);
+    void rebuildActiveSceneDrawBounds();
     void uploadCurrentFrameCameraState(const CameraData& camera);
     void uploadCurrentFrameLightState();
     void uploadActiveScenePointLights();
     void uploadCurrentClusterMetadata();
+    void uploadClusterMetadataForAllFrames();
 
     static std::vector<uint32_t> loadSpv(const std::string& path);
 
@@ -152,18 +166,26 @@ private:
     CommandBuffer  m_commandBuffer;
     FrameSync      m_frameSync;
 
-    // Geometry buffers
+    // Renderer-persistent uploaded geometry/resources.
     Buffer m_vertexBuffer;
     Buffer m_indexBuffer;
+    SamplerCache         m_samplerCache;
+    std::vector<Texture> m_textures;
+    Texture              m_fallbackWhite;
 
-    // Imported glTF data is a bridge input, not the renderer's scene model.
+    // Imported glTF bridge input plus renderer-owned persistent mesh/material metadata.
     Model                       m_importedModel;
     SceneInfo                   m_sceneInfo;
     std::vector<MeshRenderData> m_meshRenderData;
     std::vector<Material>       m_renderMaterials;
-    RenderScenePacket           m_activeScene;
 
-    // Pipeline resources
+    // Sticky scene submission state derived from caller-owned scene packets.
+    ActiveSceneState m_activeScene;
+
+    // Frame-slot resources.
+    std::vector<FrameResources> m_frameResources;
+
+    // Renderer-shared descriptor layouts and PBR pipeline state.
     VkPipeline            m_pipeline           = VK_NULL_HANDLE;
     VkPipeline            m_wireframePipeline  = VK_NULL_HANDLE;
     VkPipeline            m_normalsPipeline    = VK_NULL_HANDLE;
@@ -174,10 +196,12 @@ private:
     VkShaderModule        m_fragModule         = VK_NULL_HANDLE;
     VkShaderModule        m_normalsFragModule  = VK_NULL_HANDLE;
 
-    // Renderer-owned material bindings produced from imported material resources.
+    // Renderer-owned descriptor pools/sets.
+    VkDescriptorPool m_frameSceneDescriptorPool = VK_NULL_HANDLE;
+    VkDescriptorPool m_materialDescriptorPool   = VK_NULL_HANDLE;
     std::vector<VkDescriptorSet> m_materialDescriptorSets;
 
-    std::vector<FrameResources> m_frameResources;
+    // Scene-submission and clustered-light GPU resources.
     Buffer           m_pointLightBuffer;
     Buffer           m_clusterGridBuffer;
     Buffer           m_clusterLightIndexBuffer;
@@ -187,28 +211,36 @@ private:
     uint32_t         m_clusterCountZ = shader_interface::kClusterZSlices;
     uint32_t         m_clusterCount = 0;
 
-    // Texture infrastructure
-    SamplerCache         m_samplerCache;
-    std::vector<Texture> m_textures;
-    Texture              m_fallbackWhite;
-
-    // Resize-dependent depth buffer (D32_SFLOAT, reverse-Z)
+    // Resize-dependent renderer images.
     Image            m_depthImage;
-
-    // Phase 5: resize-dependent HDR offscreen target (R16G16B16A16_SFLOAT, swapchain-sized)
     Image            m_hdrTarget;
-    // Image-independent sampler reused when the HDR target is recreated.
-    VkSampler        m_hdrSampler           = VK_NULL_HANDLE;
+    VkSampler        m_hdrSampler = VK_NULL_HANDLE;
 
-    TonemapPass      m_tonemapPass;
+    // Extracted passes keep their pass-local descriptors/pipelines internally.
+    TonemapPass               m_tonemapPass;
+    ShadowPass                m_shadowPass;
+    ClusteredLightCullingPass m_clusteredLightCullingPass;
+    SkyPass                   m_skyPass;
 
-    // Phase 5/6: tone map state (uploaded as TonemapPC push constant each frame)
+    // Cached from the last submitFrame() so per-frame uploads stay explicit and traceable.
+    ShadowSettings  m_shadowSettings;
+    glm::vec3       m_lightDirection   = glm::vec3(1.0f, 1.0f, 1.0f);
+    glm::vec3       m_lightColor       = glm::vec3(1.0f);
+    float           m_lightIntensity   = 1.0f;
+    float           m_ambientIntensity = 0.1f;
+    glm::mat4       m_viewMatrix       = glm::mat4(1.0f);
+    glm::mat4       m_projMatrix       = glm::mat4(1.0f);
+    float           m_cameraNearZ      = 0.01f;
+    float           m_cameraFarZ       = 1000.0f;
+    glm::vec3       m_cameraPos        = glm::vec3(0.0f);
     float   m_exposure         = 0.0f;  // EV offset; 0 = no change
     int32_t m_tonemapMode      = 0;     // 0=Reinhard, 1=AgX, 2=PBR Neutral
     int32_t m_splitScreenMode  = 0;     // 0=off, 1=on
     int32_t m_splitRightMode   = 1;     // comparison operator for right half (default AgX)
-
-    VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
+    bool    m_skyEnabled = true;   // sky drawn by default
+    int32_t m_skyMode    = 0;      // 0 = Procedural (Rayleigh+Mie), 1 = HDR Panorama
+    bool    m_wireframe   = false;
+    bool    m_showNormals = false;
 
     // Phase 2.5: optional ImGui overlay
     ImGuiManager*    m_imguiManager   = nullptr;
@@ -218,43 +250,18 @@ private:
     Screenshot   m_screenshot;
     RenderStats  m_renderStats;
 
-    ShadowPass      m_shadowPass;
-    ClusteredLightCullingPass m_clusteredLightCullingPass;
-    ShadowSettings  m_shadowSettings;
-    glm::vec3       m_lightDirection   = glm::vec3(1.0f, 1.0f, 1.0f);
-
-    // Stored to re-upload LightUBO when debug toggle changes
-    glm::vec3 m_lightColor        = glm::vec3(1.0f);
-    float     m_lightIntensity    = 1.0f;
-    float     m_ambientIntensity  = 0.1f;
-
-    // Cached from the last submitFrame() so CSM split computation stays in sync.
-    glm::mat4 m_viewMatrix  = glm::mat4(1.0f);
-    glm::mat4 m_projMatrix  = glm::mat4(1.0f);
-    float     m_cameraNearZ = 0.01f;
-    float     m_cameraFarZ  = 1000.0f;
-
-    SkyPass m_skyPass;
-    bool    m_skyEnabled = true;   // sky drawn by default
-    int32_t m_skyMode    = 0;      // 0 = Procedural (Rayleigh+Mie),  1 = HDR Panorama
-
     bool        m_screenshotRequested = false;
     std::string m_screenshotFilename;
 
-    // Rendering toggles (UI-driven; applied when pipeline variants are added)
-    bool m_wireframe   = false;
-    bool m_showNormals = false;
-
-    glm::vec3 m_cameraPos = glm::vec3(0.0f);
-
-    void updateSceneShadowDescriptors();
     void createClusteredLightResources();
     void destroyClusteredLightResources();
     void resizeClusteredLightResources();
-    void updateSceneClusterDescriptors();
+    void createFrameSceneDescriptorPool();
+    void allocateFrameSceneDescriptorSets();
+    void rewriteFrameSceneShadowBindings();
+    void rewriteFrameSceneClusterBindings();
+    void createMaterialDescriptorPool();
+    void allocateMaterialDescriptorSets();
     void createDepthImage();
     void createHdrTarget();
-    void createSceneDescriptorPool();
-    void createSceneDescriptorSets();
-    void createMaterialDescriptorSets();
 };

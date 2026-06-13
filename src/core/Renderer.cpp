@@ -52,21 +52,6 @@ static glm::vec3 safeNormalizeDirection(glm::vec3 v, glm::vec3 fallback)
     return v * glm::inversesqrt(len2);
 }
 
-static std::vector<shader_interface::GpuPointLight> buildDefaultScenePointLights(float normalizedRadius)
-{
-    const float r = std::max(normalizedRadius, 1.0f);
-    const float y = 1.8f;
-    const float radius = r * 0.45f;
-    const float intensity = 22.0f;
-
-    return {
-        { glm::vec4(-0.45f * r, y, -0.35f * r, radius), glm::vec4(1.0f, 0.45f, 0.30f, intensity) },
-        { glm::vec4( 0.45f * r, y, -0.35f * r, radius), glm::vec4(0.35f, 0.65f, 1.0f, intensity) },
-        { glm::vec4(-0.45f * r, y,  0.35f * r, radius), glm::vec4(0.45f, 1.0f, 0.55f, intensity) },
-        { glm::vec4( 0.45f * r, y,  0.35f * r, radius), glm::vec4(1.0f, 0.80f, 0.35f, intensity) },
-    };
-}
-
 static VkShaderModule makeShaderModule(VkDevice device, const std::vector<uint32_t>& code)
 {
     const VkShaderModuleCreateInfo info{
@@ -146,7 +131,6 @@ void Renderer::init()
     m_sceneInfo = computeSceneInfo(m_importedModel.boundsMin, m_importedModel.boundsMax);
     spdlog::info("Scene normalized: scale={:.4f}, radius={:.2f}",
                  m_sceneInfo.scaleFactor, m_sceneInfo.normalizedRadius);
-    submitScene(rebuildSceneSubmissionFromImportedModel());
 
     m_frameSync.init(kFramesInFlight);
     m_commandBuffer.init(m_ctx.getGraphicsQueueFamily(), kFramesInFlight);
@@ -160,10 +144,11 @@ void Renderer::init()
     createFrameResources();
     createClusteredLightResources();
     m_shadowPass.init(m_pipelineLayout, kFramesInFlight, SHADER_DIR);
-    createSceneDescriptorPool();
-    createSceneDescriptorSets();
-    createMaterialDescriptorSets();
-    uploadActiveScenePointLights();
+    createFrameSceneDescriptorPool();
+    allocateFrameSceneDescriptorSets();
+    createMaterialDescriptorPool();
+    allocateMaterialDescriptorSets();
+    refreshResizeDependentBindings();
     m_gpuTimer.init(24);
 
     // Populate static render stats (counts that don't change after load)
@@ -183,15 +168,7 @@ void Renderer::reloadModel(const std::string& modelPath)
     vkDeviceWaitIdle(m_ctx.getDevice());
 
     // ── Destroy model-dependent resources ────────────────────────────────────────
-    // Descriptor pool destruction implicitly frees frame scene sets and material sets.
-    if (m_descriptorPool != VK_NULL_HANDLE) {
-        vkDestroyDescriptorPool(m_ctx.getDevice(), m_descriptorPool, nullptr);
-        m_descriptorPool = VK_NULL_HANDLE;
-    }
-    for (auto& frame : m_frameResources) {
-        frame.sceneDescriptorSet = VK_NULL_HANDLE;
-    }
-    m_materialDescriptorSets.clear();
+    destroyRendererDescriptorPools();
 
     for (auto& tex : m_textures)
         tex.destroy();
@@ -226,13 +203,13 @@ void Renderer::reloadModel(const std::string& modelPath)
     m_sceneInfo = computeSceneInfo(m_importedModel.boundsMin, m_importedModel.boundsMax);
     spdlog::info("Scene normalized: scale={:.4f}, radius={:.2f}",
                  m_sceneInfo.scaleFactor, m_sceneInfo.normalizedRadius);
-    submitScene(rebuildSceneSubmissionFromImportedModel());
 
     // ── Recreate descriptors for the new model ───────────────────────────────────
-    createSceneDescriptorPool();
-    createSceneDescriptorSets();
-    createMaterialDescriptorSets();
-    uploadActiveScenePointLights();
+    createFrameSceneDescriptorPool();
+    allocateFrameSceneDescriptorSets();
+    createMaterialDescriptorPool();
+    allocateMaterialDescriptorSets();
+    refreshResizeDependentBindings();
 
     // ── Update render stats ──────────────────────────────────────────────────────
     refreshRenderStats();
@@ -241,6 +218,7 @@ void Renderer::reloadModel(const std::string& modelPath)
                  m_renderStats.meshCount, m_renderStats.materialCount,
                  m_renderStats.textureCount,
                  m_renderStats.textureMemoryBytes / (1024.0f * 1024.0f));
+    spdlog::info("Model resources reloaded; waiting for caller to resubmit scene content");
 }
 
 void Renderer::shutdown()
@@ -259,6 +237,7 @@ void Renderer::shutdown()
 
     m_skyPass.shutdown(m_ctx.getDevice());
     m_clusteredLightCullingPass.shutdown(m_ctx.getDevice());
+    m_shadowPass.shutdown(m_ctx.getDevice());
 
     destroyPipeline();
 
@@ -272,10 +251,9 @@ void Renderer::shutdown()
     m_activeScene = {};
     m_samplerCache.shutdown();
 
-    m_shadowPass.shutdown(m_ctx.getDevice());
-
     // Destroy GPU resources that hold VMA allocations
     destroyClusteredLightResources();
+    destroyRendererDescriptorPools();
     m_frameResources.clear();
     m_indexBuffer.destroy();
     m_vertexBuffer.destroy();
@@ -304,7 +282,7 @@ void Renderer::refreshRenderStats()
 void Renderer::loadImportedModel(const std::string& modelPath)
 {
     // Imported asset data is the bridge input. Renderer-owned resources and the
-    // sticky RenderScenePacket are derived from this model after upload.
+    // sticky RenderScenePacket are derived later when the caller submits scene content.
     m_importedModel = GLTFLoader::loadGLTF(modelPath);
     m_meshRenderData.clear();
     m_renderMaterials = m_importedModel.materials;
@@ -382,54 +360,6 @@ void Renderer::loadImportedModel(const std::string& modelPath)
 
     spdlog::info("Model uploaded: {} meshes, {} vertices, {} indices",
                  m_importedModel.meshes.size(), allVertices.size(), allIndices.size());
-}
-
-RenderScenePacket Renderer::rebuildSceneSubmissionFromImportedModel()
-{
-    // Imported mesh/material data stays a bridge. This step builds explicit
-    // scene submission from that bridge without making the imported model the
-    // renderer's scene representation.
-    RenderScenePacket scene{};
-    scene.draws.reserve(m_importedModel.meshes.size());
-
-    const glm::mat4& transform = m_sceneInfo.modelMatrix;
-
-    for (size_t i = 0; i < m_importedModel.meshes.size() && i < m_meshRenderData.size(); ++i) {
-        const Mesh& importedMesh = m_importedModel.meshes[i];
-        MeshRenderData& meshRenderData = m_meshRenderData[i];
-
-        const glm::vec3& lo = importedMesh.boundsMin;
-        const glm::vec3& hi = importedMesh.boundsMax;
-        glm::vec3 wMin(std::numeric_limits<float>::max());
-        glm::vec3 wMax(-std::numeric_limits<float>::max());
-
-        for (int j = 0; j < 8; ++j) {
-            const glm::vec3 corner((j & 1) ? hi.x : lo.x,
-                                   (j & 2) ? hi.y : lo.y,
-                                   (j & 4) ? hi.z : lo.z);
-            const glm::vec3 world = glm::vec3(transform * glm::vec4(corner, 1.0f));
-            wMin = glm::min(wMin, world);
-            wMax = glm::max(wMax, world);
-        }
-
-        meshRenderData.worldBoundsMin = wMin;
-        meshRenderData.worldBoundsMax = wMax;
-
-        MaterialHandle material{};
-        if (importedMesh.materialIndex >= 0 &&
-            importedMesh.materialIndex < static_cast<int32_t>(m_renderMaterials.size())) {
-            material.index = static_cast<uint32_t>(importedMesh.materialIndex);
-        }
-
-        scene.draws.push_back(DrawCommand{
-            .transform = transform,
-            .mesh = MeshHandle{ static_cast<uint32_t>(i) },
-            .material = material,
-        });
-    }
-
-    scene.pointLights = buildDefaultScenePointLights(m_sceneInfo.normalizedRadius);
-    return scene;
 }
 
 // ── Pipeline ──────────────────────────────────────────────────────────────────
@@ -727,13 +657,6 @@ void Renderer::createPbrPipeline()
 void Renderer::destroyPipeline()
 {
     const VkDevice dev = m_ctx.getDevice();
-    // Descriptor pool destruction implicitly frees all sets allocated from it.
-    // Pool destruction implicitly frees all allocated descriptor sets.
-    if (m_descriptorPool     != VK_NULL_HANDLE) { vkDestroyDescriptorPool(dev, m_descriptorPool, nullptr);         m_descriptorPool    = VK_NULL_HANDLE; }
-    for (auto& frame : m_frameResources) {
-        frame.sceneDescriptorSet = VK_NULL_HANDLE;
-    }
-    m_materialDescriptorSets.clear();
     if (m_vertModule         != VK_NULL_HANDLE) { vkDestroyShaderModule(dev, m_vertModule, nullptr);               m_vertModule        = VK_NULL_HANDLE; }
     if (m_fragModule         != VK_NULL_HANDLE) { vkDestroyShaderModule(dev, m_fragModule, nullptr);               m_fragModule        = VK_NULL_HANDLE; }
     if (m_normalsFragModule  != VK_NULL_HANDLE) { vkDestroyShaderModule(dev, m_normalsFragModule, nullptr);        m_normalsFragModule = VK_NULL_HANDLE; }
@@ -743,6 +666,26 @@ void Renderer::destroyPipeline()
     if (m_pipelineLayout     != VK_NULL_HANDLE) { vkDestroyPipelineLayout(dev, m_pipelineLayout, nullptr);         m_pipelineLayout    = VK_NULL_HANDLE; }
     if (m_materialSetLayout  != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(dev, m_materialSetLayout, nullptr); m_materialSetLayout = VK_NULL_HANDLE; }
     if (m_sceneSetLayout     != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(dev, m_sceneSetLayout, nullptr);    m_sceneSetLayout    = VK_NULL_HANDLE; }
+}
+
+void Renderer::destroyRendererDescriptorPools()
+{
+    const VkDevice dev = m_ctx.getDevice();
+    if (dev == VK_NULL_HANDLE) return;
+
+    if (m_frameSceneDescriptorPool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(dev, m_frameSceneDescriptorPool, nullptr);
+        m_frameSceneDescriptorPool = VK_NULL_HANDLE;
+    }
+    for (auto& frame : m_frameResources) {
+        frame.sceneDescriptorSet = VK_NULL_HANDLE;
+    }
+
+    if (m_materialDescriptorPool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(dev, m_materialDescriptorPool, nullptr);
+        m_materialDescriptorPool = VK_NULL_HANDLE;
+    }
+    m_materialDescriptorSets.clear();
 }
 
 Renderer::FrameResources& Renderer::currentFrameResources()
@@ -786,7 +729,7 @@ Renderer::ClusterMetadataUBO Renderer::buildCurrentClusterMetadata() const
     return ClusterMetadataUBO{
         glm::uvec4(m_clusterCountX, m_clusterCountY, m_clusterCountZ,
                    shader_interface::kMaxLightsPerCluster),
-        glm::uvec4(static_cast<uint32_t>(std::min(m_activeScene.pointLights.size(),
+        glm::uvec4(static_cast<uint32_t>(std::min(m_activeScene.submission.pointLights.size(),
                                                   static_cast<size_t>(m_maxPointLights))),
                    0u, 0u, 0u),
         glm::vec4(static_cast<float>(ext.width),
@@ -818,6 +761,70 @@ void Renderer::createFrameResources()
     }
 
     spdlog::info("Frame resources created for {} frames in flight", kFramesInFlight);
+}
+
+void Renderer::rebuildActiveSceneDrawBounds()
+{
+    m_activeScene.drawBounds.clear();
+    m_activeScene.drawBounds.reserve(m_activeScene.submission.draws.size());
+
+    for (const DrawCommand& draw : m_activeScene.submission.draws) {
+        if (!draw.mesh.isValid() || draw.mesh.index >= m_importedModel.meshes.size()) {
+            m_activeScene.drawBounds.push_back({});
+            continue;
+        }
+
+        const Mesh& importedMesh = m_importedModel.meshes[draw.mesh.index];
+        const glm::vec3& lo = importedMesh.boundsMin;
+        const glm::vec3& hi = importedMesh.boundsMax;
+        glm::vec3 worldMin(std::numeric_limits<float>::max());
+        glm::vec3 worldMax(-std::numeric_limits<float>::max());
+
+        for (int cornerIndex = 0; cornerIndex < 8; ++cornerIndex) {
+            const glm::vec3 corner((cornerIndex & 1) ? hi.x : lo.x,
+                                   (cornerIndex & 2) ? hi.y : lo.y,
+                                   (cornerIndex & 4) ? hi.z : lo.z);
+            const glm::vec3 world = glm::vec3(draw.transform * glm::vec4(corner, 1.0f));
+            worldMin = glm::min(worldMin, world);
+            worldMax = glm::max(worldMax, world);
+        }
+
+        m_activeScene.drawBounds.push_back({
+            .worldMin = worldMin,
+            .worldMax = worldMax,
+        });
+    }
+}
+
+void Renderer::applyFrameSubmission(const RenderFramePacket& packet)
+{
+    uploadCurrentFrameCameraState(packet.camera);
+    m_lightDirection   = safeNormalizeDirection(packet.light.direction, glm::vec3(0.577f));
+    m_lightColor       = packet.light.color;
+    m_lightIntensity   = packet.light.intensity;
+    m_ambientIntensity = packet.light.ambient;
+    m_shadowSettings   = packet.shadow;
+
+    m_shadowPass.updateCamera(m_viewMatrix, m_projMatrix, m_cameraNearZ, m_cameraFarZ, m_cameraPos);
+    m_shadowPass.updateLightDirection(m_lightDirection);
+    const bool shadowResourcesChanged = m_shadowPass.updateSettings(m_shadowSettings);
+    const bool shadowDescriptorsDirty = m_shadowPass.consumeDescriptorDirty();
+    if (shadowResourcesChanged || shadowDescriptorsDirty) {
+        rewriteFrameSceneShadowBindings();
+    }
+    uploadCurrentFrameLightState();
+    uploadCurrentClusterMetadata();
+
+    m_tonemapMode     = packet.tonemap.mode;
+    m_exposure        = packet.tonemap.exposure;
+    m_splitScreenMode = packet.tonemap.splitScreen ? 1 : 0;
+    m_splitRightMode  = packet.tonemap.splitRightMode;
+
+    m_skyEnabled = packet.sky.enabled;
+    m_skyMode    = packet.sky.mode;
+
+    m_wireframe   = packet.debug.wireframe;
+    m_showNormals = packet.debug.showNormals;
 }
 
 void Renderer::uploadCurrentFrameCameraState(const CameraData& camera)
@@ -880,14 +887,6 @@ void Renderer::resizeClusteredLightResources()
         static_cast<VkDeviceSize>(m_clusterCount) * shader_interface::kMaxLightsPerCluster * sizeof(uint32_t),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
-    updateSceneClusterDescriptors();
-    if (!m_frameResources.empty()) {
-        const ClusterMetadataUBO metadata = buildCurrentClusterMetadata();
-        for (auto& frame : m_frameResources) {
-            frame.clusterMetadataUBO.upload(&metadata, sizeof(metadata));
-        }
-    }
-
     spdlog::info("Cluster grid resized: {}x{}x{} ({} clusters)",
                  m_clusterCountX, m_clusterCountY, m_clusterCountZ, m_clusterCount);
 }
@@ -897,9 +896,9 @@ void Renderer::uploadActiveScenePointLights()
     if (m_pointLightBuffer.getBuffer() == VK_NULL_HANDLE) return;
 
     std::vector<shader_interface::GpuPointLight> uploadData(m_maxPointLights);
-    const size_t copyCount = std::min(m_activeScene.pointLights.size(), uploadData.size());
+    const size_t copyCount = std::min(m_activeScene.submission.pointLights.size(), uploadData.size());
     if (copyCount > 0) {
-        std::copy_n(m_activeScene.pointLights.data(), copyCount, uploadData.data());
+        std::copy_n(m_activeScene.submission.pointLights.data(), copyCount, uploadData.data());
     }
     m_pointLightBuffer.upload(uploadData.data(),
                               static_cast<VkDeviceSize>(uploadData.size() * sizeof(uploadData[0])));
@@ -912,7 +911,17 @@ void Renderer::uploadCurrentClusterMetadata()
     currentFrameResources().clusterMetadataUBO.upload(&metadata, sizeof(metadata));
 }
 
-void Renderer::updateSceneClusterDescriptors()
+void Renderer::uploadClusterMetadataForAllFrames()
+{
+    if (m_frameResources.empty()) return;
+
+    const ClusterMetadataUBO metadata = buildCurrentClusterMetadata();
+    for (auto& frame : m_frameResources) {
+        frame.clusterMetadataUBO.upload(&metadata, sizeof(metadata));
+    }
+}
+
+void Renderer::rewriteFrameSceneClusterBindings()
 {
     if (m_frameResources.empty() ||
         m_pointLightBuffer.getBuffer() == VK_NULL_HANDLE ||
@@ -1000,7 +1009,6 @@ void Renderer::createResizeDependentResources()
 
     createDepthImage();
     createHdrTarget();
-    m_tonemapPass.resize(m_ctx.getDevice(), m_hdrSampler, m_hdrTarget.getImageView());
     if (m_pointLightBuffer.getBuffer() != VK_NULL_HANDLE) {
         resizeClusteredLightResources();
     }
@@ -1021,6 +1029,19 @@ void Renderer::recreateResizeDependentResources()
 {
     destroyResizeDependentResources();
     createResizeDependentResources();
+}
+
+void Renderer::refreshResizeDependentBindings()
+{
+    // Frame scene descriptor sets own the clustered-light buffer bindings that
+    // point at resize-dependent cluster resources.
+    rewriteFrameSceneClusterBindings();
+    uploadClusterMetadataForAllFrames();
+
+    // TonemapPass owns its descriptor set, but Renderer owns the HDR target it samples.
+    if (m_hdrTarget.getImageView() != VK_NULL_HANDLE) {
+        m_tonemapPass.resize(m_ctx.getDevice(), m_hdrSampler, m_hdrTarget.getImageView());
+    }
 }
 
 void Renderer::createHdrTarget()
@@ -1056,12 +1077,11 @@ void Renderer::loadHdrPanorama(const std::string& path)
     m_skyPass.loadHdrPanorama(m_ctx, path);
 }
 
-void Renderer::createSceneDescriptorPool()
+void Renderer::createFrameSceneDescriptorPool()
 {
-    const uint32_t materialCount = static_cast<uint32_t>(m_renderMaterials.size());
+    // Renderer owns one pool for frame scene descriptor sets because those sets
+    // are rewritten per frame slot and reference frame-local UBOs.
     const uint32_t sceneSetCount = kFramesInFlight;
-    const uint32_t maxSets = sceneSetCount + std::max(materialCount, 1u);
-    const uint32_t samplerCount = 2 * sceneSetCount + 3 * std::max(materialCount, 1u);
 
     const std::array<VkDescriptorPoolSize, 3> poolSizes{{
         {
@@ -1070,7 +1090,7 @@ void Renderer::createSceneDescriptorPool()
         },
         {
             .type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = samplerCount,
+            .descriptorCount = 2 * sceneSetCount,
         },
         {
             .type            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -1080,24 +1100,24 @@ void Renderer::createSceneDescriptorPool()
 
     const VkDescriptorPoolCreateInfo poolCI{
         .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets       = maxSets,
+        .maxSets       = sceneSetCount,
         .poolSizeCount = static_cast<uint32_t>(poolSizes.size()),
         .pPoolSizes    = poolSizes.data(),
     };
-    VK_CHECK(vkCreateDescriptorPool(m_ctx.getDevice(), &poolCI, nullptr, &m_descriptorPool));
+    VK_CHECK(vkCreateDescriptorPool(m_ctx.getDevice(), &poolCI, nullptr,
+                                    &m_frameSceneDescriptorPool));
 
-    spdlog::info("Descriptor pool created: {} scene/material sets, {} sampler descriptors",
-                 maxSets, samplerCount);
+    spdlog::info("Frame scene descriptor pool created for {} frame slots", sceneSetCount);
 }
 
-void Renderer::createSceneDescriptorSets()
+void Renderer::allocateFrameSceneDescriptorSets()
 {
     std::vector<VkDescriptorSetLayout> layouts(kFramesInFlight, m_sceneSetLayout);
     std::vector<VkDescriptorSet> descriptorSets(kFramesInFlight, VK_NULL_HANDLE);
 
     const VkDescriptorSetAllocateInfo allocInfo{
         .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-        .descriptorPool     = m_descriptorPool,
+        .descriptorPool     = m_frameSceneDescriptorPool,
         .descriptorSetCount = kFramesInFlight,
         .pSetLayouts        = layouts.data(),
     };
@@ -1232,10 +1252,10 @@ void Renderer::createSceneDescriptorSets()
                                static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
     }
 
-    spdlog::info("Scene descriptor sets allocated for {} frames in flight", kFramesInFlight);
+    spdlog::info("Frame scene descriptor sets allocated for {} frames in flight", kFramesInFlight);
 }
 
-void Renderer::updateSceneShadowDescriptors()
+void Renderer::rewriteFrameSceneShadowBindings()
 {
     if (m_frameResources.empty()) return;
 
@@ -1292,7 +1312,32 @@ void Renderer::updateSceneShadowDescriptors()
     }
 }
 
-void Renderer::createMaterialDescriptorSets()
+void Renderer::createMaterialDescriptorPool()
+{
+    // Renderer owns material texture descriptors alongside persistent uploaded materials.
+    const uint32_t materialCount = static_cast<uint32_t>(m_renderMaterials.size());
+    if (materialCount == 0) {
+        return;
+    }
+
+    const VkDescriptorPoolSize poolSize{
+        .type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = 3 * materialCount,
+    };
+
+    const VkDescriptorPoolCreateInfo poolCI{
+        .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets       = materialCount,
+        .poolSizeCount = 1,
+        .pPoolSizes    = &poolSize,
+    };
+    VK_CHECK(vkCreateDescriptorPool(m_ctx.getDevice(), &poolCI, nullptr,
+                                    &m_materialDescriptorPool));
+
+    spdlog::info("Material descriptor pool created for {} material sets", materialCount);
+}
+
+void Renderer::allocateMaterialDescriptorSets()
 {
     const uint32_t materialCount = static_cast<uint32_t>(m_renderMaterials.size());
     if (materialCount == 0) return;
@@ -1303,7 +1348,7 @@ void Renderer::createMaterialDescriptorSets()
 
     const VkDescriptorSetAllocateInfo allocInfo{
         .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-        .descriptorPool     = m_descriptorPool,
+        .descriptorPool     = m_materialDescriptorPool,
         .descriptorSetCount = materialCount,
         .pSetLayouts        = layouts.data(),
     };
@@ -1378,13 +1423,14 @@ void Renderer::createMaterialDescriptorSets()
     spdlog::info("Allocated {} material descriptor sets", materialCount);
 }
 
-
 void Renderer::handleResize()
 {
     const VkExtent2D oldExt = m_swapchain.getExtent();
 
+    // Resize contract:
+    // wait idle -> recreate swapchain -> recreate renderer resize resources
+    // -> refresh bindings that point at recreated resources -> keep scene/frame state coherent.
     vkDeviceWaitIdle(m_ctx.getDevice());
-    destroyResizeDependentResources();
 
     // Recreate swapchain. Passing current extent as hint; Swapchain::createSwapchain()
     // reads surface capabilities and uses cap.currentExtent when available (most platforms),
@@ -1393,7 +1439,10 @@ void Renderer::handleResize()
 
     const VkExtent2D newExt = m_swapchain.getExtent();
     if (newExt.width > 0 && newExt.height > 0) {
-        createResizeDependentResources();
+        recreateResizeDependentResources();
+        refreshResizeDependentBindings();
+    } else {
+        destroyResizeDependentResources();
     }
 
     spdlog::info("Renderer resized: {}x{} -> {}x{}", oldExt.width, oldExt.height,
@@ -1456,13 +1505,14 @@ void Renderer::render()
                         m_frameSync.getCurrentFrame(),
                         m_vertexBuffer,
                         m_indexBuffer,
-                        m_activeScene.draws,
+                        m_activeScene.submission.draws,
+                        m_activeScene.drawBounds,
                         m_meshRenderData,
                         m_renderMaterials,
                         m_materialDescriptorSets,
                         m_gpuTimer);
     if (m_shadowPass.consumeDescriptorDirty()) {
-        updateSceneShadowDescriptors();
+        rewriteFrameSceneShadowBindings();
     }
 
     m_gpuTimer.writeTimestamp(cmd, "ClusterCull_Begin");
@@ -1590,7 +1640,7 @@ void Renderer::render()
     vkCmdBindIndexBuffer(cmd, m_indexBuffer.getBuffer(), 0, VK_INDEX_TYPE_UINT32);
 
     // Push normalization model matrix (bytes 0–63): same transform as shadow pass.
-    for (const DrawCommand& draw : m_activeScene.draws) {
+    for (const DrawCommand& draw : m_activeScene.submission.draws) {
         if (!draw.mesh.isValid() || draw.mesh.index >= m_meshRenderData.size())
             continue;
 
@@ -1693,46 +1743,17 @@ void Renderer::requestScreenshot(const std::string& filename)
 void Renderer::submitScene(RenderScenePacket scene)
 {
     // Scene submission is sticky until the caller resubmits a new packet.
-    m_activeScene = std::move(scene);
+    // Renderer takes ownership of the moved packet and rebuilds scene-derived caches here.
+    m_activeScene.submission = std::move(scene);
+    rebuildActiveSceneDrawBounds();
     uploadActiveScenePointLights();
-    if (!m_frameResources.empty()) {
-        const ClusterMetadataUBO metadata = buildCurrentClusterMetadata();
-        for (auto& frame : m_frameResources) {
-            frame.clusterMetadataUBO.upload(&metadata, sizeof(metadata));
-        }
-    }
+    uploadClusterMetadataForAllFrames();
 }
 
 void Renderer::submitFrame(const RenderFramePacket& packet)
 {
     // Normal rendering uses a single per-frame packet handoff after beginFrame().
-    uploadCurrentFrameCameraState(packet.camera);
-    m_lightDirection    = safeNormalizeDirection(packet.light.direction, glm::vec3(0.577f));
-    m_lightColor        = packet.light.color;
-    m_lightIntensity    = packet.light.intensity;
-    m_ambientIntensity  = packet.light.ambient;
-    m_shadowSettings = packet.shadow;
-
-    m_shadowPass.updateCamera(m_viewMatrix, m_projMatrix, m_cameraNearZ, m_cameraFarZ, m_cameraPos);
-    m_shadowPass.updateLightDirection(m_lightDirection);
-    const bool shadowResourcesChanged = m_shadowPass.updateSettings(m_shadowSettings);
-    const bool shadowDescriptorsDirty = m_shadowPass.consumeDescriptorDirty();
-    if (shadowResourcesChanged || shadowDescriptorsDirty) {
-        updateSceneShadowDescriptors();
-    }
-    uploadCurrentFrameLightState();
-    uploadCurrentClusterMetadata();
-
-    m_tonemapMode = packet.tonemap.mode;
-    m_exposure = packet.tonemap.exposure;
-    m_splitScreenMode = packet.tonemap.splitScreen ? 1 : 0;
-    m_splitRightMode = packet.tonemap.splitRightMode;
-
-    m_skyEnabled = packet.sky.enabled;
-    m_skyMode    = packet.sky.mode;
-
-    m_wireframe   = packet.debug.wireframe;
-    m_showNormals = packet.debug.showNormals;
+    applyFrameSubmission(packet);
 }
 
 void Renderer::endFrame()

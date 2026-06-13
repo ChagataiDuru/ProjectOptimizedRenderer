@@ -12,6 +12,7 @@
 
 #include <SDL3/SDL.h>
 #include <IconsFontAwesome6.h>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <glm/glm.hpp>
@@ -37,6 +38,47 @@ RenderFramePacket buildRenderFramePacket(const Camera& camera, const ViewerState
     packet.sky               = state.sky;
     packet.debug             = state.debugView;
     return packet;
+}
+
+std::vector<shader_interface::GpuPointLight> buildDefaultScenePointLights(float normalizedRadius)
+{
+    const float radiusScale = std::max(normalizedRadius, 1.0f);
+    const float y = 1.8f;
+    const float radius = radiusScale * 0.45f;
+    const float intensity = 22.0f;
+
+    return {
+        { glm::vec4(-0.45f * radiusScale, y, -0.35f * radiusScale, radius), glm::vec4(1.0f, 0.45f, 0.30f, intensity) },
+        { glm::vec4( 0.45f * radiusScale, y, -0.35f * radiusScale, radius), glm::vec4(0.35f, 0.65f, 1.0f, intensity) },
+        { glm::vec4(-0.45f * radiusScale, y,  0.35f * radiusScale, radius), glm::vec4(0.45f, 1.0f, 0.55f, intensity) },
+        { glm::vec4( 0.45f * radiusScale, y,  0.35f * radiusScale, radius), glm::vec4(1.0f, 0.80f, 0.35f, intensity) },
+    };
+}
+
+RenderScenePacket buildRenderScenePacket(const Renderer& renderer)
+{
+    RenderScenePacket scene{};
+    const Model& importedModel = renderer.getImportedModel();
+    const SceneInfo& sceneInfo = renderer.getSceneInfo();
+
+    scene.draws.reserve(importedModel.meshes.size());
+    for (size_t i = 0; i < importedModel.meshes.size(); ++i) {
+        MaterialHandle material{};
+        const Mesh& importedMesh = importedModel.meshes[i];
+        if (importedMesh.materialIndex >= 0 &&
+            importedMesh.materialIndex < static_cast<int32_t>(importedModel.materials.size())) {
+            material.index = static_cast<uint32_t>(importedMesh.materialIndex);
+        }
+
+        scene.draws.push_back(DrawCommand{
+            .transform = sceneInfo.modelMatrix,
+            .mesh = MeshHandle{ static_cast<uint32_t>(i) },
+            .material = material,
+        });
+    }
+
+    scene.pointLights = buildDefaultScenePointLights(sceneInfo.normalizedRadius);
+    return scene;
 }
 
 void drawSunDirectionOverlay(const Camera& camera, Window& window, const ViewerState& state)
@@ -106,6 +148,7 @@ int main()
 
         Renderer renderer(vulkanContext, swapchain);
         renderer.init();
+        renderer.submitScene(buildRenderScenePacket(renderer));
 
         ImGuiManager imguiManager(vulkanContext, swapchain);
         imguiManager.init(window.getHandle());
@@ -200,6 +243,7 @@ int main()
                         SDL_GetWindowSizeInPixels(
                             static_cast<SDL_Window*>(window.getHandle()), &pw, &ph);
                         if (pw > 0 && ph > 0) {
+                            // Viewer owns camera projection updates before the next submitFrame().
                             const float newAspect =
                                 static_cast<float>(pw) / static_cast<float>(ph);
                             camera.setPerspective(45.0f, newAspect, 0.01f, 1000.0f);
@@ -219,6 +263,7 @@ int main()
 
             if (!viewerState.pendingModelPath.empty()) {
                 renderer.reloadModel(viewerState.pendingModelPath);
+                renderer.submitScene(buildRenderScenePacket(renderer));
                 camera.fitToScene(renderer.getSceneInfo().normalizedRadius);
                 viewerState.selectedMeshIndex = -1;
                 viewerState.pendingModelPath.clear();

@@ -49,6 +49,7 @@ public:
                 const Buffer& vertexBuffer,
                 const Buffer& indexBuffer,
                 const std::vector<DrawCommand>& drawCommands,
+                const std::vector<SceneDrawBounds>& drawBounds,
                 const std::vector<MeshRenderData>& meshes,
                 const std::vector<Material>& materials,
                 const std::vector<VkDescriptorSet>& materialSets,
