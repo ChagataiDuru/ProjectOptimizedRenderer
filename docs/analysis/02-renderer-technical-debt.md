@@ -1,17 +1,34 @@
 # 02 — Renderer Technical Debt Map
 
-Date: 2026-06-10
+Date: 2026-06-13
 
 ## Purpose
 
 This document lists current and expected technical debt in ProjectOptimizedRenderer.
 
-The goal is not to shame the codebase. The renderer is still in a productive research/prototype phase. Some debt is acceptable because it helps rapid feature iteration. The goal is to identify which debt blocks the long-term direction:
+The goal is not to shame the codebase. The renderer is still in a productive research/prototype phase. Some debt is acceptable because it helps rapid feature iteration. The goal is to identify which debt still blocks the long-term direction:
 
 - C++ Vulkan renderer remains the core project.
 - The current C++ viewer remains useful as a research/debug shell.
-- A future Odin engine/editor host may exist as a separate project connected through C ABI.
+- A future Odin engine/editor host may exist as a separate project connected through a C ABI.
 - The renderer should eventually become a stable backend, not only a single demo application.
+
+## Important Re-baseline
+
+Several debts originally recorded here have moved from “missing entirely” to “partially addressed.”
+
+Already landed in code:
+
+- viewer panel extraction into `ViewerPanels`
+- grouped renderer settings in `RenderSettings.h`
+- internal `RenderFramePacket`
+- internal `DrawCommand`
+- handle types in `RenderHandles.h`
+- pass extraction via `TonemapPass`, `ShadowPass`, `SkyPass`, and `ClusteredLightCullingPass`
+- centralized shader interface constants/layout structs in `ShaderInterface.h`
+- runtime device capability modeling in `VulkanContext`
+
+Because of that, the main technical debt is no longer “these concepts do not exist.” The real debt is that they exist in first-cut form but have not yet become the dominant architecture everywhere.
 
 ## Severity Scale
 
@@ -33,85 +50,82 @@ The goal is not to shame the codebase. The renderer is still in a productive res
 
 ---
 
-# TD-001 — `Renderer` Is Becoming a Monolith
+# TD-001 — `Renderer` Is Still a Heavy Coordinator
 
 Severity: **High**  
 Timing: **Soon**
 
 ## Current State
 
-`Renderer` currently owns or coordinates nearly everything after Vulkan/swapchain setup:
+`Renderer` still owns or coordinates a large portion of the system after Vulkan/swapchain setup:
 
-- model loading
-- model reload
+- model loading/reload flow
 - mesh upload
 - texture upload
 - fallback texture creation
 - material descriptor creation
-- camera/light UBOs
-- PBR pipeline
-- wireframe/normal variants
-- shadow resources
-- cascade matrices
-- VSM moment images
-- compute blur resources
-- HDR target
-- tone mapping pass
-- sky pipeline
-- GPU timing
-- screenshots
+- camera/light buffers
+- clustered-light buffers and metadata
+- scene pass orchestration
+- pass coordination
+- resize handling
+- screenshot/profiling integration
 - render statistics
-- ImGui overlay hook
-- frame begin/end orchestration
+- remaining renderer state mutators
 
-This is functional and acceptable for a research viewer, but it is not a clean backend boundary.
+Pass extraction has started, which is good, but `Renderer` is still the gravity well for too many systems.
 
 ## Why It Matters
 
-Future features such as SMAA, perceptual VRS, IBL, transparency, async loading, material editing, and external Odin integration will all naturally try to attach to `Renderer`. Without decomposition, every system becomes coupled to every other system.
+Future features such as SMAA, perceptual VRS, IBL, transparency, async loading, material editing, and eventual host integration will all naturally try to attach to `Renderer`. Without continued decomposition, every system becomes coupled to every other system.
 
 ## Risk
 
 - difficult resource lifetime reasoning
 - large resize/reload bugs
 - hard-to-test pass interactions
-- hard-to-expose C ABI
-- renderer becomes a demo app instead of backend
+- difficult future C ABI exposure
+- backend remains shaped like a demo app
 
 ## Recommended Direction
 
-Do not split everything immediately. Instead, introduce boundaries gradually:
+Continue splitting responsibility gradually:
 
 ```txt
 Renderer
-  RenderResourceManager
-  RenderScene / RenderWorld
-  Pass objects or lightweight render graph
-  Debug/profiling module
+  RenderResourceManager-ish ownership split
+  Scene submission boundary
+  Pass objects
+  Debug/profiling surface
 ```
 
-First extraction candidates:
+Next extraction pressure points:
 
-1. `RenderResourceManager`
-2. `TonemapPass`
-3. `ShadowPass`
-4. `SkyPass`
-5. `RendererStats` / debug query surface
+1. unify packet-based submission vs legacy setters
+2. reduce scene/resource rebuilding responsibilities inside `Renderer`
+3. make resize responsibilities more explicit per pass/resource
 
 ## Not To Do Yet
 
-Do not build a large commercial-style render graph immediately. A small pass abstraction is enough until the renderer has more post-processing and VRS/SMAA dependencies.
+Do not build a large commercial-style render graph immediately. The project still benefits more from explicit pass ownership than from a large framework.
 
 ---
 
-# TD-002 — `main.cpp` Is Both Viewer, Editor, and Engine Shell
+# TD-002 — `main.cpp` Still Owns Too Much Viewer Bootstrap
 
-Severity: **High**  
+Severity: **Medium-High**  
 Timing: **Soon**
 
 ## Current State
 
-`src/main.cpp` owns:
+This debt is now **partially reduced**, because panel registration was extracted into:
+
+```txt
+include/viewer/ViewerPanels.h
+src/viewer/ViewerPanels.cpp
+```
+
+However, `src/main.cpp` still owns:
 
 - app startup
 - logger setup
@@ -124,47 +138,26 @@ Timing: **Soon**
 - frame timing
 - SDL event handling
 - mouse capture
-- all ImGui panel registration
-- light/shadow/tonemap UI state
-- file dialogs
-- deferred model reloads
-- deferred HDR panorama loads
-- render loop
-
-This is common in prototypes, but it makes the viewer look like the future engine shell.
+- deferred file actions
+- main render loop
 
 ## Why It Matters
 
-The future direction explicitly says the Odin engine/editor host is separate. Therefore, `main.cpp` should be treated as a disposable C++ research viewer, not the architectural center of the engine.
+The future direction explicitly says the Odin engine/editor host is separate. Therefore, `main.cpp` should be treated as a disposable C++ research viewer shell, not the architectural center of the engine direction.
 
 ## Risk
 
-- editor features become trapped in C++ viewer code
-- renderer API remains shaped around local UI callbacks
-- future Odin host must duplicate or reverse-engineer viewer behavior
-- harder to keep renderer backend independent
+- viewer assumptions continue to leak into renderer-facing APIs
+- future host behavior must be reverse-engineered from viewer code
+- lifecycle/input and renderer contracts remain too tightly interwoven
 
 ## Recommended Direction
 
-Eventually split C++ viewer into:
+Keep the current viewer, but continue treating it as a client of the renderer rather than the renderer's center of gravity.
 
-```txt
-ViewerApp
-  - lifecycle
-  - input
-  - camera
-  - UI panel registration
+Low-cost next step:
 
-RendererBackend
-  - no dependency on viewer-specific behavior
-```
-
-A low-cost first step is to move ImGui panel registration out of `main.cpp` into a viewer-specific file:
-
-```txt
-src/viewer/ViewerPanels.cpp
-include/viewer/ViewerPanels.h
-```
+- reduce direct viewer-driven mutation paths in favor of building a frame/state submission object
 
 ## Not To Do Yet
 
@@ -172,68 +165,82 @@ Do not remove the C++ viewer. It is valuable for graphics research and GPU debug
 
 ---
 
-# TD-003 — No Explicit Frame Packet Abstraction
+# TD-003 — Frame Submission Model Exists but Is Not Yet Dominant
 
-Severity: **Critical for Odin Integration, Medium for Current Viewer**  
-Timing: **Soon, before C ABI implementation**
+Severity: **High**  
+Timing: **Now / Soon**
 
 ## Current State
 
-The renderer currently receives state through direct calls such as:
+This debt is no longer “no explicit frame packet abstraction.”
 
-- set camera matrices
-- set camera frustum
-- set light parameters
-- set CSM lambda
-- set shadow filter mode
-- set tone map params
-- set sky mode
-- reload model
+The repo now has:
 
-This is fine for the current viewer, but it is not the right external host API.
+- `RenderFramePacket`
+- `Renderer::submitFrame(const RenderFramePacket&)`
+- grouped render settings/data structs
+
+However, the renderer still also exposes and relies on multiple direct mutators such as camera/light/shadow/tonemap/sky setters.
 
 ## Why It Matters
 
-A future Odin host should submit a stable, plain-data frame snapshot. It should not call many renderer mutators per object or per subsystem.
+A future host should submit a stable, plain-data frame snapshot. It should not depend on many renderer mutators or partial state updates.
 
 ## Risk
 
-- high FFI call overhead
-- unstable host/renderer contract
-- renderer state bugs from partial updates
-- difficult multithreaded handoff
+- duplicated submission pathways
+- ambiguous source of truth for per-frame state
+- unstable future host/renderer contract
+- state bugs from partial updates
 
 ## Recommended Direction
 
-Introduce a C++ internal frame packet before exposing C ABI:
+Promote the internal packet model from “available” to “primary.”
+
+Target state:
 
 ```cpp
 struct RenderFramePacket {
     CameraData camera;
-    DirectionalLightData sun;
+    DirectionalLightData light;
+    std::vector<shader_interface::GpuPointLight> pointLights;
+    ShadowSettings shadow;
     TonemapSettings tonemap;
-    ShadowSettings shadows;
     SkySettings sky;
-    std::span<const DrawCommand> draws;
+    DebugViewSettings debug;
+    // later: draw submission or scene submission reference
 };
 ```
 
-Then the viewer can build this packet internally. Later, the C ABI can expose a POD equivalent.
+Then:
+
+- build this packet in the viewer
+- submit it once per frame
+- gradually reduce legacy per-subsystem mutators
 
 ## Not To Do Yet
 
-Do not force every current renderer feature into the frame packet immediately. Start with camera, light, draw commands, and debug toggles.
+Do not freeze a public C ABI around this yet. First stabilize the internal C++ version.
 
 ---
 
-# TD-004 — Renderer Assumes a Loaded glTF Model as the Scene
+# TD-004 — Scene Submission Is Still Coupled to Imported Model State
 
 Severity: **High**  
-Timing: **Soon, before engine host integration**
+Timing: **Soon**
 
 ## Current State
 
-The renderer loads Sponza by default and treats the loaded model as the render scene. Model reload replaces renderer-owned scene data.
+This debt is also **partially reduced**.
+
+The repo now has:
+
+- `MeshHandle`, `MaterialHandle`, `TextureHandle`
+- `DrawCommand`
+- internal mesh/material vectors
+- draw-command rebuilding from imported model data
+
+But the renderer still fundamentally assumes a loaded glTF model as the active scene baseline.
 
 ## Why It Matters
 
@@ -241,14 +248,14 @@ An engine renderer should render many objects, each potentially referencing shar
 
 ## Risk
 
-- difficult multi-object rendering model
-- no stable mesh/material handle API
+- imported model remains too close to runtime scene representation
 - renderer and asset loader remain coupled
-- future Odin scene graph cannot map cleanly onto renderer state
+- no clear multi-object submission model yet
+- future host integration still lacks a clean scene boundary
 
 ## Recommended Direction
 
-Separate these concepts:
+Keep the current bridge approach, but continue separating these concepts:
 
 ```txt
 Asset import model
@@ -259,154 +266,118 @@ Renderer resources
   - material handles
   - texture handles
 
-Renderable scene
-  - draw commands referencing handles
+Scene submission
+  - draw commands / scene packet referencing handles
 ```
-
-Short-term bridge:
-
-- keep glTF loading in renderer
-- but have loadModel produce one or more internal resource handles
-- have rendering consume a generated draw list instead of directly iterating the model as the scene
 
 ## Not To Do Yet
 
-Do not design a complete asset database inside the C++ renderer. That belongs to the future engine/editor host or external tooling.
+Do not design a full asset database inside the renderer. That belongs to the future engine/editor host or external tooling.
 
 ---
 
-# TD-005 — Manual Descriptor and Pipeline Growth
+# TD-005 — Pass Extraction Is Started but Ownership Is Still Mixed
 
 Severity: **High**  
 Timing: **Soon**
 
 ## Current State
 
-The renderer manually creates many descriptors and pipelines for:
+This debt is no longer “no pass ownership extraction.”
 
-- PBR
-- material textures
-- shadow maps
-- VSM moments
-- VSM blur
-- HDR target
-- tone mapping
-- sky panorama
-- ImGui
+The repo already contains extracted passes:
 
-This works, but every new pass adds more manual setup, update, resize, and shutdown logic.
+- `TonemapPass`
+- `ShadowPass`
+- `SkyPass`
+- `ClusteredLightCullingPass`
+
+That is real progress.
+
+The remaining debt is that pass-local ownership, resize flow, descriptor update flow, and orchestration responsibilities are still split between pass classes and `Renderer`.
 
 ## Why It Matters
 
-SMAA and VRS will require additional passes and resources:
-
-- SMAA edge detection
-- SMAA blend weight calculation
-- SMAA neighborhood blending
-- VRS classification image
-- optional debug visualization
-- additional transient images and descriptors
-
-Without better organization, pass setup will become fragile.
+SMAA and VRS will increase the number of passes and intermediate resources. If pass-local ownership stays mixed, every new feature will multiply resize/setup complexity.
 
 ## Risk
 
-- duplicated descriptor code
+- duplicated descriptor logic
 - resize bugs
-- mismatched descriptor layouts
-- difficult pass ordering
-- hard-to-debug resource lifetime errors
+- mixed lifetime ownership
+- hard-to-reason pass interactions
 
 ## Recommended Direction
 
-Introduce pass-local ownership:
+Keep using pass-local extraction as the scaling path.
 
-```cpp
-class TonemapPass {
-public:
-    void init(...);
-    void resize(...);
-    void record(...);
-    void shutdown();
-};
-```
+Best next test:
 
-Do this incrementally, starting with post-processing passes because they are easier to isolate than the scene pass.
+- implement `SmaaPass` using the same ownership model
+- let that reveal whether the existing pass interface is sufficient or needs refinement
 
 ## Not To Do Yet
 
-Do not introduce an overly abstract material/pipeline compiler yet. First make pass ownership explicit.
+Do not replace pass extraction with a heavy render-graph system prematurely.
 
 ---
 
-# TD-006 — No Lightweight Render Graph / Pass Dependency Model
+# TD-006 — No Lightweight Render Graph / Pass Dependency Model Yet
 
 Severity: **Medium Now, High Later**  
 Timing: **Later, after SMAA/VRS pressure increases**
 
 ## Current State
 
-Pass sequencing is implicit inside renderer code. Resources such as HDR target, depth, shadow maps, VSM moments, and swapchain images are manually transitioned/used.
+Pass sequencing is still mostly manual and explicit. Resources such as HDR target, depth, shadow maps, VSM moments, and swapchain images are manually transitioned/used.
 
 ## Why It Matters
 
-A modern renderer with native anti-aliasing, shadow passes, HDR, post-processing, VRS, and debug overlays needs clear pass dependencies.
+A renderer with anti-aliasing, shadows, HDR, clustered lighting, post-processing, optional VRS, and debug overlays will eventually benefit from clearer pass dependencies.
 
 ## Risk
 
 - barrier/layout transition mistakes
 - transient image lifetime confusion
-- hard to reorder passes
+- hard-to-reorder passes
 - hard to insert optional debug passes
-- hard to reason about performance
+- hard to reason about performance globally
 
 ## Recommended Direction
 
-Do not jump immediately to a full render graph. First define a minimal pass declaration model:
-
-```cpp
-struct RenderPassDesc {
-    const char* name;
-    ImageHandle inputs[];
-    ImageHandle outputs[];
-    bool resizeDependent;
-};
-```
-
-Then evolve into a real graph if useful.
+Do not jump immediately to a full render graph. First define a minimal pass dependency vocabulary only if SMAA/VRS make manual ordering painful.
 
 ## Not To Do Yet
 
-Do not copy Unreal/RenderDoc-scale render graph complexity. The project needs a small renderer-owned pass graph, not an engine-scale rendering framework yet.
+Do not copy Unreal-scale render-graph complexity. The project needs a small renderer-owned dependency model, not an engine-scale framework.
 
 ---
 
-# TD-007 — C++ / GLSL Interface Contracts Are Manual
+# TD-007 — Shader Interface Safety Improved, but Validation Is Still Manual-Plus
 
 Severity: **Medium**  
-Timing: **Soon, during shader system cleanup**
+Timing: **Soon / Medium**
 
 ## Current State
 
-Shader UBOs, push constants, descriptor bindings, and material layouts are manually mirrored between C++ and GLSL.
+This debt is **partially reduced**.
 
-Examples include:
+The repo now has:
 
-- camera UBO
-- light UBO
-- shadow UBO
-- material push constants
-- tonemap push constants
-- descriptor set layout binding numbers
+- centralized shader binding constants in `ShaderInterface.h`
+- centralized shader-facing structs in `ShaderInterface.h`
+- static asserts for layout/size validation
+- clearer comments around descriptor ownership
+
+The remaining issue is that validation is still mostly authored manually rather than being reflection-backed or generated.
 
 ## Why It Matters
 
-Manual layout sync is manageable now, but becomes risky as the renderer gains more passes and external API types.
+Manual layout sync is manageable now, but becomes riskier as the renderer gains more passes and more shader-visible data structures.
 
 ## Risk
 
 - silent shader/C++ mismatch
-- hard-to-debug rendering corruption
 - broken push constant offsets
 - descriptor binding mismatch during refactor
 
@@ -414,43 +385,42 @@ Manual layout sync is manageable now, but becomes risky as the renderer gains mo
 
 Short-term:
 
-- centralize binding constants in C++ headers and GLSL include-like generated files if possible
-- add comments that state exact binding and set ownership
-- static assert C++ struct sizes and alignment
+- keep centralizing shader-facing contracts
+- keep adding static assertions and clear ownership comments
 
 Medium-term:
 
-- generate shader interface headers
-- or use SPIR-V reflection to validate pipeline layouts during development
+- add SPIR-V reflection validation in debug builds, or
+- generate shared interface code if the surface area grows enough
 
 ## Not To Do Yet
 
-Do not build a full shader compiler framework before SMAA/VRS are implemented. Use targeted validation first.
+Do not build a full shader compiler framework before SMAA/VRS create a real need.
 
 ---
 
-# TD-008 — Resize Handling Is Spread Across Multiple Resources
+# TD-008 — Resize Handling Is Still Cross-Cutting
 
 Severity: **Medium**  
 Timing: **Soon**
 
 ## Current State
 
-Resize affects:
+Resize still affects multiple systems across the renderer:
 
 - swapchain
 - depth image
 - HDR target
-- tone map descriptor set
+- extracted passes that depend on resize-sensitive resources
 - viewport/scissor
 - camera aspect ratio
-- possibly ImGui frame state
-- future SMAA images
-- future VRS image
+- clustered light metadata/resources
+- future SMAA intermediates
+- future VRS images/resources
 
 ## Why It Matters
 
-As post-processing grows, resize bugs become common.
+As post-processing grows, resize bugs become common and expensive.
 
 ## Risk
 
@@ -462,299 +432,76 @@ As post-processing grows, resize bugs become common.
 
 ## Recommended Direction
 
-Define a common resize pathway:
-
-```cpp
-void Renderer::resize(uint32_t width, uint32_t height);
-```
-
-Internally this calls:
-
-```txt
-Depth.resize
-HdrTarget.resize
-TonemapPass.resize
-SmaaPass.resize
-VrsPass.resize
-```
+Define and document a consistent resize pathway that clearly states which resources/passes own which reinitialization steps.
 
 ## Not To Do Yet
 
-Do not over-design multi-window or multiple viewport support yet.
+Do not over-abstract resize into a framework. First make ownership explicit.
 
 ---
 
-# TD-009 — Debug UI Directly Shapes Renderer API
+# TD-009 — Capability Policy Exists in Code but Not Yet as a Clear Product Rule
 
 Severity: **Medium**  
-Timing: **Later**
+Timing: **Soon**
 
 ## Current State
 
-The viewer UI writes directly into renderer settings through specific setters and reads renderer stats directly.
+The repo now has capability discovery for:
 
-This is fine for C++ ImGui, but not ideal for external engine/editor API.
+- fragment shading rate
+- mesh shader/task shader
+- descriptor indexing
+- timeline semaphore
+- core feature availability
+
+What is still missing is a consistently documented policy for how optional capabilities should be surfaced, logged, debugged, and consumed by future features.
 
 ## Why It Matters
 
-A future Odin editor should not need to understand renderer internals or C++ UI callbacks.
+Perceptual VRS, mesh-shader experiments, and other optional research features should be capability-driven from day one. Without a clear rule, future features may drift back into ad hoc probing and inconsistent fallback behavior.
 
 ## Risk
 
-- renderer API becomes UI-driven instead of data-driven
-- settings become scattered
-- host integration needs many small calls
+- inconsistent platform behavior
+- confusing logs/debug UX
+- optional features accidentally becoming startup requirements
 
 ## Recommended Direction
 
-Introduce grouped settings structs:
+Document a simple policy:
 
-```cpp
-struct ShadowSettings;
-struct TonemapSettings;
-struct SkySettings;
-struct DebugViewSettings;
-```
-
-Viewer UI edits these settings. Renderer consumes them per frame or through explicit apply calls.
+- detect capabilities once
+- store them centrally
+- log them clearly
+- never make optional features mandatory unless intentionally promoted to baseline
+- keep unsupported platforms functional
 
 ## Not To Do Yet
 
-Do not remove convenient ImGui controls. They are important for research iteration.
+Do not add a giant feature-management layer. A small, explicit policy is enough.
 
 ---
 
-# TD-010 — Resource Lifetime Depends on Full `vkDeviceWaitIdle` During Reload
-
-Severity: **Medium**  
-Timing: **Later, before async loading**
-
-## Current State
-
-Model reload drains the GPU with `vkDeviceWaitIdle` before destroying and recreating model-dependent resources.
-
-## Why It Matters
-
-This is safe and simple, but it will not scale to streaming, async texture loading, or editor hot reload.
-
-## Risk
-
-- frame hitching
-- poor editor interactivity during reload
-- difficult background asset loading
-- incompatible with future streaming model
-
-## Recommended Direction
-
-Keep this for now. Later introduce deferred destruction by frame index:
-
-```txt
-destroy resource only after N frames-in-flight have completed
-```
-
-Then async upload can use staging queues and delayed GPU visibility.
-
-## Not To Do Yet
-
-Do not implement full async streaming until the renderer resource handle model is clearer.
-
----
-
-# TD-011 — Asset Pipeline Is Not Yet Defined
-
-Severity: **Medium**  
-Timing: **Later**
-
-## Current State
-
-The renderer loads glTF and texture files directly. This is good for research and test scenes.
-
-## Why It Matters
-
-A future engine/editor needs an asset pipeline:
-
-- import source assets
-- generate runtime asset formats
-- build thumbnails/previews
-- track dependencies
-- manage hot reload
-- maybe convert textures to KTX2/BasisU
-- maybe optimize meshes offline
-
-## Risk
-
-- renderer becomes responsible for editor asset database concerns
-- runtime loading path becomes slow
-- hard to support packaged projects later
-
-## Recommended Direction
-
-Keep direct glTF loading in the renderer for now.
-
-Use Odin, if desired, for standalone offline tools first:
-
-- texture packer/converter
-- mesh optimizer wrapper
-- asset manifest generator
-- scene description exporter
-
-This gives useful Odin practice without creating runtime FFI instability.
-
-## Not To Do Yet
-
-Do not make Odin the runtime asset manager before the renderer has stable resource handles.
-
----
-
-# TD-012 — No Stable External Handle System
-
-Severity: **High for Odin Integration**  
-Timing: **Soon, before C ABI**
-
-## Current State
-
-Renderer resources are mostly C++ objects and vectors owned internally.
-
-## Why It Matters
-
-A C ABI cannot expose internal object pointers safely. The host needs opaque handles.
-
-## Risk
-
-- accidental lifetime bugs
-- external host depends on vector indices that may move
-- impossible to validate stale resources cleanly
-
-## Recommended Direction
-
-Introduce internal handle types:
-
-```cpp
-using MeshHandle = uint32_t;
-using TextureHandle = uint32_t;
-using MaterialHandle = uint32_t;
-```
-
-Later upgrade to generation handles:
-
-```cpp
-struct Handle {
-    uint32_t index;
-    uint32_t generation;
-};
-```
-
-For the first API, simple `uint32_t` handles are acceptable if deletion is limited.
-
-## Not To Do Yet
-
-Do not implement a full ECS-style handle registry unless real deletion/reload pressure appears.
-
----
-
-# TD-013 — Feature Roadmap Is Not Yet Connected to Architecture Roadmap
-
-Severity: **Medium**  
-Timing: **Now**
-
-## Current State
-
-Renderer features exist or are planned:
-
-- CSM/VSM shadows
-- HDR tone mapping
-- AgX / PBR Neutral
-- sky
-- SMAA
-- VRS
-- async texture loading
-- future engine API
-
-But the architecture documents should explicitly connect feature phases to required structural changes.
-
-## Why It Matters
-
-Without this, it is easy to add features in the wrong order and create avoidable refactors.
-
-## Recommended Direction
-
-Create a roadmap document that separates:
-
-1. research features
-2. backend architecture work
-3. engine/API preparation
-4. Odin host experiments
-
-Recommended file:
-
-```txt
-docs/analysis/03-feature-roadmap.md
-```
-
----
-
-# TD-014 — Documentation Is Starting Late But Recoverable
-
-Severity: **Low**  
-Timing: **Now**
-
-## Current State
-
-The repo has `AGENTS.md` and a loose `documentation.md`, but project decisions, architecture rationale, and future engine direction were not clearly structured before this analysis folder.
-
-## Why It Matters
-
-The project will be developed across long context windows and multiple sessions. Durable documents are necessary so future work does not restart from memory.
-
-## Recommended Direction
-
-Maintain three documentation types:
-
-```txt
-docs/analysis/    current state and planning
-docs/research/    technique research and notes
-docs/decisions/   ADR-style decisions
-```
-
-## Not To Do Yet
-
-Do not try to write perfect documentation for every file. Prioritize decisions and architecture boundaries.
-
----
-
-# Priority Summary
-
-## Fix / Design Soon
-
-1. `Renderer` responsibility split direction
-2. `main.cpp` viewer-shell separation
-3. frame packet abstraction
-4. render resource handles
-5. grouped renderer settings
-6. pass ownership around post-processing/shadows
-7. feature roadmap tied to architecture roadmap
-
-## Keep For Now
-
-1. C++ research viewer
-2. direct glTF loading
-3. `vkDeviceWaitIdle` model reload safety
-4. ImGui debug panels
-5. simple descriptor/pipeline setup where still manageable
-
-## Avoid For Now
-
-1. full Odin runtime integration
-2. full render graph framework
-3. full asset database
-4. multi-window editor support
-5. engine-wide ECS inside this renderer repo
-6. exposing Vulkan handles through the future C ABI
-
-## Next Recommended Document
-
-`docs/analysis/03-feature-roadmap.md`
-
-Purpose:
-
-Define the renderer roadmap in terms of research milestones and architecture milestones, so future feature work supports the hybrid goal instead of fighting it.
+# Recommended Debt Order
+
+1. **TD-003 — Frame submission model exists but is not yet dominant**
+2. **TD-001 — `Renderer` is still a heavy coordinator**
+3. **TD-005 — Pass extraction is started but ownership is still mixed**
+4. **TD-004 — Scene submission is still coupled to imported model state**
+5. **TD-008 — Resize handling is still cross-cutting**
+6. **TD-009 — Capability policy exists in code but not yet as a clear product rule**
+7. **TD-002 — `main.cpp` still owns too much viewer bootstrap**
+8. **TD-007 — Shader interface safety improved, but validation is still manual-plus**
+9. **TD-006 — No lightweight render graph / pass dependency model yet**
+
+## Why This Order
+
+The highest-value work now is not inventing more architecture layers. It is consolidating the ones that already landed:
+
+- packet-based submission
+- pass extraction
+- handle-based scene vocabulary
+- capability-driven optional feature policy
+
+That consolidation will make the next big feature, SMAA, much easier to implement without re-fragmenting the architecture.

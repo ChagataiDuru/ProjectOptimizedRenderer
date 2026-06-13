@@ -1,18 +1,18 @@
 # 03 — Feature and Architecture Roadmap
 
-Date: 2026-06-10
+Date: 2026-06-13
 
 ## Purpose
 
-This document connects renderer feature development with architecture work.
+This document connects renderer feature development with architecture work and explicitly marks what is already done, what is in progress, and what is still ahead.
 
-The project direction is hybrid:
+The project direction remains hybrid:
 
 - short term: C++ Vulkan renderer research prototype and portfolio project
 - long term: engine-ready renderer backend
 - future optional host: separate Odin engine/editor connected through a C ABI
 
-The goal is to avoid two failure modes:
+The roadmap exists to avoid two failure modes:
 
 1. adding renderer features so quickly that the architecture becomes unmaintainable
 2. over-engineering engine architecture before the renderer research value is proven
@@ -21,7 +21,7 @@ The goal is to avoid two failure modes:
 
 ProjectOptimizedRenderer should not become a generic clone of a commercial engine renderer.
 
-The project should have a clear technical identity:
+It should keep a clear technical identity:
 
 > A modern Vulkan renderer focused on native spatial quality, stable shadows, perceptual image quality, explicit GPU control, and engine-ready architecture without hiding the rendering model behind proprietary black-box abstractions.
 
@@ -35,6 +35,24 @@ Core pillars:
 6. perceptual VRS driven by image/scene metrics
 7. cross-platform Windows + macOS support
 8. future C ABI boundary for external engine/editor hosts
+
+## Current Status Snapshot
+
+The repo has moved materially since the first version of this roadmap.
+
+Already landed in code:
+
+- `ViewerPanels` extraction from `main.cpp`
+- grouped renderer settings in `RenderSettings.h`
+- internal `RenderFramePacket`
+- internal `DrawCommand`
+- handle types in `RenderHandles.h`
+- `TonemapPass`, `ShadowPass`, `SkyPass`, and `ClusteredLightCullingPass`
+- centralized shader interface constants/layout structs in `ShaderInterface.h`
+- device capability modeling for optional features in `VulkanContext`
+- clustered forward-plus point light support
+
+Because of that, several items below have been re-marked from future-only to partial or done.
 
 ## Roadmap Tracks
 
@@ -55,20 +73,23 @@ These tracks should advance together, but not at the same speed.
 
 ## A1 — Stabilize Existing Visual Baseline
 
-Priority: **Immediate**
+Priority: **Immediate**  
+Status: **In Progress**
 
 Current features already present:
 
 - glTF/Sponza loading
 - PBR direct lighting
 - normal mapping
+- directional lighting
+- clustered forward-plus point lights
 - HDR render target
 - Reinhard / AgX / PBR Neutral tonemapping
 - CSM shadows
 - PCF
 - VSM moments
 - VSM blur
-- procedural/HDR sky
+- procedural / HDR sky
 - GPU timing
 - render stats
 - screenshots
@@ -77,25 +98,26 @@ Goal:
 
 Make the current renderer baseline reproducible before adding more visual systems.
 
-Deliverables:
+Remaining deliverables:
 
-- stable build instructions
 - known-good test scene list
 - screenshot capture convention
-- render setting presets
-- GPU timing baseline
+- render setting presets worth comparing repeatedly
+- per-platform build sanity notes
 - documented visual limitations
+- documented baseline timing captures
 
 Success criteria:
 
 - the same test scene can be run on macOS and Windows
-- screenshots can be compared between tone mapping modes
+- screenshots can be compared between tone mapping modes and shadow modes
 - pass timings are visible and understandable
 - visual regressions are easy to detect manually
 
 ## A2 — SMAA Path
 
-Priority: **High**
+Priority: **High**  
+Status: **Not Started**
 
 Purpose:
 
@@ -116,17 +138,15 @@ Design questions:
 1. Should SMAA operate before or after tone mapping?
 2. Should the source be HDR linear, tonemapped linear, or swapchain-space LDR?
 3. How should debug modes visualize edge detection and blend weights?
-4. How should it interact with UI/ImGui overlays?
+4. How should it interact with UI / ImGui overlays?
 
 Architecture requirements:
 
 - explicit post-process pass ownership
 - resize-aware intermediate images
 - descriptor update path for intermediate images
-- debug toggles grouped into a settings struct
+- debug toggles grouped into settings
 - GPU timer labels per SMAA pass
-
-Do not implement SMAA by simply adding more loose code into `Renderer`.
 
 Recommended first implementation:
 
@@ -142,16 +162,24 @@ SmaaPass
 
 ## A3 — Perceptual VRS
 
-Priority: **High, after SMAA foundation**
+Priority: **High, after SMAA foundation**  
+Status: **Not Started, Foundation Present**
 
 Purpose:
 
 Implement variable rate shading as a perceptual optimization path rather than a generic performance checkbox.
 
+What is already in place:
+
+- device capability querying in `RendererDeviceFeatures`
+- optional feature gating groundwork
+- fragment shading rate support detection
+- fallback-friendly design direction
+
 Expected concept:
 
-- analyze luminance/contrast/edge structure
-- produce shading rate image or equivalent control data
+- analyze luminance / contrast / edge structure
+- produce shading-rate image or equivalent control data
 - reduce shading where perceptually safe
 - preserve edges, silhouettes, highlights, text, and high-frequency regions
 
@@ -159,14 +187,13 @@ Design questions:
 
 1. Which devices/platforms expose usable VRS support?
 2. How should MoltenVK/macOS behave when VRS is unavailable?
-3. Should VRS be feature-gated by runtime capabilities?
-4. Should the renderer show a VRS debug overlay?
-5. What visual metric proves that VRS is not just blurring quality?
+3. How should debug overlays expose VRS decisions?
+4. What visual metric proves that VRS is not just blurring quality?
 
 Architecture requirements:
 
-- device capability query layer
-- optional pass enablement
+- capability-driven enablement
+- optional pass/path activation
 - fallback path when unsupported
 - settings struct for VRS mode/debug
 - GPU timing around VRS classification
@@ -174,11 +201,12 @@ Architecture requirements:
 
 Important:
 
-VRS should not be mandatory for renderer startup. It should be optional and capability-driven.
+VRS must remain optional. Unsupported platforms should run normally without it.
 
 ## A4 — Shadow Quality and Stability Pass
 
-Priority: **Medium-High**
+Priority: **Medium-High**  
+Status: **In Progress**
 
 Current features:
 
@@ -187,17 +215,20 @@ Current features:
 - VSM
 - cascade debug overlay
 - shadow culling stats
+- extracted `ShadowPass`
+- `ShadowSettings` struct
+- several quality-facing knobs already present
 
 Goals:
 
 - reduce shimmering
-- validate texel snapping
+- validate texel snapping behavior
 - document cascade split behavior
 - tune VSM bleed reduction
 - compare PCF vs VSM visually and by timing
-- define shadow presets
+- define useful shadow presets
 
-Potential deliverables:
+Remaining deliverables:
 
 ```txt
 Shadow Quality Presets:
@@ -208,16 +239,15 @@ Shadow Quality Presets:
   - VSM Quality
 ```
 
-Architecture requirements:
+Recommended focus:
 
-- `ShadowSettings` struct
-- pass-local shadow ownership
-- debug output for cascade splits
-- stable GPU timing per shadow path
+- make the current shadow feature set reproducible and measurable before broadening it further
+- document what each shadow setting actually changes visually and architecturally
 
 ## A5 — HDR / Tone Mapping Research
 
-Priority: **Medium**
+Priority: **Medium**  
+Status: **Partially Completed**
 
 Current features:
 
@@ -227,24 +257,24 @@ Current features:
 - PBR Neutral
 - exposure control
 - split-screen comparison
+- extracted `TonemapPass`
 
 Goals:
 
 - document differences between operators
-- define why AgX/PBR Neutral are included
+- define why AgX / PBR Neutral are included
 - add reproducible screenshots
 - expose tone mapping presets
-- consider histogram/luminance tools later
+- consider histogram / luminance tools later
 
-Architecture requirements:
+Architecture note:
 
-- `TonemapSettings` struct
-- `TonemapPass` extraction candidate
-- consistent color-space comments and validation
+This item is no longer only conceptual on the architecture side; `TonemapPass` is now a real extracted pass and should be treated as the template for future post-processing passes.
 
 ## A6 — Image-Based Lighting / Environment Lighting
 
-Priority: **Later**
+Priority: **Later**  
+Status: **Not Started**
 
 Current sky support is present, but full IBL is not the immediate priority.
 
@@ -256,7 +286,7 @@ Future goals:
 - material response validation
 - HDR panorama as lighting source
 
-Do this after the pass/resource boundaries are cleaner.
+Do this after the pass/resource boundaries are cleaner and the current lighting baseline is better documented.
 
 ---
 
@@ -264,24 +294,27 @@ Do this after the pass/resource boundaries are cleaner.
 
 ## B1 — Viewer Shell Separation
 
-Priority: **Soon**
+Priority: **Soon**  
+Status: **Partially Completed**
 
 Problem:
 
-`main.cpp` currently owns too much viewer/editor behavior.
+`main.cpp` still owns too much viewer/editor behavior.
 
-Goal:
-
-Keep the C++ research viewer, but make it conceptually separate from renderer backend.
-
-First low-risk move:
+What has landed:
 
 ```txt
 include/viewer/ViewerPanels.h
 src/viewer/ViewerPanels.cpp
 ```
 
-Move panel registration and viewer-only ImGui logic out of `main.cpp`.
+That was the correct first extraction and it is already in the repo.
+
+What remains:
+
+- keep lifecycle/input/bootstrap code distinct from renderer-facing state flow
+- avoid letting viewer-only concerns continue to shape the backend API
+- possibly introduce a clearer `ViewerApp`-style shell later without over-abstracting now
 
 Non-goal:
 
@@ -289,132 +322,108 @@ Do not delete the C++ viewer.
 
 ## B2 — Renderer Settings Structs
 
-Priority: **Soon**
+Priority: **Soon**  
+Status: **Done (Initial Version)**
 
-Problem:
+What landed:
 
-Renderer state is currently set through many separate methods and UI-specific calls.
+- `DirectionalLightData`
+- `ShadowSettings`
+- `TonemapSettings`
+- `SkySettings`
+- `DebugViewSettings`
+- `CameraData`
 
-Introduce grouped settings:
+Benefits already realized:
 
-```cpp
-struct ShadowSettings {
-    float csmLambda;
-    bool showCascadeDebug;
-    int shadowFilterMode;
-    float pcfSpreadRadius;
-    float vsmBleedReduction;
-};
+- easier frame-packet design
+- clearer UI-to-renderer handoff vocabulary
+- better future C ABI mapping
 
-struct TonemapSettings {
-    int mode;
-    float exposure;
-    bool splitScreen;
-    int splitRightMode;
-};
+What remains:
 
-struct SkySettings {
-    bool enabled;
-    int mode;
-};
-
-struct DebugViewSettings {
-    bool wireframe;
-    bool showNormals;
-};
-```
-
-Benefits:
-
-- easier frame packet design
-- easier future C ABI mapping
-- fewer scattered setters
-- cleaner UI-to-renderer handoff
+- keep extending settings only where they represent coherent state bundles
+- avoid falling back into many unrelated setters for new systems
 
 ## B3 — Internal Render Frame Packet
 
-Priority: **Before C ABI work**
+Priority: **Before C ABI work**  
+Status: **Partially Completed**
 
-Goal:
-
-Create a C++ internal version of the future external frame packet.
-
-Initial contents:
+What landed:
 
 ```cpp
 struct RenderFramePacket {
     CameraData camera;
-    DirectionalLightData sun;
-    ShadowSettings shadows;
+    DirectionalLightData light;
+    std::vector<shader_interface::GpuPointLight> pointLights;
+    ShadowSettings shadow;
     TonemapSettings tonemap;
     SkySettings sky;
     DebugViewSettings debug;
 };
 ```
 
-Later contents:
+Also landed:
 
-```cpp
-std::span<const DrawCommand> draws;
-```
+- `Renderer::submitFrame(const RenderFramePacket&)`
 
-Important:
+What remains:
 
-This should first be used by the C++ viewer. Once stable, expose a POD C version for Odin.
+- make this the dominant path for viewer-to-renderer state submission
+- reduce duplication between packet submission and legacy setter-based mutation
+- decide whether draw submission belongs inside this packet or a sibling submission object
+
+Current recommendation:
+
+Do not expose a public C ABI version yet. First make the C++ internal packet stable.
 
 ## B4 — Resource Handle Model
 
-Priority: **Before multi-object/Odin integration**
+Priority: **Before multi-object / Odin integration**  
+Status: **Partially Completed**
 
-Goal:
-
-Move from renderer-internal model-as-scene to handle-based render resources.
-
-Initial handles:
+What landed:
 
 ```cpp
-using MeshHandle = uint32_t;
-using MaterialHandle = uint32_t;
-using TextureHandle = uint32_t;
+struct MeshHandle { uint32_t index; };
+struct MaterialHandle { uint32_t index; };
+struct TextureHandle { uint32_t index; };
 ```
 
-Later handles:
+Also landed:
 
-```cpp
-struct ResourceHandle {
-    uint32_t index;
-    uint32_t generation;
-};
-```
+- `DrawCommand`
+- internal mesh/material arrays
+- renderer-side draw-command rebuilding from imported model data
 
-First target:
+What remains:
 
-Have loaded glTF generate internal mesh/material handles and a draw list.
+- generation/versioning if handles become externally visible
+- clearer renderer resource lifetime APIs
+- eventual separation between imported asset data and renderer-owned resource registries
 
-This allows the current viewer to keep loading Sponza while moving toward engine-ready draw submission.
+This item is now past the concept stage.
 
 ## B5 — Pass Ownership Extraction
 
-Priority: **During SMAA/post-processing work**
+Priority: **During SMAA/post-processing work**  
+Status: **Partially Completed**
 
-Extract pass ownership gradually.
-
-Best first candidates:
+Extracted pass objects already in the repo:
 
 1. `TonemapPass`
-2. `SkyPass`
-3. `SmaaPass`
-4. `ShadowPass`
+2. `ShadowPass`
+3. `SkyPass`
+4. `ClusteredLightCullingPass`
 
-Each pass should own:
+This is meaningful progress.
 
-- pipelines
-- pipeline layout
-- descriptor set layout
-- descriptor pool/set if pass-local
-- resize-dependent images if applicable
-- `record(...)`
-- `shutdown()`
+What remains:
+
+- keep shrinking pass-specific ownership inside `Renderer`
+- define clearer resize and descriptor-update responsibilities for each extracted pass
+- add `SmaaPass` following the same ownership model
 
 Non-goal:
 
@@ -422,7 +431,8 @@ Do not build a large render graph before pass extraction provides real pressure.
 
 ## B6 — Minimal Render Graph / Pass Dependency Layer
 
-Priority: **Later**
+Priority: **Later**  
+Status: **Not Started**
 
 Trigger point:
 
@@ -448,20 +458,44 @@ Expected benefits:
 
 ## B7 — Shader Interface Validation
 
-Priority: **Medium**
+Priority: **Medium**  
+Status: **Partially Completed**
 
-Short-term:
+What landed:
 
-- centralize binding constants
-- static assert C++ struct layout
-- document shader set/binding ownership
+- centralized binding/set constants in `ShaderInterface.h`
+- centralized shader-facing C++ structs in `ShaderInterface.h`
+- static asserts for layout/size validation
+- code comments clarifying descriptor ownership boundaries
 
-Medium-term:
+What remains:
 
-- add SPIR-V reflection validation for debug builds
-- or generate C++/GLSL interface headers from a shared schema
+- reflection-based validation in debug builds, or
+- codegen/shared schema if the interface surface grows enough to justify it
 
-Do not overbuild this before pass boundaries are clearer.
+This item is in a good state for the current project size and does not yet require a heavy framework.
+
+## B8 — Capability-Driven Optional Feature Policy
+
+Priority: **Now / Soon**  
+Status: **Started Well**
+
+This is newly important because it underpins future VRS and mesh-shader experiments.
+
+What landed:
+
+- `RendererDeviceFeatures`
+- `RendererMeshShaderProperties`
+- Vulkan physical-device capability query path
+- optional device-extension enabling for supported features
+
+What remains:
+
+- document which optional features are merely detected vs actually used
+- define the renderer policy for unsupported platforms
+- expose capability information cleanly to debug UI/logging if useful
+
+This item was not explicit enough in the original roadmap and now deserves to remain visible.
 
 ---
 
@@ -469,25 +503,26 @@ Do not overbuild this before pass boundaries are clearer.
 
 ## C1 — Build and Run Documentation
 
-Priority: **Immediate**
+Priority: **Immediate**  
+Status: **In Progress**
 
-Create a real `README.md` or `docs/getting-started.md`.
+What exists:
 
-Must include:
+- a substantial `README.md`
+- architecture analysis docs
+- ADR documenting the C++ core / Odin host direction
 
-- repository goal
-- supported platforms
-- dependencies
-- Conan install command
-- CMake presets
-- shader compilation behavior
-- asset expectations
-- screenshots
-- known limitations
+What still needs work:
+
+- known-good platform matrix
+- clearer validated run instructions by platform
+- baseline asset / screenshot expectations
+- known limitations section that reflects current reality, not only intent
 
 ## C2 — Technique Research Notes
 
-Priority: **Ongoing**
+Priority: **Ongoing**  
+Status: **Mostly Not Started**
 
 Recommended files:
 
@@ -507,291 +542,128 @@ Each research note should include:
 - implementation approach
 - tradeoffs
 - validation method
-- screenshots/metrics to capture
+- screenshots / metrics to capture
 
 ## C3 — Architecture Decision Records
 
-Priority: **Soon**
+Priority: **Ongoing**  
+Status: **Started**
 
-Recommended files:
+Already present:
 
-```txt
-docs/decisions/ADR-0001-vulkan-14-baseline.md
-docs/decisions/ADR-0002-cmake-conan-build.md
-docs/decisions/ADR-0003-cpp-core-odin-host-boundary.md
-docs/decisions/ADR-0004-dynamic-rendering.md
-docs/decisions/ADR-0005-cpp-research-viewer-stays.md
-```
+- ADR for C++ renderer core with future Odin host boundary
 
-Purpose:
+Recommended next ADR candidates:
 
-Avoid re-litigating important decisions across context windows.
+- internal frame-packet boundary before public C ABI
+- capability-driven optional feature policy
+- pass extraction strategy vs render-graph timing
 
-## C4 — Screenshot and Metrics Protocol
+## C4 — Portfolio / Evidence Capture
 
-Priority: **Soon**
+Priority: **Medium**  
+Status: **Needs More Structure**
 
-For graphics work, claims need evidence.
+Capture evidence for:
 
-Create a protocol:
+- shadow comparisons
+- tone-mapping comparisons
+- clustered lighting scenes
+- GPU timing captures
+- platform screenshots
+- feature capability logs on different GPUs/platforms
 
-```txt
-assets/test-scenes/
-screenshots/baseline/
-screenshots/smaa/
-screenshots/vrs/
-screenshots/tonemap/
-metrics/frame-times/
-```
-
-Each comparison should record:
-
-- GPU
-- OS
-- resolution
-- render settings
-- scene
-- camera position
-- average GPU timings
-- screenshot pair
-
-## C5 — Public Portfolio Framing
-
-Priority: **Later**
-
-Eventually the project should explain itself clearly:
-
-- what problem it explores
-- why native rendering quality matters
-- what techniques are implemented
-- what is measured
-- what is not included
-- how it differs from engine-level feature lists
-
-This is important for portfolio/research credibility.
+This matters both for project quality and for demonstrating technical identity.
 
 ---
 
 # Track D — Future Odin Host Preparation
 
-## D1 — C ABI Design Document
+## D1 — Keep Odin Out of the Core Repo for Now
 
-Priority: **Soon as documentation, not implementation**
+Priority: **Immediate**  
+Status: **Still Correct**
 
-Recommended file:
+The current architecture work is reducing future integration risk, but the repo is not ready for a stable external ABI yet.
 
-```txt
-docs/analysis/04-engine-api-direction.md
-```
+Do now:
 
-Purpose:
+- continue shaping C++-internal packet/handle/pass concepts
+- let the viewer remain the first client of those concepts
 
-Define the future API without coupling implementation yet.
+Do not do yet:
 
-Minimum concepts:
+- bind Odin directly to shifting renderer internals
+- export STL/C++-shaped contracts
+
+## D2 — Public C ABI Draft
+
+Priority: **Later**  
+Status: **Not Started**
+
+Preconditions:
+
+- frame-packet shape stops changing frequently
+- handle model is clearer
+- draw submission boundary is explicit
+- pass/resource ownership is more stable
+
+Only then should the project draft public APIs like:
 
 ```c
-typedef struct RendererHandle_T* RendererHandle;
+typedef struct RendererFramePacket RendererFramePacket;
 typedef uint32_t RendererMeshHandle;
 typedef uint32_t RendererMaterialHandle;
-typedef uint32_t RendererTextureHandle;
-
-typedef struct RendererCreateInfo RendererCreateInfo;
-typedef struct RendererFramePacket RendererFramePacket;
-typedef struct RendererStats RendererStats;
 ```
 
-Must define:
+## D3 — External Host Scene Submission Model
 
-- lifetime rules
-- memory ownership rules
-- frame packet validity
-- threading assumptions
-- error reporting
-- resource loading model
-- window ownership model
+Priority: **Later**  
+Status: **Conceptual Foundation Present**
 
-## D2 — Odin Mock Renderer Prototype
+What already exists internally:
 
-Priority: **Later, separate repository/project**
+- handles
+- draw commands
+- frame packet
 
-Goal:
+What remains:
 
-Learn Odin and test engine/editor structure without linking to the real Vulkan renderer yet.
-
-Prototype can include:
-
-- window/app loop experiment
-- scene graph
-- transform hierarchy
-- asset metadata structs
-- editor panels
-- fake renderer C API
-- frame packet generation
-
-Mock renderer behavior:
-
-```txt
-renderer_submit_frame(packet):
-  print draw count
-  validate transforms
-  collect fake stats
-```
-
-This gives practical Odin learning while protecting the C++ renderer from premature FFI churn.
-
-## D3 — Real Renderer C ABI
-
-Priority: **After internal frame packet and resource handles exist**
-
-Implementation conditions:
-
-Do not begin until:
-
-- renderer has internal frame packet concept
-- renderer has resource handles
-- viewer/backend boundary is cleaner
-- at least one pass extraction has happened
-- resize path is explicit
-
-First real API should be minimal:
-
-```c
-RendererHandle renderer_create(const RendererCreateInfo* info);
-void renderer_destroy(RendererHandle renderer);
-void renderer_resize(RendererHandle renderer, uint32_t width, uint32_t height);
-void renderer_submit_frame(RendererHandle renderer, const RendererFramePacket* packet);
-void renderer_get_stats(RendererHandle renderer, RendererStats* out_stats);
-```
-
-Do not expose:
-
-- Vulkan handles
-- C++ object pointers
-- STL containers
-- internal descriptors/pipelines
-- renderer-owned memory pointers
-
-## D4 — Threaded Host/Renderer Model
-
-Priority: **After single-threaded C ABI works**
-
-First do:
-
-```txt
-Odin update -> submit frame -> C++ render -> present
-```
-
-Only then try:
-
-```txt
-Odin engine/editor thread builds packet N+1
-C++ render thread consumes packet N
-```
-
-Required before threading:
-
-- immutable frame packets
-- double-buffered packet storage
-- explicit resource lifetime rules
-- deferred destruction
-- clear synchronization strategy
+- decide how the eventual host submits scene draw lists
+- keep asset import concerns out of the future host-facing ABI
+- avoid high-frequency FFI mutator chatter
 
 ---
 
-# Recommended Development Order
+# Recommended Next Engineering Slice
 
-## Phase 1 — Documentation and Stabilization
+The roadmap-informed next slice should be:
 
-1. finish current analysis docs
-2. write `README.md` / getting started
-3. add ADR for C++ core + future Odin host
-4. document current frame flow
-5. document current pass flow
+1. consolidate `RenderFramePacket` so it becomes the normal internal submission path
+2. decide how `DrawCommand` participates in that submission boundary
+3. continue pass extraction by using the same model for SMAA
+4. document optional-feature policy and capability logging
+5. stabilize screenshot/timing comparison workflow for the current baseline
 
-## Phase 2 — Viewer/Renderer Boundary Cleanup
+In practical terms:
 
-1. move viewer panels out of `main.cpp`
-2. introduce grouped settings structs
-3. create internal `RenderFramePacket` for camera/light/settings
-4. keep existing viewer behavior working
+- **best next renderer feature:** SMAA
+- **best next architecture task:** reduce duplication between packet submission and legacy mutator APIs
+- **best next documentation task:** baseline comparison notes for shadows, tone mapping, and clustered lighting
 
-## Phase 3 — Post-Processing Architecture
+# Summary
 
-1. extract `TonemapPass`
-2. add SMAA pass objects
-3. add debug views and GPU timings
-4. validate screenshot comparison workflow
+The roadmap has progressed more than the original document reflected.
 
-## Phase 4 — Resource and Scene Boundary
+The project is no longer only planning:
 
-1. introduce mesh/material/texture handles internally
-2. generate draw commands from loaded glTF
-3. stop treating one loaded model as the permanent renderer scene
-4. prepare for external frame packet draw submission
+- viewer separation
+- settings structs
+- frame packet concepts
+- pass extraction
+- handle-based draw submission
+- capability-driven optional features
 
-## Phase 5 — VRS Research
+It now has first-cut implementations of all of those.
 
-1. query feature support
-2. design fallback behavior
-3. implement classification/debug pass
-4. measure quality/performance tradeoff
-
-## Phase 6 — Future C ABI Preparation
-
-1. write API header draft
-2. implement C++ wrapper around stable internal API
-3. test with a C mock host
-4. later test with Odin mock host
-
-## Phase 7 — Odin Engine/Editor Prototype
-
-Separate project.
-
-1. scene graph
-2. transform system
-3. editor shell
-4. mock renderer API
-5. frame packet generation
-6. later real renderer integration
-
----
-
-# What Not To Do Yet
-
-Avoid these until there is real pressure:
-
-- rewriting the renderer as a library immediately
-- deleting the C++ viewer
-- moving editor UI to Odin immediately
-- adding a full engine ECS to this repo
-- exposing Vulkan handles through C ABI
-- building a huge render graph framework
-- implementing async asset streaming before handles exist
-- doing FFI and multithreading at the same time
-- optimizing before baseline screenshots/timings exist
-
----
-
-# Near-Term Checklist
-
-Recommended next concrete tasks:
-
-```txt
-[ ] Create docs/analysis/04-engine-api-direction.md
-[ ] Create docs/decisions/ADR-0003-cpp-core-odin-host-boundary.md
-[ ] Create README.md or docs/getting-started.md
-[ ] Document current frame flow
-[ ] Document current pass flow
-[ ] Plan ViewerPanels extraction from main.cpp
-[ ] Plan RenderSettings structs
-[ ] Plan internal RenderFramePacket
-```
-
-## Next Recommended Document
-
-`docs/analysis/04-engine-api-direction.md`
-
-Purpose:
-
-Define the future C ABI and Odin host relationship as a design contract without implementing it yet.
+The highest-value next step is not to invent another big abstraction. It is to consolidate the new architecture direction and then stress-test it with SMAA, which will naturally reveal what still needs to be extracted or stabilized.

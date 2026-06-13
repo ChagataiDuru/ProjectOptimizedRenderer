@@ -1,36 +1,60 @@
 # 00 — Current Renderer State Analysis
 
-Date: 2026-06-10
+Date: 2026-06-13
 
 ## Project Direction
 
 ProjectOptimizedRenderer remains the core C++ Vulkan renderer repository.
 
-A future Odin engine/editor host may exist as a separate project, connected through a narrow C ABI. The Odin side should not directly depend on C++ classes, STL containers, Vulkan internals, or renderer implementation details. Its future role is engine/editor host: scene graph, object management, asset database, editor UI, animation/audio/game systems, and frame packet production.
+Its role is now clearer than it was a few days ago:
 
-The C++ renderer remains responsible for Vulkan, GPU resource ownership, render passes, shader pipelines, profiling, screenshots, and visual research features.
+- short term: a C++ Vulkan research viewer for rapid graphics iteration
+- medium term: a cleaner renderer backend with explicit internal submission/data boundaries
+- long term: an engine-ready renderer backend that can sit behind a narrow C ABI
+- future optional host: a separate Odin engine/editor project, not a rewrite of this repository
 
-This makes the project a hybrid:
+The repo is no longer just "a viewer with renderer code inside it." It is actively moving toward a layered model where the C++ viewer remains useful, but renderer-facing concepts are being extracted into reusable interfaces and pass objects.
 
-- short term: renderer research prototype and graphics programming portfolio
-- long term: engine-ready renderer backend with a stable external API
+## Latest Architectural Movement
+
+Recent commits materially changed the repo shape:
+
+- `Refactor viewer UI and renderer frame/pass interfaces`
+- `Prepare renderer for internal draw command submission`
+- `Add renderer device capability model for optional feature gating`
+
+Those changes mean the project is now past the purely aspirational stage for several roadmap items.
+
+Implemented architectural progress includes:
+
+- viewer panel registration extracted into `include/viewer/ViewerPanels.h` and `src/viewer/ViewerPanels.cpp`
+- grouped renderer settings extracted into `include/core/RenderSettings.h`
+- an internal `RenderFramePacket` introduced in `include/core/RenderFramePacket.h`
+- tone mapping extracted into `include/renderpasses/TonemapPass.h` / `src/renderpasses/TonemapPass.cpp`
+- `DrawCommand` introduced as an explicit internal submission primitive
+- handle types introduced in `include/resource/RenderHandles.h`
+- centralized shader interface constants and layout structs in `include/core/ShaderInterface.h`
+- runtime device capability modeling added in `VulkanContext`
+- optional-feature groundwork added for fragment shading rate, mesh shader/task shader, descriptor indexing, and timeline semaphore capability queries
+
+This is still not a fully modular renderer backend, but it is no longer accurate to describe those concepts as only future intentions.
 
 ## Current Repository Shape
 
-The repository is already beyond a minimal Vulkan triangle renderer. It currently resembles a research viewer/editor shell wrapped around a growing renderer backend.
-
 Observed high-level structure:
 
-- `src/main.cpp` owns application lifecycle, SDL window loop, camera, ImGui panels, file dialogs, render toggles, model reload, panorama load, and frame submission.
-- `include/core` and `src/core` contain Vulkan context, window, swapchain, command buffers, frame sync, camera, and renderer orchestration.
-- `include/resource` and `src/resource` contain GPU resource wrappers, glTF loading, models, textures, samplers, descriptors, scene normalization, and helper resource types.
+- `src/main.cpp` still owns application lifecycle, SDL loop, camera/input flow, deferred file actions, and viewer bootstrap.
+- `include/viewer` and `src/viewer` now hold viewer-specific panel registration rather than keeping all panel setup in `main.cpp`.
+- `include/core` and `src/core` hold renderer-facing orchestration and internal submission/state types such as `Renderer`, `RenderFramePacket`, `RenderSettings`, `DrawCommand`, `ShaderInterface`, `VulkanContext`, `Swapchain`, and sync/command helpers.
+- `include/renderpasses` and `src/renderpasses` now contain extracted pass objects including `ShadowPass`, `SkyPass`, `TonemapPass`, and `ClusteredLightCullingPass`.
+- `include/resource` and `src/resource` contain GPU resource wrappers, glTF loading, models, textures, samplers, descriptors, scene normalization, and render handles.
 - `include/debug` and `src/debug` contain ImGui integration, GPU timing, screenshots, and log UI support.
-- `shaders` contains PBR, shadow, VSM blur, tone mapping, sky, and debug shader stages.
-- `cmake` contains build helpers for shader compilation, MoltenVK detection, and volk discovery.
+- `shaders` contains scene, shadow, sky, tone mapping, VSM blur, and clustered light culling shader stages.
+- `cmake` contains build helpers for shader compilation, MoltenVK detection, and dependency discovery.
 
 ## Build and Platform Baseline
 
-Current build direction:
+Current build direction remains:
 
 - C++20
 - CMake 3.25+
@@ -41,116 +65,204 @@ Current build direction:
 - VMA for allocation
 - glm for math
 - spdlog for logging
-- glslang/SPIRV-Tools for shader compilation support
+- glslang / SPIRV-Tools for shader compilation support
 - Dear ImGui integrated from `external/imgui`
 
-Current platform intent:
+Current platform intent remains:
 
 - macOS / Apple Silicon through MoltenVK
 - Windows / NVIDIA through native Vulkan SDK
 
-This is already aligned with the future goal of a cross-platform renderer backend.
+The repository is still explicitly cross-platform in intent even if feature parity and validation depth are stronger on some paths than others.
 
-## Existing Renderer Capabilities
+## Current Renderer Capabilities
 
-The renderer currently appears to include:
+The current renderer includes or clearly exposes the following systems:
+
+### Core backend and platform
 
 - Vulkan 1.4 initialization
 - validation/debug messenger support in debug builds
-- device selection with scoring for discrete/integrated GPUs
-- graphics/compute/transfer queue family probing
+- device scoring and physical-device selection
+- queue family probing
 - dynamic rendering
-- dynamic rendering local read feature requirement
-- synchronization2 feature enablement
+- dynamic rendering local read requirement
+- synchronization2 enablement
 - VMA allocator setup with buffer device address support
 - swapchain-backed frame rendering
 - reverse-Z depth usage
+
+### Scene and material baseline
+
 - glTF/Sponza loading
-- mesh flattening into combined vertex/index buffers
-- texture loading with fallback white texture
+- scene normalization transform
+- flattened mesh/index upload
 - material descriptor sets
-- Cook-Torrance PBR shader path
-- normal mapping path using derivative-reconstructed TBN
-- HDR render target
-- tone mapping pass
+- texture loading with fallback white texture
+- explicit internal mesh/material vectors
+- explicit internal draw-command list generation
+
+### Lighting and shading
+
+- Cook-Torrance PBR shading
+- normal mapping path
+- directional light controls
+- clustered forward-plus point light support
+- compute clustered light culling pass
+
+### Image formation and post-processing
+
+- HDR offscreen rendering
+- tone mapping pass extraction via `TonemapPass`
 - Reinhard, AgX, and Khronos PBR Neutral operators
 - split-screen tone map comparison
+
+### Shadows and atmosphere
+
 - cascaded shadow maps
 - cascade debug coloring
 - PCF shadows
 - VSM moment shadows
 - separable compute blur for VSM
-- sky rendering with procedural and HDR panorama modes
-- ImGui-based render/debug panels
+- extracted `ShadowPass`
+- procedural sky and HDR panorama sky via `SkyPass`
+
+### Debugging and tooling
+
+- ImGui debug/editor panels
 - render statistics
 - GPU timing
 - screenshots
 - runtime model reload
+- centralized shader binding/layout constants
+- static layout checks for shader-facing structs
 
-## Main Architectural Issue
+### Capability and future-feature groundwork
 
-The renderer is feature-rich, but ownership boundaries are not yet clean enough for engine integration.
+- device capability model exposed through `RendererDeviceFeatures`
+- queried mesh-shader property surface through `RendererMeshShaderProperties`
+- optional feature queries for:
+  - fragment shading rate
+  - mesh shader
+  - task shader
+  - descriptor indexing
+  - timeline semaphore
 
-The largest current risk is `Renderer` becoming a monolithic object that owns too many responsibilities:
+This is important because perceptual VRS and other optional research paths now have a concrete capability-discovery foundation instead of requiring ad hoc probing later.
 
-- model loading
-- resource upload
-- descriptor allocation
-- render pass creation
-- pipeline creation
-- shadow resources
-- tone mapping resources
-- sky resources
-- runtime render stats
-- screenshot requests
-- ImGui integration point
-- render loop-facing frame orchestration
+## Main Architectural State Today
 
-This is acceptable for a research viewer, but it is not yet a stable engine-facing backend.
+The repository now sits in an intermediate but much healthier state.
 
-## Demo Shell vs Renderer Backend
+### What improved
 
-The current application should be treated as two conceptual layers even before code is physically split.
+The following roadmap ideas have moved from concept into code:
 
-### Demo / Viewer Shell
+- viewer-only panel registration is no longer fully trapped in `main.cpp`
+- grouped settings structs exist
+- a first internal frame-packet type exists
+- pass extraction has started and is real
+- internal resource handles exist
+- internal draw submission vocabulary exists
+- shader interface ownership is more centralized
+- optional feature gating groundwork exists
 
-Currently represented mostly by `src/main.cpp` and ImGui setup.
+### What is still unresolved
+
+The renderer is still not yet a clean external backend boundary.
+
+`Renderer` still owns too much of the end-to-end system, including:
+
+- asset import orchestration
+- GPU resource creation and upload
+- scene/material vectors and draw-list rebuilding
+- scene pass orchestration
+- pass coordination
+- resize handling
+- screenshot/profiling integration
+- legacy setter-based state mutation alongside packet-based submission
+
+That means the architecture is improving, but the project is still in transition rather than in a final backend form.
+
+## Viewer Shell vs Renderer Backend
+
+The current application should now be understood as three practical layers instead of only two:
+
+### 1. Viewer shell
+
+Represented mainly by:
+
+- `src/main.cpp`
+- `include/viewer/ViewerPanels.h`
+- `src/viewer/ViewerPanels.cpp`
 
 Responsibilities:
 
-- window creation
-- input loop
-- editor/debug panels
-- camera movement
-- file dialogs
-- light sliders
-- shadow controls
-- tonemap controls
-- screenshot hotkeys
-- model/panorama selection
+- app lifecycle
+- window/input loop
+- camera movement and user interaction
+- file dialogs / asset browsing
+- debug UI registration
+- building immediate research-viewer state
 
-This layer can remain in C++ for now because it is useful for fast graphics research.
+### 2. Renderer orchestration layer
 
-### Renderer Backend
+Represented mainly by:
 
-Currently represented mostly by `Renderer`, Vulkan context/resource classes, and shaders.
+- `Renderer`
+- `RenderFramePacket`
+- `RenderSettings`
+- `DrawCommand`
+- `ShaderInterface`
 
 Responsibilities:
 
-- Vulkan device/swapchain interaction
-- GPU resource ownership
-- shader/pipeline creation
-- frame synchronization
-- render pass sequencing
-- draw submission
-- profiling/timing hooks
-- backend feature support
+- frame submission boundary
+- renderer-side persistent state
+- draw-list rebuilding
+- resource ownership coordination
+- per-frame settings handoff
+- pass ordering
 
-This is the part that should eventually expose a stable C ABI for a future Odin host.
+### 3. Pass/backend layer
+
+Represented mainly by:
+
+- `ShadowPass`
+- `SkyPass`
+- `TonemapPass`
+- `ClusteredLightCullingPass`
+- Vulkan resource/context helpers
+
+Responsibilities:
+
+- pass-local pipelines and descriptors
+- per-pass record logic
+- backend feature usage
+- low-level Vulkan lifetime management
+
+This layering is still incomplete, but it is a real shift toward an engine-facing backend architecture.
+
+## Current Roadmap Position
+
+A practical status read of the roadmap is:
+
+| Item | Status | Notes |
+|---|---|---|
+| Viewer shell separation | Partial | `ViewerPanels` extracted, but `main.cpp` still owns lifecycle and input flow. |
+| Renderer settings structs | Done (initial) | `RenderSettings.h` exists and is in active use. |
+| Internal frame packet | Partial | `RenderFramePacket` exists and `submitFrame` exists, but packet ownership is not yet the only submission path. |
+| Resource handle model | Partial | `MeshHandle`, `MaterialHandle`, `TextureHandle` exist; generation/versioning and public resource APIs do not. |
+| Pass ownership extraction | Partial, meaningful | `TonemapPass`, `ShadowPass`, `SkyPass`, and clustered light culling pass exist. |
+| Shader interface validation | Partial | Centralized constants and static asserts exist; reflection/codegen does not. |
+| Capability-driven optional features | Started well | `RendererDeviceFeatures` is now a real foundation for VRS and mesh-shader experiments. |
+| SMAA | Not started | Still a next major renderer-feature milestone. |
+| Perceptual VRS | Not started, groundwork present | Capability query and optional feature gating now exist. |
+| C ABI boundary | Not started | Still documentation-first, not implementation-ready. |
 
 ## Future Odin Boundary Rule
 
-The future Odin engine/editor must communicate with the renderer only through plain C-compatible types.
+The future Odin engine/editor must still communicate with the renderer only through plain C-compatible types.
 
 Allowed across boundary:
 
@@ -158,7 +270,7 @@ Allowed across boundary:
 - POD structs
 - fixed-width numeric types
 - pointers with explicit counts
-- UTF-8 `const char*` paths where lifetime is caller-owned for the duration of the call
+- UTF-8 `const char*` paths with caller-owned lifetime for the duration of the call
 - explicit create/destroy functions
 
 Forbidden across boundary:
@@ -170,39 +282,19 @@ Forbidden across boundary:
 - Vulkan object ownership
 - VMA allocations
 - raw renderer internals
-- per-frame high-frequency single-object FFI calls
+- high-frequency per-object FFI mutator chatter
 
-Preferred future model:
+The recent internal additions are useful precisely because they move the codebase closer to C-compatible concepts without prematurely locking the external ABI.
 
-```c
-typedef uint32_t RendererMeshHandle;
-typedef uint32_t RendererMaterialHandle;
-typedef uint32_t RendererTextureHandle;
+## Immediate Strategic Recommendation
 
-typedef struct RendererDrawCommand {
-    float transform[16];
-    RendererMeshHandle mesh;
-    RendererMaterialHandle material;
-} RendererDrawCommand;
+The next slice should not be "jump straight into Odin" and it also should not be "add more big features without consolidating the new architecture." The right next move is:
 
-typedef struct RendererFramePacket {
-    float view[16];
-    float projection[16];
-    float camera_position[3];
-    RendererDrawCommand* draws;
-    uint32_t draw_count;
-} RendererFramePacket;
-```
-
-The Odin side should build a frame packet. The C++ renderer should consume that packet. This prevents the engine host from depending on renderer internals and avoids excessive FFI call overhead.
-
-## Immediate Analysis Priorities
-
-1. Document the actual frame flow from `main.cpp` into `Renderer::beginFrame()` / `Renderer::endFrame()` / internal `render()`.
-2. Map current renderer-owned resources into categories: frame resources, scene resources, pass resources, persistent backend resources, and debug resources.
-3. Identify which responsibilities must remain in the C++ renderer and which belong to the future Odin host.
-4. Sketch the first stable C ABI concepts without implementing them yet.
-5. Keep the current C++ viewer intact as the graphics research harness.
+1. make `RenderFramePacket` the dominant internal submission path rather than keeping many parallel setters
+2. decide how `DrawCommand` enters the frame packet or a closely related scene submission object
+3. continue moving pass-local resources out of `Renderer`
+4. document capability-driven feature policy for unsupported platforms
+5. implement SMAA on top of the new pass/resource direction
 
 ## Current Strategic Recommendation
 
@@ -210,30 +302,25 @@ Do not integrate Odin directly into this repository yet.
 
 Instead:
 
-1. Continue developing the C++ renderer in this repo.
-2. Use the current C++ viewer/editor shell for visual research and debugging.
-3. Design the C ABI as documentation first.
-4. Later, create a separate Odin engine/editor prototype that initially talks to a mock renderer API.
-5. Replace the mock renderer with the real C++ backend only after the renderer API boundary stabilizes.
-
-This avoids destabilizing the Vulkan renderer while still moving toward an engine-ready architecture.
+1. continue using this repo as the C++ renderer and research viewer
+2. consolidate the internal submission boundary now that packet/handle/pass concepts exist
+3. use the current viewer as the first client of that cleaner renderer interface
+4. add SMAA as the first major feature that truly stress-tests the extracted pass architecture
+5. only draft the public C ABI after the internal packet/handle/pass model stops shifting
 
 ## Next Document
 
 Recommended next file:
 
-`docs/analysis/01-architecture-boundaries.md`
+`docs/analysis/03-feature-roadmap.md`
 
 Purpose:
 
-Define exact subsystem boundaries:
+Re-mark the roadmap based on actual progress already landed in the repository, especially:
 
-- application shell
-- platform/window layer
-- renderer backend
-- resource system
-- scene representation
-- render passes
-- debug tooling
-- future C ABI surface
-- future Odin host responsibilities
+- viewer extraction progress
+- pass extraction progress
+- handle/draw-command progress
+- frame-packet progress
+- capability-gated optional feature groundwork
+- what still remains before SMAA, VRS, and any future C ABI work
