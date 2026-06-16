@@ -182,9 +182,9 @@ Renderer::Renderer(VulkanContext& ctx, Swapchain& swapchain)
     , m_clusterLightIndexBuffer(ctx)
     , m_samplerCache(ctx)
     , m_fallbackWhite(ctx)
-    , m_depthImage(ctx)
+    , m_sceneDepthTarget(ctx)
     , m_msaaHdrTarget(ctx)
-    , m_hdrTarget(ctx)
+    , m_resolvedHdrTarget(ctx)
     , m_shadowPass(ctx)
     , m_clusteredLightCullingPass(ctx)
     , m_skyPass(ctx)
@@ -215,7 +215,9 @@ void Renderer::init()
     m_clusteredLightCullingPass.init(m_sceneSetLayout, SHADER_DIR);
     m_skyPass.init(m_ctx, m_sceneSetLayout,
                    VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT,
-                   activeSceneSampleCount(),
+                   getActiveSceneSampleCount(),
+                   m_antiAliasingStatus.sampleShadingEnabled,
+                   m_antiAliasingStatus.minSampleShading,
                    SHADER_DIR);
     createFrameResources();
     createClusteredLightResources();
@@ -360,6 +362,7 @@ AntiAliasingStatus Renderer::resolveAntiAliasingSettings(
     status.mode = settings.mode;
     status.requestedSampleCount = settings.requestedSampleCount;
     status.supportedSampleCounts = m_ctx.getDeviceFeatures().supportedSceneSampleCounts;
+    status.sampleRateShadingSupported = m_ctx.getDeviceFeatures().sampleRateShading;
     status.minSampleShading = std::clamp(settings.minSampleShading, 0.0f, 1.0f);
 
     if (settings.mode == AntiAliasingMode::None) {
@@ -390,9 +393,26 @@ AntiAliasingStatus Renderer::resolveAntiAliasingSettings(
     return status;
 }
 
-VkSampleCountFlagBits Renderer::activeSceneSampleCount() const
+bool Renderer::isMsaaEnabled() const
+{
+    return m_antiAliasingStatus.activeSampleCount != MsaaSampleCount::X1;
+}
+
+VkSampleCountFlagBits Renderer::getActiveSceneSampleCount() const
 {
     return toVkSampleCount(m_antiAliasingStatus.activeSampleCount);
+}
+
+VkImageView Renderer::getActiveSceneColorAttachmentView() const
+{
+    return isMsaaEnabled()
+        ? m_msaaHdrTarget.getImageView()
+        : m_resolvedHdrTarget.getImageView();
+}
+
+VkImageView Renderer::getResolvedHdrView() const
+{
+    return m_resolvedHdrTarget.getImageView();
 }
 
 void Renderer::logAntiAliasingStatus() const
@@ -417,6 +437,13 @@ void Renderer::setAntiAliasingSettings(const AntiAliasingSettings& settings)
     m_antiAliasingSettings = settings;
     m_antiAliasingStatus = resolveAntiAliasingSettings(m_antiAliasingSettings);
     logAntiAliasingStatus();
+    if (m_antiAliasingSettings.sampleShadingEnabled &&
+        !m_antiAliasingStatus.sampleRateShadingSupported &&
+        isMsaaEnabled() &&
+        !m_loggedSampleShadingFallback) {
+        spdlog::warn("Sample-rate shading requested but unsupported; MSAA remains enabled without sample shading");
+        m_loggedSampleShadingFallback = true;
+    }
 
     const bool rendererInitialized = m_pipelineLayout != VK_NULL_HANDLE;
     if (!rendererInitialized) {
@@ -425,10 +452,12 @@ void Renderer::setAntiAliasingSettings(const AntiAliasingSettings& settings)
 
     const bool sampleCountChanged =
         previousStatus.activeSampleCount != m_antiAliasingStatus.activeSampleCount;
-    const bool pbrPipelineStateChanged =
+    const bool scenePipelineSampleStateChanged =
         sampleCountChanged ||
         previousStatus.sampleShadingEnabled != m_antiAliasingStatus.sampleShadingEnabled ||
-        std::abs(previousStatus.minSampleShading - m_antiAliasingStatus.minSampleShading) > 0.0001f ||
+        std::abs(previousStatus.minSampleShading - m_antiAliasingStatus.minSampleShading) > 0.0001f;
+    const bool pbrPipelineStateChanged =
+        scenePipelineSampleStateChanged ||
         previousStatus.alphaToCoverageEnabled != m_antiAliasingStatus.alphaToCoverageEnabled;
 
     if (!sampleCountChanged && !pbrPipelineStateChanged) {
@@ -446,8 +475,14 @@ void Renderer::setAntiAliasingSettings(const AntiAliasingSettings& settings)
         createPbrGraphicsPipelines();
     }
 
+    if (scenePipelineSampleStateChanged) {
+        m_skyPass.recreatePipeline(m_ctx,
+                                   getActiveSceneSampleCount(),
+                                   m_antiAliasingStatus.sampleShadingEnabled,
+                                   m_antiAliasingStatus.minSampleShading);
+    }
+
     if (sampleCountChanged) {
-        m_skyPass.recreatePipeline(m_ctx, activeSceneSampleCount());
         createResizeDependentResources();
         refreshResizeDependentBindings();
     }
@@ -611,7 +646,7 @@ void Renderer::createPbrPipeline()
 
     const VkPipelineMultisampleStateCreateInfo multisample{
         .sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = activeSceneSampleCount(),
+        .rasterizationSamples = getActiveSceneSampleCount(),
         .sampleShadingEnable  = m_antiAliasingStatus.sampleShadingEnabled ? VK_TRUE : VK_FALSE,
         .minSampleShading     = m_antiAliasingStatus.minSampleShading,
         .alphaToCoverageEnable = m_antiAliasingStatus.alphaToCoverageEnabled ? VK_TRUE : VK_FALSE,
@@ -905,7 +940,7 @@ void Renderer::createPbrGraphicsPipelines()
 
     const VkPipelineMultisampleStateCreateInfo multisample{
         .sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = activeSceneSampleCount(),
+        .rasterizationSamples = getActiveSceneSampleCount(),
         .sampleShadingEnable  = m_antiAliasingStatus.sampleShadingEnabled ? VK_TRUE : VK_FALSE,
         .minSampleShading     = m_antiAliasingStatus.minSampleShading,
         .alphaToCoverageEnable = m_antiAliasingStatus.alphaToCoverageEnabled ? VK_TRUE : VK_FALSE,
@@ -1339,18 +1374,18 @@ void Renderer::rewriteFrameSceneClusterBindings()
     }
 }
 
-void Renderer::createDepthImage()
+void Renderer::createSceneDepthTarget()
 {
     const VkExtent2D ext = m_swapchain.getExtent();
     // D32_SFLOAT: 32-bit float depth, no stencil, optimal for reverse-Z precision
-    m_depthImage.create(ext.width, ext.height, 1,
-                        VK_FORMAT_D32_SFLOAT,
-                        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-                        VK_IMAGE_ASPECT_DEPTH_BIT,
-                        1,
-                        activeSceneSampleCount());
+    m_sceneDepthTarget.create(ext.width, ext.height, 1,
+                              VK_FORMAT_D32_SFLOAT,
+                              VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                              VK_IMAGE_ASPECT_DEPTH_BIT,
+                              1,
+                              getActiveSceneSampleCount());
 
-    spdlog::info("Depth image created: {}x{} D32_SFLOAT (reverse-Z, {}x)",
+    spdlog::info("Scene depth target created: {}x{} D32_SFLOAT (reverse-Z, {}x)",
                  ext.width, ext.height,
                  sampleCountValue(m_antiAliasingStatus.activeSampleCount));
 }
@@ -1362,8 +1397,8 @@ void Renderer::createResizeDependentResources()
         return;
     }
 
-    createDepthImage();
-    createHdrTarget();
+    createSceneDepthTarget();
+    createSceneHdrTargets();
     if (m_pointLightBuffer.getBuffer() != VK_NULL_HANDLE) {
         resizeClusteredLightResources();
     }
@@ -1377,8 +1412,8 @@ void Renderer::destroyResizeDependentResources()
     m_clusterCountY = 0;
     m_clusterCount = 0;
     m_msaaHdrTarget.destroy();
-    m_hdrTarget.destroy();
-    m_depthImage.destroy();
+    m_resolvedHdrTarget.destroy();
+    m_sceneDepthTarget.destroy();
 }
 
 void Renderer::recreateResizeDependentResources()
@@ -1394,28 +1429,28 @@ void Renderer::refreshResizeDependentBindings()
     rewriteFrameSceneClusterBindings();
     uploadClusterMetadataForAllFrames();
 
-    // TonemapPass owns its descriptor set, but Renderer owns the HDR target it samples.
-    if (m_hdrTarget.getImageView() != VK_NULL_HANDLE) {
-        m_tonemapPass.resize(m_ctx.getDevice(), m_hdrSampler, m_hdrTarget.getImageView());
+    // TonemapPass owns its descriptor set, but Renderer owns the resolved HDR target it samples.
+    if (getResolvedHdrView() != VK_NULL_HANDLE) {
+        m_tonemapPass.resize(m_ctx.getDevice(), m_hdrSampler, getResolvedHdrView());
     }
 }
 
-void Renderer::createHdrTarget()
+void Renderer::createSceneHdrTargets()
 {
     const VkExtent2D ext = m_swapchain.getExtent();
 
-    m_hdrTarget.create(ext.width, ext.height, 1,
-                       VK_FORMAT_R16G16B16A16_SFLOAT,
-                       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-                       VK_IMAGE_ASPECT_COLOR_BIT);
+    m_resolvedHdrTarget.create(ext.width, ext.height, 1,
+                               VK_FORMAT_R16G16B16A16_SFLOAT,
+                               VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                               VK_IMAGE_ASPECT_COLOR_BIT);
 
-    if (m_antiAliasingStatus.activeSampleCount != MsaaSampleCount::X1) {
+    if (isMsaaEnabled()) {
         m_msaaHdrTarget.create(ext.width, ext.height, 1,
                                VK_FORMAT_R16G16B16A16_SFLOAT,
                                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
                                VK_IMAGE_ASPECT_COLOR_BIT,
                                1,
-                               activeSceneSampleCount());
+                               getActiveSceneSampleCount());
     }
 
     // Create the sampler once (on first call); reuse on resize — the sampler itself
@@ -1434,7 +1469,7 @@ void Renderer::createHdrTarget()
         VK_CHECK(vkCreateSampler(m_ctx.getDevice(), &samplerCI, nullptr, &m_hdrSampler));
     }
 
-    spdlog::info("HDR target created: {}x{} R16G16B16A16_SFLOAT (scene {}x, tonemap input 1x)",
+    spdlog::info("Scene HDR targets created: {}x{} R16G16B16A16_SFLOAT (scene {}x, resolved 1x)",
                  ext.width, ext.height,
                  sampleCountValue(m_antiAliasingStatus.activeSampleCount));
 }
@@ -1920,8 +1955,8 @@ void Renderer::render()
     vkCmdPipelineBarrier2(cmd, &clusterDep);
     m_gpuTimer.writeTimestamp(cmd, "ClusterCull_End");
 
-    const bool sceneMsaaEnabled = m_antiAliasingStatus.activeSampleCount != MsaaSampleCount::X1;
-    Image& sceneColorTarget = sceneMsaaEnabled ? m_msaaHdrTarget : m_hdrTarget;
+    const bool sceneMsaaEnabled = isMsaaEnabled();
+    Image& sceneColorTarget = sceneMsaaEnabled ? m_msaaHdrTarget : m_resolvedHdrTarget;
 
     vkutil::transitionImage(cmd, sceneColorTarget.getImage(),
         VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,              0,
@@ -1929,15 +1964,15 @@ void Renderer::render()
         VK_IMAGE_LAYOUT_UNDEFINED,                          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
     if (sceneMsaaEnabled) {
-        vkutil::transitionImage(cmd, m_hdrTarget.getImage(),
+        vkutil::transitionImage(cmd, m_resolvedHdrTarget.getImage(),
             VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,              0,
             VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,   VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
             VK_IMAGE_LAYOUT_UNDEFINED,                          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     }
 
-    // Depth image transitions from UNDEFINED each frame — LOAD_OP_CLEAR discards previous
+    // Scene depth transitions from UNDEFINED each frame — LOAD_OP_CLEAR discards previous
     // contents anyway, so UNDEFINED→DEPTH_ATTACHMENT_OPTIMAL is valid and avoids layout tracking.
-    vkutil::transitionImage(cmd, m_depthImage.getImage(),
+    vkutil::transitionImage(cmd, m_sceneDepthTarget.getImage(),
         VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,              0,
         VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
             VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
@@ -1948,10 +1983,10 @@ void Renderer::render()
     // Clear to black in linear space (sRGB 0.01 ≈ linear ~0.001; using 0 is visually identical).
     const VkRenderingAttachmentInfo colorAttachment{
         .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView   = sceneColorTarget.getImageView(),
+        .imageView   = getActiveSceneColorAttachmentView(),
         .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         .resolveMode = sceneMsaaEnabled ? VK_RESOLVE_MODE_AVERAGE_BIT : VK_RESOLVE_MODE_NONE,
-        .resolveImageView = sceneMsaaEnabled ? m_hdrTarget.getImageView() : VK_NULL_HANDLE,
+        .resolveImageView = sceneMsaaEnabled ? getResolvedHdrView() : VK_NULL_HANDLE,
         .resolveImageLayout = sceneMsaaEnabled
             ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
             : VK_IMAGE_LAYOUT_UNDEFINED,
@@ -1963,7 +1998,7 @@ void Renderer::render()
     // Reverse-Z: clear depth to 0.0 (far plane); closer fragments have larger depth values
     const VkRenderingAttachmentInfo depthAttachment{
         .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView   = m_depthImage.getImageView(),
+        .imageView   = m_sceneDepthTarget.getImageView(),
         .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
         .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
         .storeOp     = VK_ATTACHMENT_STORE_OP_DONT_CARE,  // not sampled after, no need to store
@@ -2071,8 +2106,8 @@ void Renderer::render()
 
     m_gpuTimer.writeTimestamp(cmd, "ScenePass_End");
 
-    // ── Transition HDR target: attachment write → fragment shader read ────────
-    vkutil::transitionImage(cmd, m_hdrTarget.getImage(),
+    // ── Transition resolved HDR target: attachment/resolve write → fragment shader read ─
+    vkutil::transitionImage(cmd, m_resolvedHdrTarget.getImage(),
         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,   VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,            VK_ACCESS_2_SHADER_READ_BIT,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);

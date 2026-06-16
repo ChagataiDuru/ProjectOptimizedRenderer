@@ -12,11 +12,59 @@
 #include <SDL3/SDL_dialog.h>
 #include <IconsFontAwesome6.h>
 #include <algorithm>
+#include <array>
 #include <glm/gtc/quaternion.hpp>
 #include <imgui.h>
 #include <iterator>
 #include <spdlog/spdlog.h>
 #include <string>
+
+namespace {
+
+int sampleCountToComboIndex(MsaaSampleCount count)
+{
+    switch (count) {
+        case MsaaSampleCount::X1: return 0;
+        case MsaaSampleCount::X2: return 1;
+        case MsaaSampleCount::X4: return 2;
+        case MsaaSampleCount::X8: return 3;
+    }
+    return 0;
+}
+
+MsaaSampleCount comboIndexToSampleCount(int index)
+{
+    switch (index) {
+        case 1: return MsaaSampleCount::X2;
+        case 2: return MsaaSampleCount::X4;
+        case 3: return MsaaSampleCount::X8;
+        case 0:
+        default: return MsaaSampleCount::X1;
+    }
+}
+
+uint32_t sampleCountValue(MsaaSampleCount count)
+{
+    return static_cast<uint32_t>(count);
+}
+
+std::string supportedSampleCountsLabel(const std::array<bool, 4>& supported)
+{
+    static const char* labels[] = { "1x", "2x", "4x", "8x" };
+    std::string result;
+    for (size_t i = 0; i < supported.size(); ++i) {
+        if (!supported[i]) {
+            continue;
+        }
+        if (!result.empty()) {
+            result += ", ";
+        }
+        result += labels[i];
+    }
+    return result.empty() ? "none" : result;
+}
+
+} // namespace
 
 void registerViewerPanels(ImGuiManager& imguiManager,
                           Renderer& renderer,
@@ -165,6 +213,79 @@ void registerViewerPanels(ImGuiManager& imguiManager,
             ImGui::Combo("Right", &state.tonemap.splitRightMode, tonemapNames, 3);
             ImGui::Unindent();
             ImGui::TextDisabled("White line = split center");
+        }
+    }, DockLocation::Right);
+
+    imguiManager.registerPanel(ICON_FA_WAND_MAGIC_SPARKLES " Anti-Aliasing", [&]() {
+        AntiAliasingSettings pending = state.antiAliasing;
+        const AntiAliasingStatus& status = renderer.getAntiAliasingStatus();
+        bool changed = false;
+
+        int mode = pending.mode == AntiAliasingMode::MSAA ? 1 : 0;
+        static const char* modeNames[] = { "None", "MSAA" };
+        if (ImGui::Combo("Mode", &mode, modeNames, 2)) {
+            pending.mode = mode == 1 ? AntiAliasingMode::MSAA : AntiAliasingMode::None;
+            changed = true;
+        }
+
+        int sampleIndex = sampleCountToComboIndex(pending.requestedSampleCount);
+        static const char* sampleNames[] = { "1x", "2x", "4x", "8x" };
+        ImGui::BeginDisabled(pending.mode == AntiAliasingMode::None);
+        if (ImGui::Combo("Requested Samples", &sampleIndex, sampleNames, 4)) {
+            pending.requestedSampleCount = comboIndexToSampleCount(sampleIndex);
+            changed = true;
+        }
+        ImGui::EndDisabled();
+
+        ImGui::Text("Supported: %s",
+                    supportedSampleCountsLabel(status.supportedSampleCounts).c_str());
+        ImGui::Text("Active:    %ux", sampleCountValue(status.activeSampleCount));
+        if (status.activeSampleCount != status.requestedSampleCount &&
+            pending.mode == AntiAliasingMode::MSAA) {
+            ImGui::TextDisabled("Requested count fell back to the nearest supported count");
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Sample Shading");
+        const bool sampleShadingSupported = status.sampleRateShadingSupported;
+        if (!sampleShadingSupported) {
+            ImGui::TextDisabled("Unavailable on this Vulkan device");
+        }
+
+        ImGui::BeginDisabled(!sampleShadingSupported);
+        bool sampleShadingEnabled = pending.sampleShadingEnabled;
+        if (ImGui::Checkbox("Enable Sample Shading", &sampleShadingEnabled)) {
+            pending.sampleShadingEnabled = sampleShadingEnabled;
+            changed = true;
+        }
+
+        float minSampleShading = pending.minSampleShading;
+        if (ImGui::SliderFloat("Minimum Fraction", &minSampleShading, 0.0f, 1.0f, "%.2f")) {
+            pending.minSampleShading = minSampleShading;
+            changed = true;
+        }
+
+        const float presetValues[] = { 0.0f, 0.25f, 0.5f, 1.0f };
+        const char* presetLabels[] = { "0.00", "0.25", "0.50", "1.00" };
+        for (size_t i = 0; i < std::size(presetValues); ++i) {
+            if (i > 0) {
+                ImGui::SameLine();
+            }
+            if (ImGui::Button(presetLabels[i])) {
+                pending.minSampleShading = presetValues[i];
+                changed = true;
+            }
+        }
+        ImGui::EndDisabled();
+
+        ImGui::TextDisabled("Sample shading is separate from sample count; it does not render the scene at a higher resolution.");
+        ImGui::Text("Effective: %s, %.2f",
+                    status.sampleShadingEnabled ? "enabled" : "disabled",
+                    status.minSampleShading);
+
+        if (changed) {
+            state.antiAliasing = pending;
+            renderer.setAntiAliasingSettings(state.antiAliasing);
         }
     }, DockLocation::Right);
 

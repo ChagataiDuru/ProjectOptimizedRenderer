@@ -117,7 +117,7 @@ Success criteria:
 ## A2 — Capability-Driven HDR MSAA Path
 
 Priority: **High**  
-Status: **Foundation In Progress**
+Status: **Foundation Implemented**
 
 Purpose:
 
@@ -145,6 +145,7 @@ Architecture requirements:
 - exact-format sample-count capability discovery
 - multisampled scene color/depth with a single resolved HDR target
 - pipeline sample-count compatibility for scene-space contributors
+- runtime sample-count and sample-shading controls
 - GPU timing and screenshots for repeatable comparisons
 
 Recommended first implementation:
@@ -155,6 +156,7 @@ Renderer-owned HDR MSAA foundation
   - persistent AA settings
   - MSAA color/depth attachments
   - single-sample HDR resolve for TonemapPass
+  - optional sample shading controls
 ```
 
 SMAA remains a later native spatial comparison or fallback path rather than the immediate AA milestone.

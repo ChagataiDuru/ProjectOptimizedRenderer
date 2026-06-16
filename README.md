@@ -65,6 +65,8 @@ Implemented or partially implemented systems include:
 - internal frame packet plus sticky scene packet submission
 - device capability modeling for optional feature gating
 - capability-driven native MSAA foundation for HDR scene rendering
+- explicit scene HDR/depth attachment ownership with single-sample HDR resolve for tone mapping
+- optional sample shading controls for MSAA experiments
 
 Planned research directions include:
 
@@ -223,6 +225,7 @@ The ImGui overlay exposes panels for:
 - shadow filter mode
 - sky mode
 - tone mapping
+- anti-aliasing sample count and sample shading
 - render stats
 - GPU timings
 - scene hierarchy

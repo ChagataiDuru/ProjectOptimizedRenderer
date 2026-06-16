@@ -154,7 +154,10 @@ private:
     void destroyRendererDescriptorPools();
     AntiAliasingStatus resolveAntiAliasingSettings(const AntiAliasingSettings& settings) const;
     void logAntiAliasingStatus() const;
-    VkSampleCountFlagBits activeSceneSampleCount() const;
+    bool isMsaaEnabled() const;
+    VkSampleCountFlagBits getActiveSceneSampleCount() const;
+    VkImageView getActiveSceneColorAttachmentView() const;
+    VkImageView getResolvedHdrView() const;
     void refreshRenderStats();
     void createFrameResources();
     void applyFrameSubmission(const RenderFramePacket& packet);
@@ -223,10 +226,10 @@ private:
     uint32_t         m_clusterCountZ = shader_interface::kClusterZSlices;
     uint32_t         m_clusterCount = 0;
 
-    // Resize-dependent renderer images.
-    Image            m_depthImage;
+    // Resize-dependent scene attachments. Tonemap always samples m_resolvedHdrTarget.
+    Image            m_sceneDepthTarget;
     Image            m_msaaHdrTarget;
-    Image            m_hdrTarget;
+    Image            m_resolvedHdrTarget;
     VkSampler        m_hdrSampler = VK_NULL_HANDLE;
 
     // Extracted passes keep their pass-local descriptors/pipelines internally.
@@ -257,6 +260,7 @@ private:
 
     AntiAliasingSettings m_antiAliasingSettings;
     AntiAliasingStatus   m_antiAliasingStatus;
+    bool                 m_loggedSampleShadingFallback = false;
 
     // Phase 2.5: optional ImGui overlay
     ImGuiManager*    m_imguiManager   = nullptr;
@@ -278,6 +282,6 @@ private:
     void rewriteFrameSceneClusterBindings();
     void createMaterialDescriptorPool();
     void allocateMaterialDescriptorSets();
-    void createDepthImage();
-    void createHdrTarget();
+    void createSceneDepthTarget();
+    void createSceneHdrTargets();
 };

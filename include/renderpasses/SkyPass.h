@@ -14,10 +14,14 @@ public:
               VkFormat colorFormat,
               VkFormat depthFormat,
               VkSampleCountFlagBits sceneSamples,
+              bool sampleShadingEnabled,
+              float minSampleShading,
               const std::string& shaderDir);
 
     void recreatePipeline(VulkanContext& ctx,
-                          VkSampleCountFlagBits sceneSamples);
+                          VkSampleCountFlagBits sceneSamples,
+                          bool sampleShadingEnabled,
+                          float minSampleShading);
 
     void record(VkCommandBuffer cmd,
                 VkDescriptorSet sceneSet,
@@ -41,5 +45,7 @@ private:
     VkFormat              m_colorFormat = VK_FORMAT_UNDEFINED;
     VkFormat              m_depthFormat = VK_FORMAT_UNDEFINED;
     VkSampleCountFlagBits m_sceneSamples = VK_SAMPLE_COUNT_1_BIT;
+    bool                  m_sampleShadingEnabled = false;
+    float                 m_minSampleShading = 0.0f;
     std::string           m_shaderDir;
 };

@@ -66,7 +66,9 @@ VkPipeline createFullscreenPipeline(
     VkPipelineLayout layout,
     VkFormat colorFormat,
     VkFormat depthFormat,
-    VkSampleCountFlagBits sceneSamples)
+    VkSampleCountFlagBits sceneSamples,
+    bool sampleShadingEnabled,
+    float minSampleShading)
 {
     const VkPipelineVertexInputStateCreateInfo vertexInput{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
@@ -90,6 +92,8 @@ VkPipeline createFullscreenPipeline(
     const VkPipelineMultisampleStateCreateInfo multisample{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
         .rasterizationSamples = sceneSamples,
+        .sampleShadingEnable = sampleShadingEnabled ? VK_TRUE : VK_FALSE,
+        .minSampleShading = sampleShadingEnabled ? minSampleShading : 0.0f,
     };
     const VkPipelineDepthStencilStateCreateInfo depthStencil{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
@@ -155,6 +159,8 @@ void SkyPass::init(VulkanContext& ctx,
                    VkFormat colorFormat,
                    VkFormat depthFormat,
                    VkSampleCountFlagBits sceneSamples,
+                   bool sampleShadingEnabled,
+                   float minSampleShading,
                    const std::string& shaderDir)
 {
     const VkDevice dev = ctx.getDevice();
@@ -238,13 +244,15 @@ void SkyPass::init(VulkanContext& ctx,
     };
     VK_CHECK(vkCreatePipelineLayout(dev, &layoutCI, nullptr, &m_pipelineLayout));
 
-    recreatePipeline(ctx, sceneSamples);
+    recreatePipeline(ctx, sceneSamples, sampleShadingEnabled, minSampleShading);
 
     spdlog::info("Sky pipeline created (procedural Rayleigh+Mie + HDR equirectangular panorama)");
 }
 
 void SkyPass::recreatePipeline(VulkanContext& ctx,
-                               VkSampleCountFlagBits sceneSamples)
+                               VkSampleCountFlagBits sceneSamples,
+                               bool sampleShadingEnabled,
+                               float minSampleShading)
 {
     if (m_pipelineLayout == VK_NULL_HANDLE || m_shaderDir.empty()) {
         return;
@@ -257,6 +265,8 @@ void SkyPass::recreatePipeline(VulkanContext& ctx,
     }
 
     m_sceneSamples = sceneSamples;
+    m_sampleShadingEnabled = sampleShadingEnabled;
+    m_minSampleShading = sampleShadingEnabled ? minSampleShading : 0.0f;
 
     VkShaderModule vertMod = makeShaderModule(dev, loadSpv(m_shaderDir + "/sky.vert.spv"));
     VkShaderModule fragMod = makeShaderModule(dev, loadSpv(m_shaderDir + "/sky.frag.spv"));
@@ -274,7 +284,9 @@ void SkyPass::recreatePipeline(VulkanContext& ctx,
         m_pipelineLayout,
         m_colorFormat,
         m_depthFormat,
-        m_sceneSamples);
+        m_sceneSamples,
+        m_sampleShadingEnabled,
+        m_minSampleShading);
 
     vkDestroyShaderModule(dev, vertMod, nullptr);
     vkDestroyShaderModule(dev, fragMod, nullptr);

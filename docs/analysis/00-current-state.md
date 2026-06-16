@@ -256,7 +256,7 @@ A practical status read of the roadmap is:
 | Pass ownership extraction | Partial, meaningful | `TonemapPass`, `ShadowPass`, `SkyPass`, and clustered light culling pass exist. |
 | Shader interface validation | Partial | Centralized constants and static asserts exist; reflection/codegen does not. |
 | Capability-driven optional features | Established foundation | `RendererDeviceFeatures` is a centralized detect-once snapshot with baseline-vs-optional policy clarified in code and logging. |
-| HDR MSAA | Foundation in progress | Immediate native AA milestone with capability-driven sample-count selection. |
+| HDR MSAA | Foundation implemented | Immediate native AA milestone with explicit scene attachments, resolve, pipeline compatibility, and sample-shading controls. |
 | SMAA | Not started | Later native spatial comparison or fallback path. |
 | Perceptual VRS | Not started, groundwork present | Capability query and optional feature gating now exist. |
 | C ABI boundary | Not started | Still documentation-first, not implementation-ready. |

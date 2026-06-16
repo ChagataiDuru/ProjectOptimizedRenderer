@@ -84,6 +84,7 @@ struct AntiAliasingStatus {
     std::array<bool, 4> supportedSampleCounts = { true, false, false, false };
 
     bool sampleShadingEnabled = false;
+    bool sampleRateShadingSupported = false;
     float minSampleShading = 0.0f;
 
     bool alphaToCoverageEnabled = false;

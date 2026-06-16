@@ -11,6 +11,7 @@ struct ViewerState {
     TonemapSettings tonemap;
     SkySettings sky;
     DebugViewSettings debugView;
+    AntiAliasingSettings antiAliasing;
 
     int selectedMeshIndex = -1;
     std::array<float, 90> fpsHistory{};
