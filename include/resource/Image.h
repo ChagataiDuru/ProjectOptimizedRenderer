@@ -18,7 +18,8 @@ public:
     void create(uint32_t width, uint32_t height, uint32_t depth,
                 VkFormat format, VkImageUsageFlags usage,
                 VkImageAspectFlags aspectFlags = VK_IMAGE_ASPECT_COLOR_BIT,
-                uint32_t arrayLayers = 1);
+                uint32_t arrayLayers = 1,
+                VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT);
 
     // Upload pixel data via an internally-created staging buffer recorded into transferCmd.
     // Caller must submit transferCmd and wait for completion before using the image.
@@ -45,6 +46,7 @@ public:
     VkFormat    getFormat()      const { return m_format; }
     VkExtent3D  getExtent()      const { return m_extent; }
     uint32_t    getArrayLayers() const { return m_arrayLayers; }
+    VkSampleCountFlagBits getSampleCount() const { return m_samples; }
 
 private:
     void createView(VkImageAspectFlags aspectFlags);
@@ -56,6 +58,7 @@ private:
     VkFormat       m_format      = VK_FORMAT_UNDEFINED;
     VkExtent3D     m_extent      = {};
     uint32_t       m_arrayLayers = 1;  // >1 → 2D array image
+    VkSampleCountFlagBits m_samples = VK_SAMPLE_COUNT_1_BIT;
 
     // Staging resources for createFromData — released after GPU completion
     VkBuffer      m_stagingBuffer = VK_NULL_HANDLE;

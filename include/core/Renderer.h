@@ -8,6 +8,7 @@
 #include "core/MeshRenderData.h"
 #include "core/RenderFramePacket.h"
 #include "core/RenderScenePacket.h"
+#include "core/RenderSettings.h"
 #include "core/ShaderInterface.h"
 #include "debug/GPUTimer.h"
 #include "debug/Screenshot.h"
@@ -92,6 +93,12 @@ public:
     // Phase 2.6: queue a screenshot capture at the end of the current frame
     void requestScreenshot(const std::string& filename = "");
 
+    // Persistent renderer configuration: AA is not frame-local because sample
+    // count affects attachments, pipelines, resolves, and resize resources.
+    void setAntiAliasingSettings(const AntiAliasingSettings& settings);
+    const AntiAliasingSettings& getAntiAliasingSettings() const { return m_antiAliasingSettings; }
+    const AntiAliasingStatus& getAntiAliasingStatus() const { return m_antiAliasingStatus; }
+
 private:
     static constexpr uint32_t kFramesInFlight = 3;
 
@@ -140,9 +147,14 @@ private:
     void recreateResizeDependentResources();
     void refreshResizeDependentBindings();
     void createPbrPipeline();
+    void createPbrGraphicsPipelines();
+    void destroyPbrGraphicsPipelines();
     void loadImportedModel(const std::string& modelPath);
     void destroyPipeline();
     void destroyRendererDescriptorPools();
+    AntiAliasingStatus resolveAntiAliasingSettings(const AntiAliasingSettings& settings) const;
+    void logAntiAliasingStatus() const;
+    VkSampleCountFlagBits activeSceneSampleCount() const;
     void refreshRenderStats();
     void createFrameResources();
     void applyFrameSubmission(const RenderFramePacket& packet);
@@ -213,6 +225,7 @@ private:
 
     // Resize-dependent renderer images.
     Image            m_depthImage;
+    Image            m_msaaHdrTarget;
     Image            m_hdrTarget;
     VkSampler        m_hdrSampler = VK_NULL_HANDLE;
 
@@ -241,6 +254,9 @@ private:
     int32_t m_skyMode    = 0;      // 0 = Procedural (Rayleigh+Mie), 1 = HDR Panorama
     bool    m_wireframe   = false;
     bool    m_showNormals = false;
+
+    AntiAliasingSettings m_antiAliasingSettings;
+    AntiAliasingStatus   m_antiAliasingStatus;
 
     // Phase 2.5: optional ImGui overlay
     ImGuiManager*    m_imguiManager   = nullptr;

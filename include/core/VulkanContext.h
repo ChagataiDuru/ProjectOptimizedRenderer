@@ -2,6 +2,7 @@
 
 #include <volk.h>
 #include <vk_mem_alloc.h>
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -30,6 +31,10 @@ struct RendererDeviceFeatures {
     bool taskShader = false;
     bool descriptorIndexing = false;
     bool timelineSemaphore = false;
+    bool sampleRateShading = false;
+
+    // Scene sample support for 1x, 2x, 4x, and 8x in that order.
+    std::array<bool, 4> supportedSceneSampleCounts = { true, false, false, false };
 };
 
 struct RendererMeshShaderProperties {

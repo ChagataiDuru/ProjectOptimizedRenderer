@@ -54,6 +54,41 @@ struct DebugViewSettings {
     bool showNormals = false;
 };
 
+enum class AntiAliasingMode : uint8_t {
+    None,
+    MSAA,
+};
+
+enum class MsaaSampleCount : uint8_t {
+    X1 = 1,
+    X2 = 2,
+    X4 = 4,
+    X8 = 8,
+};
+
+struct AntiAliasingSettings {
+    AntiAliasingMode mode = AntiAliasingMode::None;
+    MsaaSampleCount requestedSampleCount = MsaaSampleCount::X1;
+
+    bool sampleShadingEnabled = false;
+    float minSampleShading = 0.0f;
+
+    bool alphaToCoverageEnabled = false;
+};
+
+struct AntiAliasingStatus {
+    AntiAliasingMode mode = AntiAliasingMode::None;
+    MsaaSampleCount requestedSampleCount = MsaaSampleCount::X1;
+    MsaaSampleCount activeSampleCount = MsaaSampleCount::X1;
+    MsaaSampleCount fallbackSampleCount = MsaaSampleCount::X1;
+    std::array<bool, 4> supportedSampleCounts = { true, false, false, false };
+
+    bool sampleShadingEnabled = false;
+    float minSampleShading = 0.0f;
+
+    bool alphaToCoverageEnabled = false;
+};
+
 struct CameraData {
     glm::mat4 view       = glm::mat4(1.0f);
     glm::mat4 projection = glm::mat4(1.0f);

@@ -504,4 +504,4 @@ The highest-value work now is not inventing more architecture layers. It is cons
 - handle-based scene vocabulary
 - capability-driven optional feature policy
 
-That consolidation will make the next big feature, SMAA, much easier to implement without re-fragmenting the architecture.
+That consolidation will make native AA work such as HDR MSAA now and SMAA comparisons later much easier to implement without re-fragmenting the architecture.

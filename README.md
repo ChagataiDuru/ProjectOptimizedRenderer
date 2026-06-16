@@ -64,10 +64,12 @@ Implemented or partially implemented systems include:
 - internal render settings structs
 - internal frame packet plus sticky scene packet submission
 - device capability modeling for optional feature gating
+- capability-driven native MSAA foundation for HDR scene rendering
 
 Planned research directions include:
 
-- SMAA
+- HDR MSAA, sample shading, and alpha-to-coverage quality comparisons
+- SMAA as a later comparison or fallback path
 - perceptual VRS
 - improved render pass ownership
 - clearer frame packet model
@@ -339,10 +341,11 @@ Recommended next engineering direction:
 2. Decide how `DrawCommand` participates in scene/frame submission.
 3. Continue extracting pass-local ownership from `Renderer`.
 4. Document capability-driven optional feature policy for unsupported platforms.
-5. Implement SMAA as the first major feature on top of the new pass architecture.
-6. Add VRS only as an optional, capability-gated research path.
-7. Introduce stronger resource-handle semantics before real external host integration.
-8. Draft the public C ABI only after internal concepts stabilize.
+5. Implement capability-driven HDR MSAA as the first major AA feature on top of the new pass architecture.
+6. Keep SMAA as a later native spatial comparison or fallback path, not the immediate AA milestone.
+7. Add VRS only as an optional, capability-gated research path.
+8. Introduce stronger resource-handle semantics before real external host integration.
+9. Draft the public C ABI only after internal concepts stabilize.
 
 ## Status
 

@@ -65,7 +65,8 @@ VkPipeline createFullscreenPipeline(
     const std::array<VkPipelineShaderStageCreateInfo, 2>& stages,
     VkPipelineLayout layout,
     VkFormat colorFormat,
-    VkFormat depthFormat)
+    VkFormat depthFormat,
+    VkSampleCountFlagBits sceneSamples)
 {
     const VkPipelineVertexInputStateCreateInfo vertexInput{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
@@ -88,7 +89,7 @@ VkPipeline createFullscreenPipeline(
     };
     const VkPipelineMultisampleStateCreateInfo multisample{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+        .rasterizationSamples = sceneSamples,
     };
     const VkPipelineDepthStencilStateCreateInfo depthStencil{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
@@ -153,9 +154,13 @@ void SkyPass::init(VulkanContext& ctx,
                    VkDescriptorSetLayout sceneSetLayout,
                    VkFormat colorFormat,
                    VkFormat depthFormat,
+                   VkSampleCountFlagBits sceneSamples,
                    const std::string& shaderDir)
 {
     const VkDevice dev = ctx.getDevice();
+    m_colorFormat = colorFormat;
+    m_depthFormat = depthFormat;
+    m_shaderDir = shaderDir;
 
     const VkDescriptorSetLayoutBinding binding{
         .binding = shader_interface::sky_binding::kPanorama,
@@ -233,8 +238,28 @@ void SkyPass::init(VulkanContext& ctx,
     };
     VK_CHECK(vkCreatePipelineLayout(dev, &layoutCI, nullptr, &m_pipelineLayout));
 
-    VkShaderModule vertMod = makeShaderModule(dev, loadSpv(shaderDir + "/sky.vert.spv"));
-    VkShaderModule fragMod = makeShaderModule(dev, loadSpv(shaderDir + "/sky.frag.spv"));
+    recreatePipeline(ctx, sceneSamples);
+
+    spdlog::info("Sky pipeline created (procedural Rayleigh+Mie + HDR equirectangular panorama)");
+}
+
+void SkyPass::recreatePipeline(VulkanContext& ctx,
+                               VkSampleCountFlagBits sceneSamples)
+{
+    if (m_pipelineLayout == VK_NULL_HANDLE || m_shaderDir.empty()) {
+        return;
+    }
+
+    const VkDevice dev = ctx.getDevice();
+    if (m_pipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(dev, m_pipeline, nullptr);
+        m_pipeline = VK_NULL_HANDLE;
+    }
+
+    m_sceneSamples = sceneSamples;
+
+    VkShaderModule vertMod = makeShaderModule(dev, loadSpv(m_shaderDir + "/sky.vert.spv"));
+    VkShaderModule fragMod = makeShaderModule(dev, loadSpv(m_shaderDir + "/sky.frag.spv"));
 
     const std::array<VkPipelineShaderStageCreateInfo, 2> stages{{
         { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -243,12 +268,16 @@ void SkyPass::init(VulkanContext& ctx,
           .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fragMod, .pName = "main" },
     }};
 
-    m_pipeline = createFullscreenPipeline(dev, stages, m_pipelineLayout, colorFormat, depthFormat);
+    m_pipeline = createFullscreenPipeline(
+        dev,
+        stages,
+        m_pipelineLayout,
+        m_colorFormat,
+        m_depthFormat,
+        m_sceneSamples);
 
     vkDestroyShaderModule(dev, vertMod, nullptr);
     vkDestroyShaderModule(dev, fragMod, nullptr);
-
-    spdlog::info("Sky pipeline created (procedural Rayleigh+Mie + HDR equirectangular panorama)");
 }
 
 void SkyPass::record(VkCommandBuffer cmd,

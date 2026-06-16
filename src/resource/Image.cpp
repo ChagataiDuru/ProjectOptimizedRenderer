@@ -56,6 +56,7 @@ Image::Image(Image&& other) noexcept
     , m_format(other.m_format)
     , m_extent(other.m_extent)
     , m_arrayLayers(other.m_arrayLayers)
+    , m_samples(other.m_samples)
     , m_stagingBuffer(other.m_stagingBuffer)
     , m_stagingAlloc(other.m_stagingAlloc)
 {
@@ -63,6 +64,7 @@ Image::Image(Image&& other) noexcept
     other.m_imageView     = VK_NULL_HANDLE;
     other.m_allocation    = nullptr;
     other.m_arrayLayers   = 1;
+    other.m_samples       = VK_SAMPLE_COUNT_1_BIT;
     other.m_stagingBuffer = VK_NULL_HANDLE;
     other.m_stagingAlloc  = nullptr;
 }
@@ -77,12 +79,14 @@ Image& Image::operator=(Image&& other) noexcept
         m_format        = other.m_format;
         m_extent        = other.m_extent;
         m_arrayLayers   = other.m_arrayLayers;
+        m_samples       = other.m_samples;
         m_stagingBuffer = other.m_stagingBuffer;
         m_stagingAlloc  = other.m_stagingAlloc;
         other.m_image         = VK_NULL_HANDLE;
         other.m_imageView     = VK_NULL_HANDLE;
         other.m_allocation    = nullptr;
         other.m_arrayLayers   = 1;
+        other.m_samples       = VK_SAMPLE_COUNT_1_BIT;
         other.m_stagingBuffer = VK_NULL_HANDLE;
         other.m_stagingAlloc  = nullptr;
     }
@@ -93,11 +97,13 @@ Image& Image::operator=(Image&& other) noexcept
 
 void Image::create(uint32_t width, uint32_t height, uint32_t depth,
                    VkFormat format, VkImageUsageFlags usage,
-                   VkImageAspectFlags aspectFlags, uint32_t arrayLayers)
+                   VkImageAspectFlags aspectFlags, uint32_t arrayLayers,
+                   VkSampleCountFlagBits samples)
 {
     m_format      = format;
     m_extent      = { width, height, depth };
     m_arrayLayers = arrayLayers;
+    m_samples     = samples;
 
     const VkImageCreateInfo imageCI{
         .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -106,7 +112,7 @@ void Image::create(uint32_t width, uint32_t height, uint32_t depth,
         .extent        = m_extent,
         .mipLevels     = 1,
         .arrayLayers   = arrayLayers,
-        .samples       = VK_SAMPLE_COUNT_1_BIT,
+        .samples       = samples,
         .tiling        = VK_IMAGE_TILING_OPTIMAL,
         .usage         = usage,
         .sharingMode   = VK_SHARING_MODE_EXCLUSIVE,
@@ -244,4 +250,5 @@ void Image::destroy()
         m_image      = VK_NULL_HANDLE;
         m_allocation = nullptr;
     }
+    m_samples = VK_SAMPLE_COUNT_1_BIT;
 }

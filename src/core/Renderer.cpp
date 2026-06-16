@@ -96,6 +96,78 @@ static VkGraphicsPipelineCreateInfo makeGraphicsPipelineCreateInfo(
     };
 }
 
+static constexpr std::array<MsaaSampleCount, 4> kMsaaSampleCounts = {
+    MsaaSampleCount::X1,
+    MsaaSampleCount::X2,
+    MsaaSampleCount::X4,
+    MsaaSampleCount::X8,
+};
+
+static uint32_t sampleCountValue(MsaaSampleCount count)
+{
+    return static_cast<uint32_t>(count);
+}
+
+static size_t sampleCountIndex(MsaaSampleCount count)
+{
+    switch (count) {
+        case MsaaSampleCount::X1: return 0;
+        case MsaaSampleCount::X2: return 1;
+        case MsaaSampleCount::X4: return 2;
+        case MsaaSampleCount::X8: return 3;
+    }
+    return 0;
+}
+
+static VkSampleCountFlagBits toVkSampleCount(MsaaSampleCount count)
+{
+    switch (count) {
+        case MsaaSampleCount::X1: return VK_SAMPLE_COUNT_1_BIT;
+        case MsaaSampleCount::X2: return VK_SAMPLE_COUNT_2_BIT;
+        case MsaaSampleCount::X4: return VK_SAMPLE_COUNT_4_BIT;
+        case MsaaSampleCount::X8: return VK_SAMPLE_COUNT_8_BIT;
+    }
+    return VK_SAMPLE_COUNT_1_BIT;
+}
+
+static const char* antiAliasingModeName(AntiAliasingMode mode)
+{
+    switch (mode) {
+        case AntiAliasingMode::None: return "None";
+        case AntiAliasingMode::MSAA: return "MSAA";
+    }
+    return "Unknown";
+}
+
+static std::string supportedSampleCountsToString(const std::array<bool, 4>& supported)
+{
+    std::string result;
+    for (size_t i = 0; i < supported.size(); ++i) {
+        if (!supported[i]) {
+            continue;
+        }
+        if (!result.empty()) {
+            result += ", ";
+        }
+        result += std::to_string(sampleCountValue(kMsaaSampleCounts[i])) + "x";
+    }
+    return result.empty() ? "none" : result;
+}
+
+static MsaaSampleCount fallbackSupportedSampleCount(
+    MsaaSampleCount requested,
+    const std::array<bool, 4>& supported)
+{
+    size_t index = sampleCountIndex(requested);
+    while (index > 0 && !supported[index]) {
+        --index;
+    }
+    if (supported[index]) {
+        return kMsaaSampleCounts[index];
+    }
+    return MsaaSampleCount::X1;
+}
+
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 Renderer::Renderer(VulkanContext& ctx, Swapchain& swapchain)
@@ -111,6 +183,7 @@ Renderer::Renderer(VulkanContext& ctx, Swapchain& swapchain)
     , m_samplerCache(ctx)
     , m_fallbackWhite(ctx)
     , m_depthImage(ctx)
+    , m_msaaHdrTarget(ctx)
     , m_hdrTarget(ctx)
     , m_shadowPass(ctx)
     , m_clusteredLightCullingPass(ctx)
@@ -131,6 +204,8 @@ void Renderer::init()
     m_sceneInfo = computeSceneInfo(m_importedModel.boundsMin, m_importedModel.boundsMax);
     spdlog::info("Scene normalized: scale={:.4f}, radius={:.2f}",
                  m_sceneInfo.scaleFactor, m_sceneInfo.normalizedRadius);
+    m_antiAliasingStatus = resolveAntiAliasingSettings(m_antiAliasingSettings);
+    logAntiAliasingStatus();
 
     m_frameSync.init(kFramesInFlight);
     m_commandBuffer.init(m_ctx.getGraphicsQueueFamily(), kFramesInFlight);
@@ -140,6 +215,7 @@ void Renderer::init()
     m_clusteredLightCullingPass.init(m_sceneSetLayout, SHADER_DIR);
     m_skyPass.init(m_ctx, m_sceneSetLayout,
                    VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT,
+                   activeSceneSampleCount(),
                    SHADER_DIR);
     createFrameResources();
     createClusteredLightResources();
@@ -274,6 +350,106 @@ void Renderer::refreshRenderStats()
             // Each texel is 4 bytes (RGBA8); depth = 1 for 2D textures.
             m_renderStats.textureMemoryBytes += static_cast<size_t>(ext.width) * ext.height * 4;
         }
+    }
+}
+
+AntiAliasingStatus Renderer::resolveAntiAliasingSettings(
+    const AntiAliasingSettings& settings) const
+{
+    AntiAliasingStatus status{};
+    status.mode = settings.mode;
+    status.requestedSampleCount = settings.requestedSampleCount;
+    status.supportedSampleCounts = m_ctx.getDeviceFeatures().supportedSceneSampleCounts;
+    status.minSampleShading = std::clamp(settings.minSampleShading, 0.0f, 1.0f);
+
+    if (settings.mode == AntiAliasingMode::None) {
+        status.activeSampleCount = MsaaSampleCount::X1;
+        status.fallbackSampleCount = MsaaSampleCount::X1;
+        status.sampleShadingEnabled = false;
+        status.alphaToCoverageEnabled = false;
+        status.minSampleShading = 0.0f;
+        return status;
+    }
+
+    status.activeSampleCount = fallbackSupportedSampleCount(
+        settings.requestedSampleCount,
+        status.supportedSampleCounts);
+    status.fallbackSampleCount = status.activeSampleCount;
+
+    const bool multisampled = status.activeSampleCount != MsaaSampleCount::X1;
+    status.sampleShadingEnabled =
+        multisampled &&
+        settings.sampleShadingEnabled &&
+        m_ctx.getDeviceFeatures().sampleRateShading;
+    status.alphaToCoverageEnabled =
+        multisampled &&
+        settings.alphaToCoverageEnabled;
+    if (!status.sampleShadingEnabled) {
+        status.minSampleShading = 0.0f;
+    }
+    return status;
+}
+
+VkSampleCountFlagBits Renderer::activeSceneSampleCount() const
+{
+    return toVkSampleCount(m_antiAliasingStatus.activeSampleCount);
+}
+
+void Renderer::logAntiAliasingStatus() const
+{
+    spdlog::info("AA configuration applied:");
+    spdlog::info("  Mode: {}", antiAliasingModeName(m_antiAliasingStatus.mode));
+    spdlog::info("  Requested: {}x", sampleCountValue(m_antiAliasingStatus.requestedSampleCount));
+    spdlog::info("  Supported: {}",
+                 supportedSampleCountsToString(m_antiAliasingStatus.supportedSampleCounts));
+    spdlog::info("  Active: {}x", sampleCountValue(m_antiAliasingStatus.activeSampleCount));
+    spdlog::info("  Sample shading: {}",
+                 m_antiAliasingStatus.sampleShadingEnabled ? "enabled" : "disabled");
+    spdlog::info("  Minimum shading fraction: {:.2f}",
+                 m_antiAliasingStatus.minSampleShading);
+    spdlog::info("  Alpha-to-coverage: {}",
+                 m_antiAliasingStatus.alphaToCoverageEnabled ? "enabled" : "disabled");
+}
+
+void Renderer::setAntiAliasingSettings(const AntiAliasingSettings& settings)
+{
+    const AntiAliasingStatus previousStatus = m_antiAliasingStatus;
+    m_antiAliasingSettings = settings;
+    m_antiAliasingStatus = resolveAntiAliasingSettings(m_antiAliasingSettings);
+    logAntiAliasingStatus();
+
+    const bool rendererInitialized = m_pipelineLayout != VK_NULL_HANDLE;
+    if (!rendererInitialized) {
+        return;
+    }
+
+    const bool sampleCountChanged =
+        previousStatus.activeSampleCount != m_antiAliasingStatus.activeSampleCount;
+    const bool pbrPipelineStateChanged =
+        sampleCountChanged ||
+        previousStatus.sampleShadingEnabled != m_antiAliasingStatus.sampleShadingEnabled ||
+        std::abs(previousStatus.minSampleShading - m_antiAliasingStatus.minSampleShading) > 0.0001f ||
+        previousStatus.alphaToCoverageEnabled != m_antiAliasingStatus.alphaToCoverageEnabled;
+
+    if (!sampleCountChanged && !pbrPipelineStateChanged) {
+        return;
+    }
+
+    vkDeviceWaitIdle(m_ctx.getDevice());
+
+    if (sampleCountChanged) {
+        destroyResizeDependentResources();
+    }
+
+    if (pbrPipelineStateChanged) {
+        destroyPbrGraphicsPipelines();
+        createPbrGraphicsPipelines();
+    }
+
+    if (sampleCountChanged) {
+        m_skyPass.recreatePipeline(m_ctx, activeSceneSampleCount());
+        createResizeDependentResources();
+        refreshResizeDependentBindings();
     }
 }
 
@@ -435,7 +611,10 @@ void Renderer::createPbrPipeline()
 
     const VkPipelineMultisampleStateCreateInfo multisample{
         .sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+        .rasterizationSamples = activeSceneSampleCount(),
+        .sampleShadingEnable  = m_antiAliasingStatus.sampleShadingEnabled ? VK_TRUE : VK_FALSE,
+        .minSampleShading     = m_antiAliasingStatus.minSampleShading,
+        .alphaToCoverageEnable = m_antiAliasingStatus.alphaToCoverageEnabled ? VK_TRUE : VK_FALSE,
     };
 
     const VkPipelineDepthStencilStateCreateInfo depthStencil{
@@ -654,7 +833,173 @@ void Renderer::createPbrPipeline()
     spdlog::info("PBR pipelines created: solid + wireframe + normals");
 }
 
-void Renderer::destroyPipeline()
+void Renderer::createPbrGraphicsPipelines()
+{
+    if (m_pipelineLayout == VK_NULL_HANDLE) {
+        throw std::runtime_error("Cannot create PBR graphics pipelines before pipeline layout");
+    }
+
+    const std::string dir = SHADER_DIR;
+    m_vertModule        = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/pbr.vert.spv"));
+    m_fragModule        = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/pbr.frag.spv"));
+    m_normalsFragModule = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/pbr_normals.frag.spv"));
+
+    const std::array<VkPipelineShaderStageCreateInfo, 2> stages{{
+        {
+            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage  = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = m_vertModule,
+            .pName  = "main",
+        },
+        {
+            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage  = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = m_fragModule,
+            .pName  = "main",
+        },
+    }};
+
+    const std::array<VkPipelineShaderStageCreateInfo, 2> normalsStages{{
+        {
+            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage  = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = m_vertModule,
+            .pName  = "main",
+        },
+        {
+            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage  = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = m_normalsFragModule,
+            .pName  = "main",
+        },
+    }};
+
+    const auto bindingDesc = Vertex::getBindingDescription();
+    const auto attribDescs = Vertex::getAttributeDescriptions();
+    const VkPipelineVertexInputStateCreateInfo vertexInput{
+        .sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount   = 1,
+        .pVertexBindingDescriptions      = &bindingDesc,
+        .vertexAttributeDescriptionCount = static_cast<uint32_t>(attribDescs.size()),
+        .pVertexAttributeDescriptions    = attribDescs.data(),
+    };
+
+    const VkPipelineInputAssemblyStateCreateInfo inputAssembly{
+        .sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+    };
+
+    const VkPipelineViewportStateCreateInfo viewportState{
+        .sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1,
+        .scissorCount  = 1,
+    };
+
+    VkPipelineRasterizationStateCreateInfo rasterization{
+        .sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .cullMode    = VK_CULL_MODE_NONE,
+        .frontFace   = VK_FRONT_FACE_CLOCKWISE,
+        .lineWidth   = 1.0f,
+    };
+
+    const VkPipelineMultisampleStateCreateInfo multisample{
+        .sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = activeSceneSampleCount(),
+        .sampleShadingEnable  = m_antiAliasingStatus.sampleShadingEnabled ? VK_TRUE : VK_FALSE,
+        .minSampleShading     = m_antiAliasingStatus.minSampleShading,
+        .alphaToCoverageEnable = m_antiAliasingStatus.alphaToCoverageEnabled ? VK_TRUE : VK_FALSE,
+    };
+
+    const VkPipelineDepthStencilStateCreateInfo depthStencil{
+        .sType             = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable   = VK_TRUE,
+        .depthWriteEnable  = VK_TRUE,
+        .depthCompareOp    = VK_COMPARE_OP_GREATER,
+        .depthBoundsTestEnable = VK_FALSE,
+        .stencilTestEnable = VK_FALSE,
+    };
+
+    const VkPipelineColorBlendAttachmentState blendAttachment{
+        .blendEnable    = VK_FALSE,
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+
+    const VkPipelineColorBlendStateCreateInfo colorBlend{
+        .sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .attachmentCount = 1,
+        .pAttachments    = &blendAttachment,
+    };
+
+    const std::array<VkDynamicState, 2> dynamicStates = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR,
+    };
+    const VkPipelineDynamicStateCreateInfo dynamicState{
+        .sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .dynamicStateCount = static_cast<uint32_t>(dynamicStates.size()),
+        .pDynamicStates    = dynamicStates.data(),
+    };
+
+    const VkFormat colorFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+    const VkPipelineRenderingCreateInfo renderingInfo{
+        .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .colorAttachmentCount    = 1,
+        .pColorAttachmentFormats = &colorFormat,
+        .depthAttachmentFormat   = VK_FORMAT_D32_SFLOAT,
+        .stencilAttachmentFormat = VK_FORMAT_UNDEFINED,
+    };
+
+    VkPipelineRasterizationStateCreateInfo wireframeRasterization = rasterization;
+    wireframeRasterization.polygonMode = VK_POLYGON_MODE_LINE;
+
+    const VkGraphicsPipelineCreateInfo pipelineInfo = makeGraphicsPipelineCreateInfo(
+        renderingInfo,
+        stages.data(),
+        static_cast<uint32_t>(stages.size()),
+        vertexInput,
+        inputAssembly,
+        viewportState,
+        rasterization,
+        multisample,
+        depthStencil,
+        colorBlend,
+        dynamicState,
+        m_pipelineLayout);
+
+    VkGraphicsPipelineCreateInfo wireframePipelineInfo = pipelineInfo;
+    wireframePipelineInfo.pRasterizationState = &wireframeRasterization;
+
+    VkGraphicsPipelineCreateInfo normalsPipelineInfo = pipelineInfo;
+    normalsPipelineInfo.pStages    = normalsStages.data();
+    normalsPipelineInfo.stageCount = static_cast<uint32_t>(normalsStages.size());
+
+    const std::array<VkGraphicsPipelineCreateInfo, 3> pipelineInfos = {
+        pipelineInfo,
+        wireframePipelineInfo,
+        normalsPipelineInfo,
+    };
+
+    std::array<VkPipeline, 3> pipelines{};
+    VK_CHECK(vkCreateGraphicsPipelines(
+        m_ctx.getDevice(), VK_NULL_HANDLE,
+        static_cast<uint32_t>(pipelineInfos.size()),
+        pipelineInfos.data(), nullptr, pipelines.data()));
+
+    m_pipeline          = pipelines[0];
+    m_wireframePipeline = pipelines[1];
+    m_normalsPipeline   = pipelines[2];
+
+    vkDestroyShaderModule(m_ctx.getDevice(), m_vertModule, nullptr);         m_vertModule        = VK_NULL_HANDLE;
+    vkDestroyShaderModule(m_ctx.getDevice(), m_fragModule, nullptr);         m_fragModule        = VK_NULL_HANDLE;
+    vkDestroyShaderModule(m_ctx.getDevice(), m_normalsFragModule, nullptr);  m_normalsFragModule = VK_NULL_HANDLE;
+
+    spdlog::info("PBR graphics pipelines created for {}x scene samples",
+                 sampleCountValue(m_antiAliasingStatus.activeSampleCount));
+}
+
+void Renderer::destroyPbrGraphicsPipelines()
 {
     const VkDevice dev = m_ctx.getDevice();
     if (m_vertModule         != VK_NULL_HANDLE) { vkDestroyShaderModule(dev, m_vertModule, nullptr);               m_vertModule        = VK_NULL_HANDLE; }
@@ -663,6 +1008,12 @@ void Renderer::destroyPipeline()
     if (m_pipeline           != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_pipeline, nullptr);                     m_pipeline          = VK_NULL_HANDLE; }
     if (m_wireframePipeline  != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_wireframePipeline, nullptr);            m_wireframePipeline = VK_NULL_HANDLE; }
     if (m_normalsPipeline    != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_normalsPipeline, nullptr);              m_normalsPipeline   = VK_NULL_HANDLE; }
+}
+
+void Renderer::destroyPipeline()
+{
+    const VkDevice dev = m_ctx.getDevice();
+    destroyPbrGraphicsPipelines();
     if (m_pipelineLayout     != VK_NULL_HANDLE) { vkDestroyPipelineLayout(dev, m_pipelineLayout, nullptr);         m_pipelineLayout    = VK_NULL_HANDLE; }
     if (m_materialSetLayout  != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(dev, m_materialSetLayout, nullptr); m_materialSetLayout = VK_NULL_HANDLE; }
     if (m_sceneSetLayout     != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(dev, m_sceneSetLayout, nullptr);    m_sceneSetLayout    = VK_NULL_HANDLE; }
@@ -995,9 +1346,13 @@ void Renderer::createDepthImage()
     m_depthImage.create(ext.width, ext.height, 1,
                         VK_FORMAT_D32_SFLOAT,
                         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-                        VK_IMAGE_ASPECT_DEPTH_BIT);
+                        VK_IMAGE_ASPECT_DEPTH_BIT,
+                        1,
+                        activeSceneSampleCount());
 
-    spdlog::info("Depth image created: {}x{} D32_SFLOAT (reverse-Z)", ext.width, ext.height);
+    spdlog::info("Depth image created: {}x{} D32_SFLOAT (reverse-Z, {}x)",
+                 ext.width, ext.height,
+                 sampleCountValue(m_antiAliasingStatus.activeSampleCount));
 }
 
 void Renderer::createResizeDependentResources()
@@ -1021,6 +1376,7 @@ void Renderer::destroyResizeDependentResources()
     m_clusterCountX = 0;
     m_clusterCountY = 0;
     m_clusterCount = 0;
+    m_msaaHdrTarget.destroy();
     m_hdrTarget.destroy();
     m_depthImage.destroy();
 }
@@ -1053,6 +1409,15 @@ void Renderer::createHdrTarget()
                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                        VK_IMAGE_ASPECT_COLOR_BIT);
 
+    if (m_antiAliasingStatus.activeSampleCount != MsaaSampleCount::X1) {
+        m_msaaHdrTarget.create(ext.width, ext.height, 1,
+                               VK_FORMAT_R16G16B16A16_SFLOAT,
+                               VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                               VK_IMAGE_ASPECT_COLOR_BIT,
+                               1,
+                               activeSceneSampleCount());
+    }
+
     // Create the sampler once (on first call); reuse on resize — the sampler itself
     // doesn't reference the image view, so no need to destroy+recreate it.
     if (m_hdrSampler == VK_NULL_HANDLE) {
@@ -1069,7 +1434,9 @@ void Renderer::createHdrTarget()
         VK_CHECK(vkCreateSampler(m_ctx.getDevice(), &samplerCI, nullptr, &m_hdrSampler));
     }
 
-    spdlog::info("HDR target created: {}x{} R16G16B16A16_SFLOAT", ext.width, ext.height);
+    spdlog::info("HDR target created: {}x{} R16G16B16A16_SFLOAT (scene {}x, tonemap input 1x)",
+                 ext.width, ext.height,
+                 sampleCountValue(m_antiAliasingStatus.activeSampleCount));
 }
 
 void Renderer::loadHdrPanorama(const std::string& path)
@@ -1553,10 +1920,20 @@ void Renderer::render()
     vkCmdPipelineBarrier2(cmd, &clusterDep);
     m_gpuTimer.writeTimestamp(cmd, "ClusterCull_End");
 
-    vkutil::transitionImage(cmd, m_hdrTarget.getImage(),
+    const bool sceneMsaaEnabled = m_antiAliasingStatus.activeSampleCount != MsaaSampleCount::X1;
+    Image& sceneColorTarget = sceneMsaaEnabled ? m_msaaHdrTarget : m_hdrTarget;
+
+    vkutil::transitionImage(cmd, sceneColorTarget.getImage(),
         VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,              0,
         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,   VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
         VK_IMAGE_LAYOUT_UNDEFINED,                          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+
+    if (sceneMsaaEnabled) {
+        vkutil::transitionImage(cmd, m_hdrTarget.getImage(),
+            VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,              0,
+            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,   VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_LAYOUT_UNDEFINED,                          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    }
 
     // Depth image transitions from UNDEFINED each frame — LOAD_OP_CLEAR discards previous
     // contents anyway, so UNDEFINED→DEPTH_ATTACHMENT_OPTIMAL is valid and avoids layout tracking.
@@ -1571,10 +1948,15 @@ void Renderer::render()
     // Clear to black in linear space (sRGB 0.01 ≈ linear ~0.001; using 0 is visually identical).
     const VkRenderingAttachmentInfo colorAttachment{
         .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView   = m_hdrTarget.getImageView(),
+        .imageView   = sceneColorTarget.getImageView(),
         .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .resolveMode = sceneMsaaEnabled ? VK_RESOLVE_MODE_AVERAGE_BIT : VK_RESOLVE_MODE_NONE,
+        .resolveImageView = sceneMsaaEnabled ? m_hdrTarget.getImageView() : VK_NULL_HANDLE,
+        .resolveImageLayout = sceneMsaaEnabled
+            ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+            : VK_IMAGE_LAYOUT_UNDEFINED,
         .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
-        .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
+        .storeOp     = sceneMsaaEnabled ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE,
         .clearValue  = { .color = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } } },
     };
 

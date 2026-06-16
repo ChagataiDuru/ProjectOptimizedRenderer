@@ -31,7 +31,7 @@ Core pillars:
 2. explicit Vulkan 1.4 backend
 3. stable cascaded shadow maps and VSM experimentation
 4. HDR scene pipeline with AgX and PBR Neutral comparison
-5. SMAA / spatial anti-aliasing path
+5. HDR MSAA / native anti-aliasing path
 6. perceptual VRS driven by image/scene metrics
 7. cross-platform Windows + macOS support
 8. future C ABI boundary for external engine/editor hosts
@@ -114,55 +114,54 @@ Success criteria:
 - pass timings are visible and understandable
 - visual regressions are easy to detect manually
 
-## A2 — SMAA Path
+## A2 — Capability-Driven HDR MSAA Path
 
 Priority: **High**  
-Status: **Not Started**
+Status: **Foundation In Progress**
 
 Purpose:
 
-Add a native spatial anti-aliasing solution that fits the project thesis: clear, stable, non-upscaled rendering.
+Add a native multisampling anti-aliasing solution that fits the project thesis: clear, stable, non-upscaled rendering without temporal accumulation.
 
-Expected passes:
+Expected scene flow:
 
 ```txt
-Scene HDR/LDR source
-  -> SMAA edge detection
-  -> SMAA blend weight calculation
-  -> SMAA neighborhood blending
-  -> tone mapping / present integration depending on chosen placement
+Scene geometry + sky
+  -> multisampled HDR color + multisampled scene depth
+  -> single hardware resolve into HDR
+  -> tone mapping / present
 ```
 
 Design questions:
 
-1. Should SMAA operate before or after tone mapping?
-2. Should the source be HDR linear, tonemapped linear, or swapchain-space LDR?
-3. How should debug modes visualize edge detection and blend weights?
-4. How should it interact with UI / ImGui overlays?
+1. Which sample counts are reliable across Windows/native Vulkan and macOS/MoltenVK?
+2. How much quality does controlled sample shading add relative to cost?
+3. How well does alpha-to-coverage improve masked material stability?
+4. Which benchmark scenes best expose geometry and alpha-mask aliasing?
 
 Architecture requirements:
 
-- explicit post-process pass ownership
-- resize-aware intermediate images
-- descriptor update path for intermediate images
-- debug toggles grouped into settings
-- GPU timer labels per SMAA pass
+- persistent AA settings outside `RenderFramePacket`
+- exact-format sample-count capability discovery
+- multisampled scene color/depth with a single resolved HDR target
+- pipeline sample-count compatibility for scene-space contributors
+- GPU timing and screenshots for repeatable comparisons
 
 Recommended first implementation:
 
 ```txt
-SmaaPass
-  - init
-  - resize
-  - recordEdgePass
-  - recordBlendPass
-  - recordNeighborhoodPass
-  - shutdown
+Renderer-owned HDR MSAA foundation
+  - supported scene sample-count discovery
+  - persistent AA settings
+  - MSAA color/depth attachments
+  - single-sample HDR resolve for TonemapPass
 ```
+
+SMAA remains a later native spatial comparison or fallback path rather than the immediate AA milestone.
 
 ## A3 — Perceptual VRS
 
-Priority: **High, after SMAA foundation**  
+Priority: **High, after HDR MSAA foundation**
 Status: **Not Started, Foundation Present**
 
 Purpose:
@@ -407,7 +406,7 @@ This item is now past the concept stage.
 
 ## B5 — Pass Ownership Extraction
 
-Priority: **During SMAA/post-processing work**  
+Priority: **During AA/post-processing work**
 Status: **Partially Completed**
 
 Extracted pass objects already in the repo:
@@ -423,7 +422,7 @@ What remains:
 
 - keep shrinking pass-specific ownership inside `Renderer`
 - define clearer resize and descriptor-update responsibilities for each extracted pass
-- add `SmaaPass` following the same ownership model
+- keep SMAA as a later pass-oriented comparison or fallback path
 
 Non-goal:
 
@@ -436,7 +435,7 @@ Status: **Not Started**
 
 Trigger point:
 
-Implement this only when SMAA/VRS/post-processing chains make manual pass ordering painful.
+Implement this only when MSAA, SMAA, VRS, or post-processing chains make manual pass ordering painful.
 
 Minimum useful design:
 
@@ -641,13 +640,13 @@ The roadmap-informed next slice should be:
 
 1. consolidate `RenderFramePacket` so it becomes the normal internal submission path
 2. decide how `DrawCommand` participates in that submission boundary
-3. continue pass extraction by using the same model for SMAA
+3. continue pass extraction using the same model for future AA/post-processing work
 4. document optional-feature policy and capability logging
 5. stabilize screenshot/timing comparison workflow for the current baseline
 
 In practical terms:
 
-- **best next renderer feature:** SMAA
+- **best next renderer feature:** capability-driven HDR MSAA
 - **best next architecture task:** reduce duplication between packet submission and legacy mutator APIs
 - **best next documentation task:** baseline comparison notes for shadows, tone mapping, and clustered lighting
 
@@ -666,4 +665,4 @@ The project is no longer only planning:
 
 It now has first-cut implementations of all of those.
 
-The highest-value next step is not to invent another big abstraction. It is to consolidate the new architecture direction and then stress-test it with SMAA, which will naturally reveal what still needs to be extracted or stabilized.
+The highest-value next step is not to invent another big abstraction. It is to consolidate the new architecture direction and then stress-test it with capability-driven HDR MSAA, which will naturally reveal what still needs to be extracted or stabilized.

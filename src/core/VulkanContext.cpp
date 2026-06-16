@@ -3,11 +3,69 @@
 #include <SDL3/SDL_vulkan.h>
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+namespace {
+
+constexpr VkFormat kSceneHdrFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+constexpr VkFormat kSceneDepthFormat = VK_FORMAT_D32_SFLOAT;
+constexpr VkSampleCountFlags kSceneSampleCountMask =
+    VK_SAMPLE_COUNT_1_BIT |
+    VK_SAMPLE_COUNT_2_BIT |
+    VK_SAMPLE_COUNT_4_BIT |
+    VK_SAMPLE_COUNT_8_BIT;
+
+VkSampleCountFlags queryImageFormatSampleCounts(VkPhysicalDevice device,
+                                                VkFormat format,
+                                                VkImageUsageFlags usage)
+{
+    VkImageFormatProperties props{};
+    const VkResult result = vkGetPhysicalDeviceImageFormatProperties(
+        device,
+        format,
+        VK_IMAGE_TYPE_2D,
+        VK_IMAGE_TILING_OPTIMAL,
+        usage,
+        0,
+        &props);
+    if (result != VK_SUCCESS) {
+        return 0;
+    }
+    return props.sampleCounts;
+}
+
+std::array<bool, 4> sampleCountFlagsToArray(VkSampleCountFlags counts)
+{
+    return {
+        (counts & VK_SAMPLE_COUNT_1_BIT) != 0,
+        (counts & VK_SAMPLE_COUNT_2_BIT) != 0,
+        (counts & VK_SAMPLE_COUNT_4_BIT) != 0,
+        (counts & VK_SAMPLE_COUNT_8_BIT) != 0,
+    };
+}
+
+std::string sampleCountArrayToString(const std::array<bool, 4>& counts)
+{
+    const std::array<const char*, 4> labels = { "1x", "2x", "4x", "8x" };
+    std::string result;
+    for (size_t i = 0; i < counts.size(); ++i) {
+        if (!counts[i]) {
+            continue;
+        }
+        if (!result.empty()) {
+            result += ", ";
+        }
+        result += labels[i];
+    }
+    return result.empty() ? "none" : result;
+}
+
+} // namespace
 
 static bool hasExtension(const std::vector<VkExtensionProperties>& exts, const char* name)
 {
@@ -241,6 +299,26 @@ RendererDeviceFeatures VulkanContext::queryRendererDeviceFeatures(VkPhysicalDevi
     vkGetPhysicalDeviceFeatures2(device, &features);
 
     RendererDeviceFeatures result{};
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(device, &props);
+
+    const VkSampleCountFlags colorFormatCounts = queryImageFormatSampleCounts(
+        device,
+        kSceneHdrFormat,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+    const VkSampleCountFlags depthFormatCounts = queryImageFormatSampleCounts(
+        device,
+        kSceneDepthFormat,
+        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+    const VkSampleCountFlags framebufferCounts =
+        props.limits.framebufferColorSampleCounts &
+        props.limits.framebufferDepthSampleCounts;
+    const VkSampleCountFlags sceneCounts =
+        colorFormatCounts &
+        depthFormatCounts &
+        framebufferCounts &
+        kSceneSampleCountMask;
+
     result.dynamicRendering = vk13.dynamicRendering == VK_TRUE;
     result.dynamicRenderingLocalRead = vk14.dynamicRenderingLocalRead == VK_TRUE;
     result.synchronization2 = vk13.synchronization2 == VK_TRUE;
@@ -251,6 +329,8 @@ RendererDeviceFeatures VulkanContext::queryRendererDeviceFeatures(VkPhysicalDevi
     result.taskShader = hasMeshShaderExt && meshShaderFeatures.taskShader == VK_TRUE;
     result.descriptorIndexing = vk12.descriptorIndexing == VK_TRUE;
     result.timelineSemaphore = vk12.timelineSemaphore == VK_TRUE;
+    result.sampleRateShading = features.features.sampleRateShading == VK_TRUE;
+    result.supportedSceneSampleCounts = sampleCountFlagsToArray(sceneCounts);
     return result;
 }
 
@@ -442,6 +522,7 @@ void VulkanContext::createLogicalDevice()
         .sType    = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
         .pNext    = &m_vulkan14Features,
         .features = {
+            .sampleRateShading = m_deviceFeatures.sampleRateShading ? VK_TRUE : VK_FALSE,
             .fillModeNonSolid = VK_TRUE,  // Required for VK_POLYGON_MODE_LINE (wireframe)
             .samplerAnisotropy = VK_TRUE,
         },
@@ -585,7 +666,17 @@ void VulkanContext::logDeviceInfo() const
         m_deviceFeatures.synchronization2 ? "YES" : "NO");
     spdlog::info("    scalarBlockLayout         : {}",
         m_vulkan12Features.scalarBlockLayout == VK_TRUE ? "YES" : "NO");
+    spdlog::info("  Scene multisampling support:");
+    spdlog::info("    HDR format                : R16G16B16A16_SFLOAT");
+    spdlog::info("    Depth format              : D32_SFLOAT");
+    spdlog::info("    Supported counts          : {}",
+        sampleCountArrayToString(m_deviceFeatures.supportedSceneSampleCounts));
+    spdlog::info("    Sample-rate shading       : {}",
+        m_deviceFeatures.sampleRateShading ? "supported" : "unsupported");
     spdlog::info("  Optional features enabled on this device:");
+    if (m_deviceFeatures.sampleRateShading) {
+        spdlog::info("    sampleRateShading");
+    }
     if (m_deviceFeatures.dynamicRenderingLocalRead) {
         spdlog::info("    dynamicRenderingLocalRead");
     }
@@ -608,6 +699,9 @@ void VulkanContext::logDeviceInfo() const
         spdlog::info("    taskShader");
     }
     spdlog::info("  Optional features unavailable on this device:");
+    if (!m_deviceFeatures.sampleRateShading) {
+        spdlog::info("    sampleRateShading");
+    }
     if (!m_deviceFeatures.dynamicRenderingLocalRead) {
         spdlog::info("    dynamicRenderingLocalRead");
     }
@@ -630,6 +724,10 @@ void VulkanContext::logDeviceInfo() const
         spdlog::info("    taskShader");
     }
     spdlog::info("  Future-use capability queries should use RendererDeviceFeatures:");
+    spdlog::info("    sampleRateShading         : {}",
+        m_deviceFeatures.sampleRateShading ? "YES" : "NO");
+    spdlog::info("    sceneSampleCounts         : {}",
+        sampleCountArrayToString(m_deviceFeatures.supportedSceneSampleCounts));
     spdlog::info("    dynamicRenderingLocalRead : {}",
         hasFeature_DynamicRenderingLocalRead() ? "YES" : "NO");
     spdlog::info("    fragmentShadingRate       : {}",

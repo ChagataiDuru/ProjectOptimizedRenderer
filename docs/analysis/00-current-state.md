@@ -256,7 +256,8 @@ A practical status read of the roadmap is:
 | Pass ownership extraction | Partial, meaningful | `TonemapPass`, `ShadowPass`, `SkyPass`, and clustered light culling pass exist. |
 | Shader interface validation | Partial | Centralized constants and static asserts exist; reflection/codegen does not. |
 | Capability-driven optional features | Established foundation | `RendererDeviceFeatures` is a centralized detect-once snapshot with baseline-vs-optional policy clarified in code and logging. |
-| SMAA | Not started | Still a next major renderer-feature milestone. |
+| HDR MSAA | Foundation in progress | Immediate native AA milestone with capability-driven sample-count selection. |
+| SMAA | Not started | Later native spatial comparison or fallback path. |
 | Perceptual VRS | Not started, groundwork present | Capability query and optional feature gating now exist. |
 | C ABI boundary | Not started | Still documentation-first, not implementation-ready. |
 
@@ -294,7 +295,7 @@ The next slice should not be "jump straight into Odin" and it also should not be
 2. decide how `DrawCommand` enters the frame packet or a closely related scene submission object
 3. continue moving pass-local resources out of `Renderer`
 4. document capability-driven feature policy for unsupported platforms
-5. implement SMAA on top of the new pass/resource direction
+5. implement capability-driven HDR MSAA on top of the new pass/resource direction
 
 ## Current Strategic Recommendation
 
@@ -305,7 +306,7 @@ Instead:
 1. continue using this repo as the C++ renderer and research viewer
 2. consolidate the internal submission boundary now that packet/handle/pass concepts exist
 3. use the current viewer as the first client of that cleaner renderer interface
-4. add SMAA as the first major feature that truly stress-tests the extracted pass architecture
+4. add HDR MSAA as the first major feature that truly stress-tests the extracted pass architecture
 5. only draft the public C ABI after the internal packet/handle/pass model stops shifting
 
 ## Next Document
@@ -323,4 +324,4 @@ Re-mark the roadmap based on actual progress already landed in the repository, e
 - handle/draw-command progress
 - frame-packet progress
 - capability-gated optional feature groundwork
-- what still remains before SMAA, VRS, and any future C ABI work
+- what still remains before deeper AA comparisons, VRS, and any future C ABI work

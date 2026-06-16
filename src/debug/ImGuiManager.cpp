@@ -320,7 +320,7 @@ void ImGuiManager::endFrame()
             ImGui::Separator();
             ImGui::MenuItem(ICON_FA_CLOUD_SUN " Shadows",     nullptr, false, false);
             ImGui::MenuItem(ICON_FA_PALETTE " Tone Mapping",  nullptr, false, false);
-            ImGui::MenuItem(ICON_FA_WAND_MAGIC_SPARKLES " SMAA", nullptr, false, false);
+            ImGui::MenuItem(ICON_FA_WAND_MAGIC_SPARKLES " Native MSAA", nullptr, false, false);
             ImGui::MenuItem(ICON_FA_GRIP " VRS",              nullptr, false, false);
             ImGui::EndMenu();
         }
