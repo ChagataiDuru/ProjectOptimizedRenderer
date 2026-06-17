@@ -1,6 +1,6 @@
 # 02 — Renderer Technical Debt Map
 
-Date: 2026-06-13
+Date: 2026-06-17
 
 ## Purpose
 
@@ -27,8 +27,12 @@ Already landed in code:
 - pass extraction via `TonemapPass`, `ShadowPass`, `SkyPass`, and `ClusteredLightCullingPass`
 - centralized shader interface constants/layout structs in `ShaderInterface.h`
 - runtime device capability modeling in `VulkanContext`
+- build split into `por_renderer_core` and `por_viewer`
+- `RendererInstance` lifecycle facade
+- `RendererResourceManager` batch GPU resource ownership
+- C ABI draft header with C11/C++20 mock-backed compile tests
 
-Because of that, the main technical debt is no longer “these concepts do not exist.” The real debt is that they exist in first-cut form but have not yet become the dominant architecture everywhere.
+Because of that, the main technical debt is no longer “these concepts do not exist.” The real debt is that they exist in first-cut form and need hardening before they become stable ABI-facing commitments.
 
 ## Severity Scale
 
@@ -57,12 +61,8 @@ Timing: **Soon**
 
 ## Current State
 
-`Renderer` still owns or coordinates a large portion of the system after Vulkan/swapchain setup:
+`Renderer` is no longer responsible for glTF import/reload policy or direct ImGui ownership, but it still coordinates a large portion of backend execution:
 
-- model loading/reload flow
-- mesh upload
-- texture upload
-- fallback texture creation
 - material descriptor creation
 - camera/light buffers
 - clustered-light buffers and metadata
@@ -71,7 +71,7 @@ Timing: **Soon**
 - resize handling
 - screenshot/profiling integration
 - render statistics
-- remaining renderer state mutators
+- resize-sensitive pass/resource rebinding
 
 Pass extraction has started, which is good, but `Renderer` is still the gravity well for too many systems.
 
@@ -101,9 +101,9 @@ Renderer
 
 Next extraction pressure points:
 
-1. unify packet-based submission vs legacy setters
-2. reduce scene/resource rebuilding responsibilities inside `Renderer`
-3. make resize responsibilities more explicit per pass/resource
+1. keep `RendererInstance` as the only lifecycle entry used by the viewer and C wrapper
+2. move more resize-sensitive ownership into pass/resource owners when it simplifies code
+3. evolve `RendererResourceManager` into explicit resource create/destroy operations
 
 ## Not To Do Yet
 
@@ -125,19 +125,15 @@ include/viewer/ViewerPanels.h
 src/viewer/ViewerPanels.cpp
 ```
 
-However, `src/main.cpp` still owns:
+However, `src/main.cpp` still owns viewer/application policy:
 
 - app startup
 - logger setup
-- window creation
-- Vulkan context creation
-- swapchain creation
-- renderer creation
-- ImGui manager creation
 - camera setup
 - frame timing
 - SDL event handling
 - mouse capture
+- CPU glTF import/reload and fallback behavior
 - deferred file actions
 - main render loop
 
@@ -157,7 +153,7 @@ Keep the current viewer, but continue treating it as a client of the renderer ra
 
 Low-cost next step:
 
-- reduce direct viewer-driven mutation paths in favor of building a frame/state submission object
+- keep shrinking viewer access to renderer internals; it should continue talking through `RendererInstance`
 
 ## Not To Do Yet
 
@@ -180,7 +176,7 @@ The repo now has:
 - `Renderer::submitFrame(const RenderFramePacket&)`
 - grouped render settings/data structs
 
-However, the renderer still also exposes and relies on multiple direct mutators such as camera/light/shadow/tonemap/sky setters.
+The current public path is primarily `RendererInstance::renderFrame(RenderFramePacket)` over `Renderer::submitFrame()` plus sticky `submitScene()`. Remaining mutators are mostly persistent/debug configuration such as AA settings, screenshot requests, and HDR panorama loading.
 
 ## Why It Matters
 
@@ -195,28 +191,7 @@ A future host should submit a stable, plain-data frame snapshot. It should not d
 
 ## Recommended Direction
 
-Promote the internal packet model from “available” to “primary.”
-
-Target state:
-
-```cpp
-struct RenderFramePacket {
-    CameraData camera;
-    DirectionalLightData light;
-    std::vector<shader_interface::GpuPointLight> pointLights;
-    ShadowSettings shadow;
-    TonemapSettings tonemap;
-    SkySettings sky;
-    DebugViewSettings debug;
-    // later: draw submission or scene submission reference
-};
-```
-
-Then:
-
-- build this packet in the viewer
-- submit it once per frame
-- gradually reduce legacy per-subsystem mutators
+Keep the packet path dominant. New per-frame features should enter `RenderFramePacket`; persistent or scene-sticky data should enter explicit resource APIs or `RenderScenePacket`, not ad hoc frame mutators.
 
 ## Not To Do Yet
 
@@ -237,10 +212,11 @@ The repo now has:
 
 - `MeshHandle`, `MaterialHandle`, `TextureHandle`
 - `DrawCommand`
-- internal mesh/material vectors
-- draw-command rebuilding from imported model data
+- sticky `RenderScenePacket`
+- `RendererResourceManager` owning uploaded GPU resources
+- viewer-owned glTF import/reload policy
 
-But the renderer still fundamentally assumes a loaded glTF model as the active scene baseline.
+But stable per-resource create/destroy APIs are still not complete; the current model upload is still a batch bridge from CPU `Model` data.
 
 ## Why It Matters
 
@@ -248,10 +224,9 @@ An engine renderer should render many objects, each potentially referencing shar
 
 ## Risk
 
-- imported model remains too close to runtime scene representation
-- renderer and asset loader remain coupled
+- batch model upload is not yet an engine-facing resource API
 - no clear multi-object submission model yet
-- future host integration still lacks a clean scene boundary
+- deletion/reuse/generation semantics are not settled
 
 ## Recommended Direction
 
@@ -485,13 +460,13 @@ Do not add a giant feature-management layer. A small, explicit policy is enough.
 
 # Recommended Debt Order
 
-1. **TD-003 — Frame submission model exists but is not yet dominant**
+1. **TD-004 — Resource handles are not yet stable resource APIs**
 2. **TD-001 — `Renderer` is still a heavy coordinator**
-3. **TD-005 — Pass extraction is started but ownership is still mixed**
-4. **TD-004 — Scene submission is still coupled to imported model state**
-5. **TD-008 — Resize handling is still cross-cutting**
+3. **TD-008 — Resize handling is still cross-cutting**
+4. **TD-005 — Pass extraction is started but ownership is still mixed**
+5. **TD-003 — Keep packet submission dominant**
 6. **TD-009 — Capability policy exists in code but not yet as a clear product rule**
-7. **TD-002 — `main.cpp` still owns too much viewer bootstrap**
+7. **TD-002 — `main.cpp` still owns viewer policy**
 8. **TD-007 — Shader interface safety improved, but validation is still manual-plus**
 9. **TD-006 — No lightweight render graph / pass dependency model yet**
 
@@ -499,9 +474,11 @@ Do not add a giant feature-management layer. A small, explicit policy is enough.
 
 The highest-value work now is not inventing more architecture layers. It is consolidating the ones that already landed:
 
+- `RendererInstance` lifecycle boundary
 - packet-based submission
 - pass extraction
 - handle-based scene vocabulary
+- batch renderer resource ownership
 - capability-driven optional feature policy
 
-That consolidation will make native AA work such as HDR MSAA now and SMAA comparisons later much easier to implement without re-fragmenting the architecture.
+That consolidation will make future AA comparisons, VRS experiments, and ABI work much easier to implement without re-fragmenting the architecture.

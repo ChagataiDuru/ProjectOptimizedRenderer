@@ -196,13 +196,13 @@ Currently referenced shader stages include:
 
 ## Assets
 
-The renderer currently expects a Sponza test scene path similar to:
+The C++ viewer currently loads a default Sponza test scene path similar to:
 
 ```txt
 assets/source/Sponza.gltf
 ```
 
-If the application fails to start because the default model is missing, ensure the expected test assets exist under `assets/` or adjust the model path in the viewer/runtime path.
+If the application fails to start because the default model is missing, ensure the expected test assets exist under `assets/` or adjust the viewer's default model path. glTF import remains viewer/application policy; the renderer backend receives CPU model data as uploaded GPU resources.
 
 ## Runtime Controls
 
@@ -235,7 +235,7 @@ The ImGui overlay exposes panels for:
 
 ## Architecture Notes
 
-The current codebase should be understood as three conceptual layers:
+The current codebase should be understood as four practical layers:
 
 ```txt
 C++ Research Viewer
@@ -245,13 +245,21 @@ C++ Research Viewer
   - file dialogs
   - debug interaction
 
+Renderer Instance Facade
+  - renderer-owned SDL window/runtime for the first ABI model
+  - VulkanContext / Swapchain / Renderer lifecycle
+  - resize(width, height)
+  - renderFrame(RenderFramePacket)
+  - viewer-only overlay attachment
+
 Renderer Orchestration Layer
   - RenderFramePacket
   - RenderScenePacket
   - RenderSettings
   - DrawCommand
+  - RendererResourceManager
   - frame submission flow
-  - renderer-owned scene/resource coordination
+  - renderer-owned GPU resource coordination
 
 C++ Vulkan Pass/Backend Layer
   - Vulkan resources
@@ -266,13 +274,12 @@ The viewer is useful and should remain, but it is not the final engine/editor la
 
 Future work should gradually move toward:
 
-- grouped renderer settings structs as the dominant state handoff
-- internal frame packet abstraction as the primary submission path
-- explicit scene packet submission beside frame submission
-- resource handles for mesh/material/texture objects
-- clearer pass ownership
-- explicit resize pathway
-- eventual C ABI boundary
+- using `RendererInstance` as the C++ boundary tested by the viewer
+- growing stable mesh/material/texture resource create/destroy operations behind handles
+- keeping glTF import and reload behavior in viewer/application code
+- keeping ImGui viewer-only and out of the public ABI
+- tightening pass-local ownership without introducing a full render graph yet
+- treating `include/por/por_renderer.h` as a draft ABI contract until resource semantics settle
 
 ## Capability Policy
 
@@ -341,15 +348,12 @@ Agent/project guidance:
 
 Recommended next engineering direction:
 
-1. Consolidate `RenderFramePacket` as the main internal submission path.
-2. Decide how `DrawCommand` participates in scene/frame submission.
-3. Continue extracting pass-local ownership from `Renderer`.
-4. Document capability-driven optional feature policy for unsupported platforms.
-5. Implement capability-driven HDR MSAA as the first major AA feature on top of the new pass architecture.
-6. Keep SMAA as a later native spatial comparison or fallback path, not the immediate AA milestone.
-7. Add VRS only as an optional, capability-gated research path.
-8. Introduce stronger resource-handle semantics before real external host integration.
-9. Draft the public C ABI only after internal concepts stabilize.
+1. Harden `RendererInstance` as the viewer's only renderer lifecycle boundary.
+2. Turn the batch `RendererResourceManager` model into stable mesh/material/texture create/destroy operations.
+3. Expand ABI tests around `include/por/por_renderer.h` without adding Odin yet.
+4. Keep SMAA and VRS deferred until the boundary/resource work settles.
+5. Continue extracting pass-local ownership only when it simplifies current code.
+6. Avoid introducing a full render graph, ECS, asset database, editor, or Odin runtime in this repository.
 
 ## Status
 

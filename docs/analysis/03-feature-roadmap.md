@@ -1,6 +1,6 @@
 # 03 — Feature and Architecture Roadmap
 
-Date: 2026-06-13
+Date: 2026-06-17
 
 ## Purpose
 
@@ -361,7 +361,6 @@ What landed:
 struct RenderFramePacket {
     CameraData camera;
     DirectionalLightData light;
-    std::vector<shader_interface::GpuPointLight> pointLights;
     ShadowSettings shadow;
     TonemapSettings tonemap;
     SkySettings sky;
@@ -372,16 +371,18 @@ struct RenderFramePacket {
 Also landed:
 
 - `Renderer::submitFrame(const RenderFramePacket&)`
+- `RenderScenePacket` as the sibling sticky draw/light submission object
+- `RendererInstance::renderFrame(const RenderFramePacket&)` as the viewer-facing lifecycle call
 
 What remains:
 
-- make this the dominant path for viewer-to-renderer state submission
-- reduce duplication between packet submission and legacy setter-based mutation
-- decide whether draw submission belongs inside this packet or a sibling submission object
+- keep new per-frame systems flowing through this packet rather than ad hoc frame mutators
+- keep draw and scene-persistent light submission in `RenderScenePacket`
+- map the draft C ABI frame packet to this structure without leaking C++ types
 
 Current recommendation:
 
-Do not expose a public C ABI version yet. First make the C++ internal packet stable.
+Treat the C ABI frame packet as a draft mirror of this internal structure until resource and scene submission semantics are stable.
 
 ## B4 — Resource Handle Model
 
@@ -603,23 +604,19 @@ Do not do yet:
 
 ## D2 — Public C ABI Draft
 
-Priority: **Later**  
-Status: **Not Started**
+Priority: **Now / Iterative**
+Status: **Draft Header Added**
 
-Preconditions:
+Current state:
 
-- frame-packet shape stops changing frequently
-- handle model is clearer
-- draw submission boundary is explicit
-- pass/resource ownership is more stable
+- `include/por/por_renderer.h` exists with ABI versioning, fixed-width types, opaque renderer handle, explicit counts, result codes, and reserved fields
+- C11 and C++20 header tests compile and run against a mock implementation
+- a real wrapper target exists, but individual resource create/destroy operations are not implemented yet
+- the wrapper is not an invitation to add Odin or treat the ABI as stable
 
-Only then should the project draft public APIs like:
+Near-term ABI work should stay focused on compile tests, structure validation, lifecycle/frame smoke tests, and resource-lifetime semantics. Do not expand the ABI around unstable renderer internals.
 
-```c
-typedef struct RendererFramePacket RendererFramePacket;
-typedef uint32_t RendererMeshHandle;
-typedef uint32_t RendererMaterialHandle;
-```
+The current prefix is `por_`, not generic names like `renderer_create`.
 
 ## D3 — External Host Scene Submission Model
 
@@ -631,10 +628,14 @@ What already exists internally:
 - handles
 - draw commands
 - frame packet
+- sticky scene packet
+- renderer instance facade
+- batch renderer resource manager
 
 What remains:
 
-- decide how the eventual host submits scene draw lists
+- graduate batch model upload into stable mesh/material/texture create/destroy calls
+- decide deletion/reuse/generation semantics
 - keep asset import concerns out of the future host-facing ABI
 - avoid high-frequency FFI mutator chatter
 
@@ -644,10 +645,10 @@ What remains:
 
 The roadmap-informed next slice should be:
 
-1. consolidate `RenderFramePacket` so it becomes the normal internal submission path
-2. decide how `DrawCommand` participates in that submission boundary
-3. continue pass extraction using the same model for future AA/post-processing work
-4. document optional-feature policy and capability logging
+1. harden `RendererInstance` as the only viewer-facing lifecycle boundary
+2. turn `RendererResourceManager` batch upload into explicit handle create/destroy operations
+3. expand C ABI tests without adding Odin
+4. keep SMAA/VRS/render-graph work deferred until resource and ABI seams settle
 5. stabilize screenshot/timing comparison workflow for the current baseline
 
 In practical terms:

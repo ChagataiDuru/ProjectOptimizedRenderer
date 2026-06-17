@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(ProjectOptimizedRenderer VERSION 0.1.0 LANGUAGES CXX)
+project(ProjectOptimizedRenderer VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -77,9 +77,8 @@ if(NOT EXISTS "${VMA_INCLUDE_DIR}/vk_mem_alloc.h")
         "Run: git submodule update --init --recursive")
 endif()
 
-# ── Target ────────────────────────────────────────────────────────────────────
-add_executable(ProjectOptimizedRenderer
-    src/main.cpp
+# ── Targets ───────────────────────────────────────────────────────────────────
+set(POR_RENDERER_CORE_SOURCES
     src/core/VulkanContext.cpp
     src/core/Device.cpp
     src/core/Window.cpp
@@ -87,8 +86,8 @@ add_executable(ProjectOptimizedRenderer
     src/core/CommandBuffer.cpp
     src/core/FrameSync.cpp
     src/core/Renderer.cpp
+    src/core/RendererInstance.cpp
     src/core/VulkanUtil.cpp
-    src/core/Camera.cpp
     src/renderpasses/SkyPass.cpp
     src/renderpasses/TonemapPass.cpp
     src/renderpasses/ShadowPass.cpp
@@ -105,66 +104,109 @@ add_executable(ProjectOptimizedRenderer
     src/resource/Texture.cpp
     src/resource/SamplerCache.cpp
     src/resource/SceneInfo.cpp
-    src/debug/ImGuiManager.cpp
+    src/resource/RendererResourceManager.cpp
     src/debug/GPUTimer.cpp
     src/debug/Screenshot.cpp
+)
+
+set(POR_VIEWER_SOURCES
+    src/main.cpp
+    src/core/Camera.cpp
+    src/debug/ImGuiManager.cpp
     src/debug/LogSink.cpp
     src/viewer/ViewerPanels.cpp
-    # ── Dear ImGui core ───────────────────────────────────────────────────────
     external/imgui/imgui.cpp
     external/imgui/imgui_draw.cpp
     external/imgui/imgui_tables.cpp
     external/imgui/imgui_widgets.cpp
-    # ── Dear ImGui backends ───────────────────────────────────────────────────
     external/imgui/backends/imgui_impl_sdl3.cpp
     external/imgui/backends/imgui_impl_vulkan.cpp
 )
 
-target_include_directories(ProjectOptimizedRenderer PRIVATE
+add_library(por_renderer_core STATIC ${POR_RENDERER_CORE_SOURCES})
+add_library(por_renderer_c_api STATIC src/api/por_renderer.cpp)
+add_library(por_renderer_api_mock STATIC src/api/por_renderer_mock.c)
+add_executable(por_viewer ${POR_VIEWER_SOURCES})
+
+set_target_properties(por_viewer PROPERTIES OUTPUT_NAME "ProjectOptimizedRenderer")
+set_target_properties(por_renderer_api_mock PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+
+target_include_directories(por_renderer_core PUBLIC
     "${CMAKE_SOURCE_DIR}/include"
     "${VMA_INCLUDE_DIR}"
     "${CMAKE_SOURCE_DIR}/external/cgltf"
     "${CMAKE_SOURCE_DIR}/external/stb"
+)
+
+target_include_directories(por_viewer PRIVATE
     "${CMAKE_SOURCE_DIR}/external/imgui"
     "${CMAKE_SOURCE_DIR}/external/imgui/backends"
 )
 
+target_include_directories(por_renderer_api_mock PUBLIC
+    "${CMAKE_SOURCE_DIR}/include"
+)
+
+target_link_libraries(por_renderer_core PUBLIC
+    volk::volk
+    SDL3::SDL3
+    spdlog::spdlog
+    glm::glm
+    Threads::Threads
+    glslang::glslang
+    glslang::SPIRV
+    glslang::glslang-default-resource-limits
+)
+
+target_link_libraries(por_renderer_c_api PUBLIC por_renderer_core)
+target_link_libraries(por_viewer PRIVATE por_renderer_core)
+
+set(POR_PROJECT_TARGETS
+    por_renderer_core
+    por_renderer_c_api
+    por_viewer
+)
+
 # ── Compiler flags (platform-specific) ────────────────────────────────────────
 if(MSVC)
-    target_compile_options(ProjectOptimizedRenderer PRIVATE
-        /W4
-        /permissive-
-        /Zc:__cplusplus        # Report correct C++ standard version
-        /Zc:preprocessor       # Use conformant preprocessor
-        /utf-8                 # Source and execution character set
-        /EHsc                  # Standard C++ exception handling
-        # Suppress warnings that fire excessively in Vulkan/VMA headers
-        /wd4324                # structure was padded due to alignment specifier
-        /wd4127                # conditional expression is constant (VMA macros)
-        /wd4100                # unreferenced formal parameter
-        /wd4189                # local variable is initialized but not referenced
-    )
+    foreach(target IN LISTS POR_PROJECT_TARGETS)
+        target_compile_options(${target} PRIVATE
+            /W4
+            /permissive-
+            /Zc:__cplusplus
+            /Zc:preprocessor
+            /utf-8
+            /EHsc
+            /wd4324
+            /wd4127
+            /wd4100
+            /wd4189
+        )
+    endforeach()
 else()
-    target_compile_options(ProjectOptimizedRenderer PRIVATE
-        -Wall
-        -Wextra
-        -Wpedantic
-        $<$<BOOL:${APPLE_SILICON}>:-march=native -mtune=apple-m2>
-    )
+    foreach(target IN LISTS POR_PROJECT_TARGETS)
+        target_compile_options(${target} PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+            $<$<BOOL:${APPLE_SILICON}>:-march=native -mtune=apple-m2>
+        )
+    endforeach()
 endif()
 
 # ── Compile definitions (platform-specific) ───────────────────────────────────
-target_compile_definitions(ProjectOptimizedRenderer PRIVATE
-    VK_ENABLE_BETA_EXTENSIONS
-    $<$<CONFIG:Debug>:VK_DEBUG_MARKERS>
-    SHADER_DIR="${CMAKE_BINARY_DIR}/shaders"
-    ASSET_DIR="${CMAKE_SOURCE_DIR}/assets"
-    # VMA: use dynamic Vulkan function loading via volk
-    VMA_STATIC_VULKAN_FUNCTIONS=0
-    VMA_DYNAMIC_VULKAN_FUNCTIONS=1
-    # ImGui: use volk for Vulkan symbol resolution (avoids VK_NO_PROTOTYPES conflicts)
-    IMGUI_IMPL_VULKAN_USE_VOLK
-)
+foreach(target IN LISTS POR_PROJECT_TARGETS)
+    target_compile_definitions(${target} PRIVATE
+        VK_ENABLE_BETA_EXTENSIONS
+        $<$<CONFIG:Debug>:VK_DEBUG_MARKERS>
+        SHADER_DIR="${CMAKE_BINARY_DIR}/shaders"
+        ASSET_DIR="${CMAKE_SOURCE_DIR}/assets"
+        VMA_STATIC_VULKAN_FUNCTIONS=0
+        VMA_DYNAMIC_VULKAN_FUNCTIONS=1
+    )
+endforeach()
+
+target_compile_definitions(por_viewer PRIVATE IMGUI_IMPL_VULKAN_USE_VOLK)
 
 # ── Suppress warnings in third-party ImGui sources ────────────────────────────
 set(IMGUI_SOURCES
@@ -197,121 +239,139 @@ if(APPLE)
         NO_DEFAULT_PATH
     )
 
-    target_compile_definitions(ProjectOptimizedRenderer PRIVATE
-        VK_USE_PLATFORM_MACOS_MVK
-    )
-    if(POR_VULKAN_LOADER_LIBRARY)
-        target_compile_definitions(ProjectOptimizedRenderer PRIVATE
-            POR_VULKAN_LOADER_PATH="${POR_VULKAN_LOADER_LIBRARY}"
+    foreach(target IN LISTS POR_PROJECT_TARGETS)
+        target_compile_definitions(${target} PRIVATE
+            VK_USE_PLATFORM_MACOS_MVK
         )
+    endforeach()
+    if(POR_VULKAN_LOADER_LIBRARY)
+        foreach(target IN LISTS POR_PROJECT_TARGETS)
+            target_compile_definitions(${target} PRIVATE
+                POR_VULKAN_LOADER_PATH="${POR_VULKAN_LOADER_LIBRARY}"
+            )
+        endforeach()
     endif()
     if(POR_MOLTENVK_ICD_JSON)
-        target_compile_definitions(ProjectOptimizedRenderer PRIVATE
-            POR_MOLTENVK_ICD_JSON_PATH="${POR_MOLTENVK_ICD_JSON}"
-        )
+        foreach(target IN LISTS POR_PROJECT_TARGETS)
+            target_compile_definitions(${target} PRIVATE
+                POR_MOLTENVK_ICD_JSON_PATH="${POR_MOLTENVK_ICD_JSON}"
+            )
+        endforeach()
     endif()
     if(MOLTEN_VK_LIBRARY)
-        target_compile_definitions(ProjectOptimizedRenderer PRIVATE
-            POR_MOLTENVK_LIBRARY_PATH="${MOLTEN_VK_LIBRARY}"
-        )
+        foreach(target IN LISTS POR_PROJECT_TARGETS)
+            target_compile_definitions(${target} PRIVATE
+                POR_MOLTENVK_LIBRARY_PATH="${MOLTEN_VK_LIBRARY}"
+            )
+        endforeach()
     endif()
 elseif(WIN32)
-    target_compile_definitions(ProjectOptimizedRenderer PRIVATE
-        VK_USE_PLATFORM_WIN32_KHR
-        WIN32_LEAN_AND_MEAN
-        NOMINMAX
-    )
+    foreach(target IN LISTS POR_PROJECT_TARGETS)
+        target_compile_definitions(${target} PRIVATE
+            VK_USE_PLATFORM_WIN32_KHR
+            WIN32_LEAN_AND_MEAN
+            NOMINMAX
+        )
+    endforeach()
 endif()
 
 # ── Shader compilation ────────────────────────────────────────────────────────
+add_custom_target(por_shaders)
+
 shader_compile_glsl(
-    TARGET ProjectOptimizedRenderer
+    TARGET por_shaders
     SOURCE "${CMAKE_SOURCE_DIR}/shaders/triangle.vert"
     OUTPUT "triangle.vert.spv"
 )
 shader_compile_glsl(
-    TARGET ProjectOptimizedRenderer
+    TARGET por_shaders
     SOURCE "${CMAKE_SOURCE_DIR}/shaders/triangle.frag"
     OUTPUT "triangle.frag.spv"
 )
 shader_compile_glsl(
-    TARGET ProjectOptimizedRenderer
+    TARGET por_shaders
     SOURCE "${CMAKE_SOURCE_DIR}/shaders/pbr.vert"
     OUTPUT "pbr.vert.spv"
 )
 shader_compile_glsl(
-    TARGET ProjectOptimizedRenderer
+    TARGET por_shaders
     SOURCE "${CMAKE_SOURCE_DIR}/shaders/pbr.frag"
     OUTPUT "pbr.frag.spv"
 )
 shader_compile_glsl(
-    TARGET ProjectOptimizedRenderer
+    TARGET por_shaders
     SOURCE "${CMAKE_SOURCE_DIR}/shaders/pbr_normals.frag"
     OUTPUT "pbr_normals.frag.spv"
 )
 shader_compile_glsl(
-    TARGET ProjectOptimizedRenderer
+    TARGET por_shaders
     SOURCE "${CMAKE_SOURCE_DIR}/shaders/shadow.vert"
     OUTPUT "shadow.vert.spv"
 )
 shader_compile_glsl(
-    TARGET ProjectOptimizedRenderer
+    TARGET por_shaders
     SOURCE "${CMAKE_SOURCE_DIR}/shaders/shadow_alpha.vert"
     OUTPUT "shadow_alpha.vert.spv"
 )
 shader_compile_glsl(
-    TARGET ProjectOptimizedRenderer
+    TARGET por_shaders
     SOURCE "${CMAKE_SOURCE_DIR}/shaders/shadow_alpha.frag"
     OUTPUT "shadow_alpha.frag.spv"
 )
 shader_compile_glsl(
-    TARGET ProjectOptimizedRenderer
+    TARGET por_shaders
     SOURCE "${CMAKE_SOURCE_DIR}/shaders/shadow_vsm.frag"
     OUTPUT "shadow_vsm.frag.spv"
 )
 shader_compile_glsl(
-    TARGET ProjectOptimizedRenderer
+    TARGET por_shaders
     SOURCE "${CMAKE_SOURCE_DIR}/shaders/shadow_vsm_alpha.frag"
     OUTPUT "shadow_vsm_alpha.frag.spv"
 )
 shader_compile_glsl(
-    TARGET ProjectOptimizedRenderer
+    TARGET por_shaders
     SOURCE "${CMAKE_SOURCE_DIR}/shaders/shadow_blur.comp"
     OUTPUT "shadow_blur.comp.spv"
 )
 shader_compile_glsl(
-    TARGET ProjectOptimizedRenderer
+    TARGET por_shaders
     SOURCE "${CMAKE_SOURCE_DIR}/shaders/cluster_cull.comp"
     OUTPUT "cluster_cull.comp.spv"
 )
 shader_compile_glsl(
-    TARGET ProjectOptimizedRenderer
+    TARGET por_shaders
     SOURCE "${CMAKE_SOURCE_DIR}/shaders/tonemap.vert"
     OUTPUT "tonemap.vert.spv"
 )
 shader_compile_glsl(
-    TARGET ProjectOptimizedRenderer
+    TARGET por_shaders
     SOURCE "${CMAKE_SOURCE_DIR}/shaders/tonemap.frag"
     OUTPUT "tonemap.frag.spv"
 )
 shader_compile_glsl(
-    TARGET ProjectOptimizedRenderer
+    TARGET por_shaders
     SOURCE "${CMAKE_SOURCE_DIR}/shaders/sky.vert"
     OUTPUT "sky.vert.spv"
 )
 shader_compile_glsl(
-    TARGET ProjectOptimizedRenderer
+    TARGET por_shaders
     SOURCE "${CMAKE_SOURCE_DIR}/shaders/sky.frag"
     OUTPUT "sky.frag.spv"
 )
 
-target_link_libraries(ProjectOptimizedRenderer PRIVATE
-    volk::volk
-    SDL3::SDL3
-    spdlog::spdlog
-    glm::glm
-    Threads::Threads
-    glslang::glslang
-    glslang::SPIRV
-    glslang::glslang-default-resource-limits
-)
+add_dependencies(por_viewer por_shaders)
+
+# ── ABI header compile tests ──────────────────────────────────────────────────
+enable_testing()
+
+add_executable(por_c_api_header_test tests/c_api_header_test.c)
+target_link_libraries(por_c_api_header_test PRIVATE por_renderer_api_mock)
+target_include_directories(por_c_api_header_test PRIVATE "${CMAKE_SOURCE_DIR}/include")
+set_target_properties(por_c_api_header_test PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+add_test(NAME por_c_api_header_test COMMAND por_c_api_header_test)
+
+add_executable(por_cpp_api_header_test tests/c_api_header_test.cpp)
+target_link_libraries(por_cpp_api_header_test PRIVATE por_renderer_api_mock)
+target_include_directories(por_cpp_api_header_test PRIVATE "${CMAKE_SOURCE_DIR}/include")
+set_target_properties(por_cpp_api_header_test PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+add_test(NAME por_cpp_api_header_test COMMAND por_cpp_api_header_test)

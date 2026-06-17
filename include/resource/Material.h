@@ -4,7 +4,7 @@
 #include <string>
 #include <cstdint>
 
-// Indices into Model::textures / Renderer::m_textures.
+// Indices into Model::textures / renderer-owned uploaded textures.
 // -1 means "no texture assigned — use fallback."
 struct Material {
     std::string name;

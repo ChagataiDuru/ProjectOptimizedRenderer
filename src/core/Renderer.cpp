@@ -1,8 +1,5 @@
 #include "core/Renderer.h"
 #include "core/VulkanUtil.h"
-#include "debug/ImGuiManager.h"
-#include "resource/GLTFLoader.h"
-#include "resource/SceneInfo.h"
 #include "resource/Vertex.h"
 
 #include <spdlog/spdlog.h>
@@ -19,10 +16,6 @@
 
 #ifndef SHADER_DIR
 #define SHADER_DIR "shaders"
-#endif
-
-#ifndef ASSET_DIR
-#define ASSET_DIR "assets"
 #endif
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -175,13 +168,10 @@ Renderer::Renderer(VulkanContext& ctx, Swapchain& swapchain)
     , m_swapchain(swapchain)
     , m_commandBuffer(ctx)
     , m_frameSync(ctx)
-    , m_vertexBuffer(ctx)
-    , m_indexBuffer(ctx)
     , m_pointLightBuffer(ctx)
     , m_clusterGridBuffer(ctx)
     , m_clusterLightIndexBuffer(ctx)
-    , m_samplerCache(ctx)
-    , m_fallbackWhite(ctx)
+    , m_resources(ctx)
     , m_sceneDepthTarget(ctx)
     , m_msaaHdrTarget(ctx)
     , m_resolvedHdrTarget(ctx)
@@ -200,10 +190,6 @@ Renderer::~Renderer()
 
 void Renderer::init()
 {
-    loadImportedModel(std::string(ASSET_DIR) + "/source/Sponza.gltf");
-    m_sceneInfo = computeSceneInfo(m_importedModel.boundsMin, m_importedModel.boundsMax);
-    spdlog::info("Scene normalized: scale={:.4f}, radius={:.2f}",
-                 m_sceneInfo.scaleFactor, m_sceneInfo.normalizedRadius);
     m_antiAliasingStatus = resolveAntiAliasingSettings(m_antiAliasingSettings);
     logAntiAliasingStatus();
 
@@ -238,51 +224,18 @@ void Renderer::init()
                  m_renderStats.textureMemoryBytes / (1024.0f * 1024.0f));
 }
 
-void Renderer::reloadModel(const std::string& modelPath)
+void Renderer::uploadModelResources(const Model& model)
 {
-    spdlog::info("Reloading model: {}", modelPath);
+    spdlog::info("Uploading renderer model resources: {} meshes, {} materials, {} textures",
+                 model.meshes.size(), model.materials.size(), model.textures.size());
 
-    // ── Drain the GPU — no frame may reference resources we're about to destroy ──
+    // Drain the GPU: no frame may reference resources/descriptors we are replacing.
     vkDeviceWaitIdle(m_ctx.getDevice());
 
-    // ── Destroy model-dependent resources ────────────────────────────────────────
     destroyRendererDescriptorPools();
-
-    for (auto& tex : m_textures)
-        tex.destroy();
-    m_textures.clear();
-
-    // Fallback white is recreated by loadModel(); destroy old allocation first.
-    m_fallbackWhite.destroy();
-
-    m_indexBuffer.destroy();
-    m_vertexBuffer.destroy();
-
-    m_meshRenderData.clear();
-    m_renderMaterials.clear();
     m_activeScene = {};
-    m_importedModel = Model{};
+    m_resources.uploadModel(model);
 
-    // ── Load new model and upload resources ──────────────────────────────────────
-    try {
-        loadImportedModel(modelPath);
-    } catch (const std::exception& e) {
-        spdlog::error("Failed to load model '{}': {}", modelPath, e.what());
-        spdlog::info("Falling back to Sponza");
-        try {
-            loadImportedModel(std::string(ASSET_DIR) + "/source/Sponza.gltf");
-        } catch (const std::exception& e2) {
-            spdlog::critical("Failed to load fallback model: {}", e2.what());
-            throw;  // Unrecoverable
-        }
-    }
-
-    // ── Compute normalization transform for the new model ────────────────────────
-    m_sceneInfo = computeSceneInfo(m_importedModel.boundsMin, m_importedModel.boundsMax);
-    spdlog::info("Scene normalized: scale={:.4f}, radius={:.2f}",
-                 m_sceneInfo.scaleFactor, m_sceneInfo.normalizedRadius);
-
-    // ── Recreate descriptors for the new model ───────────────────────────────────
     createFrameSceneDescriptorPool();
     allocateFrameSceneDescriptorSets();
     createMaterialDescriptorPool();
@@ -292,7 +245,7 @@ void Renderer::reloadModel(const std::string& modelPath)
     // ── Update render stats ──────────────────────────────────────────────────────
     refreshRenderStats();
 
-    spdlog::info("Model reloaded: {} meshes, {} materials, {} textures ({:.1f} MB GPU tex)",
+    spdlog::info("Renderer model resources uploaded: {} meshes, {} materials, {} textures ({:.1f} MB GPU tex)",
                  m_renderStats.meshCount, m_renderStats.materialCount,
                  m_renderStats.textureCount,
                  m_renderStats.textureMemoryBytes / (1024.0f * 1024.0f));
@@ -319,22 +272,13 @@ void Renderer::shutdown()
 
     destroyPipeline();
 
-    // Destroy textures before VMA teardown (textures hold VmaAllocations)
-    m_fallbackWhite.destroy();
-    for (auto& tex : m_textures)
-        tex.destroy();
-    m_textures.clear();
-    m_meshRenderData.clear();
-    m_renderMaterials.clear();
     m_activeScene = {};
-    m_samplerCache.shutdown();
+    m_resources.clear();
 
     // Destroy GPU resources that hold VMA allocations
     destroyClusteredLightResources();
     destroyRendererDescriptorPools();
     m_frameResources.clear();
-    m_indexBuffer.destroy();
-    m_vertexBuffer.destroy();
 
     m_commandBuffer.shutdown();
     m_frameSync.shutdown();
@@ -342,23 +286,16 @@ void Renderer::shutdown()
 
 void Renderer::refreshRenderStats()
 {
-    m_renderStats.meshCount          = static_cast<uint32_t>(m_meshRenderData.size());
-    m_renderStats.materialCount      = static_cast<uint32_t>(m_renderMaterials.size());
-    m_renderStats.textureCount       = static_cast<uint32_t>(m_textures.size());
+    m_renderStats.meshCount          = m_resources.meshCount();
+    m_renderStats.materialCount      = m_resources.materialCount();
+    m_renderStats.textureCount       = m_resources.textureCount();
     m_renderStats.aaMode             = m_antiAliasingStatus.mode;
     m_renderStats.activeSampleCount  = sampleCountValue(m_antiAliasingStatus.activeSampleCount);
     m_renderStats.sampleShadingEnabled = m_antiAliasingStatus.sampleShadingEnabled;
     m_renderStats.minSampleShading   = m_antiAliasingStatus.minSampleShading;
     m_renderStats.alphaToCoverageEnabled = m_antiAliasingStatus.alphaToCoverageEnabled;
     m_renderStats.estimatedMsaaAttachmentMemoryBytes = estimateMsaaAttachmentMemoryBytes();
-    m_renderStats.textureMemoryBytes = 0;
-    for (const auto& tex : m_textures) {
-        if (tex.isValid()) {
-            const VkExtent3D ext = tex.getExtent();
-            // Each texel is 4 bytes (RGBA8); depth = 1 for 2D textures.
-            m_renderStats.textureMemoryBytes += static_cast<size_t>(ext.width) * ext.height * 4;
-        }
-    }
+    m_renderStats.textureMemoryBytes = m_resources.estimateTextureMemoryBytes();
 }
 
 AntiAliasingStatus Renderer::resolveAntiAliasingSettings(
@@ -428,9 +365,10 @@ VkImageView Renderer::getResolvedHdrView() const
 
 bool Renderer::isDrawAlphaMasked(const DrawCommand& draw) const
 {
+    const auto& materials = m_resources.materials();
     return draw.material.isValid() &&
-           draw.material.index < m_renderMaterials.size() &&
-           m_renderMaterials[draw.material.index].alphaMode == Material::AlphaMode::Mask;
+           draw.material.index < materials.size() &&
+           materials[draw.material.index].alphaMode == Material::AlphaMode::Mask;
 }
 
 VkPipeline Renderer::selectSolidPipelineForDraw(const DrawCommand& draw) const
@@ -547,91 +485,6 @@ void Renderer::setAntiAliasingSettings(const AntiAliasingSettings& settings)
     if (pbrPipelineStateChanged) {
         createPbrGraphicsPipelines();
     }
-}
-
-// ── Geometry ──────────────────────────────────────────────────────────────────
-
-void Renderer::loadImportedModel(const std::string& modelPath)
-{
-    // Imported asset data is the bridge input. Renderer-owned resources and the
-    // sticky RenderScenePacket are derived later when the caller submits scene content.
-    m_importedModel = GLTFLoader::loadGLTF(modelPath);
-    m_meshRenderData.clear();
-    m_renderMaterials = m_importedModel.materials;
-
-    // Flatten all mesh vertex/index data into single contiguous arrays.
-    // Each mesh's indices are already absolute (offset applied in GLTFLoader)
-    // relative to that mesh's own vertex array — here we make them absolute
-    // into the combined vertex array by adding the running vertexBase.
-    std::vector<Vertex>   allVertices;
-    std::vector<uint32_t> allIndices;
-    uint32_t vertexBase = 0;
-
-    for (const auto& mesh : m_importedModel.meshes) {
-        MeshRenderData data{};
-        data.firstIndex    = static_cast<uint32_t>(allIndices.size());
-        data.indexCount    = static_cast<uint32_t>(mesh.indices.size());
-        m_meshRenderData.push_back(data);
-
-        allVertices.insert(allVertices.end(), mesh.vertices.begin(), mesh.vertices.end());
-
-        // Re-base indices so they point into the combined vertex buffer.
-        for (uint32_t idx : mesh.indices)
-            allIndices.push_back(idx + vertexBase);
-
-        vertexBase += static_cast<uint32_t>(mesh.vertices.size());
-    }
-
-    const VkDeviceSize vertSize = allVertices.size() * sizeof(Vertex);
-    const VkDeviceSize idxSize  = allIndices.size()  * sizeof(uint32_t);
-
-    m_vertexBuffer.createDeviceLocal(vertSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-    m_indexBuffer.createDeviceLocal(idxSize,   VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-
-    // Staged upload: use a dedicated transient pool so frame command buffers are not disturbed.
-    VkCommandPool   transferPool = VK_NULL_HANDLE;
-    VkCommandBuffer transferCmd  = vkutil::beginSingleUseCommands(m_ctx, transferPool);
-
-    m_vertexBuffer.uploadStaged(allVertices.data(), vertSize, transferCmd);
-    m_indexBuffer.uploadStaged(allIndices.data(),   idxSize,  transferCmd);
-
-    // ── Texture upload ────────────────────────────────────────────────────────
-    // All texture copy commands are recorded into the same transferCmd so they
-    // share one submit/fence with the geometry buffers.
-
-    m_fallbackWhite.createSolidColor(255, 255, 255, 255, transferCmd, m_samplerCache);
-
-    m_textures.reserve(m_importedModel.textures.size());
-    for (const auto& texEntry : m_importedModel.textures) {
-        m_textures.emplace_back(m_ctx);
-        auto& tex = m_textures.back();
-
-        if (texEntry.path.empty()) {
-            spdlog::warn("Renderer: skipping texture with empty path (embedded/unsupported)");
-            continue;
-        }
-
-        const VkFormat format = (texEntry.type == TextureType::Color)
-            ? VK_FORMAT_R8G8B8A8_SRGB
-            : VK_FORMAT_R8G8B8A8_UNORM;
-
-        try {
-            tex.loadFromFile(texEntry.path, format, transferCmd, m_samplerCache);
-        } catch (const std::exception& e) {
-            spdlog::error("Renderer: failed to load texture '{}': {}", texEntry.path, e.what());
-        }
-    }
-
-    vkutil::endSingleUseCommands(m_ctx, transferPool, transferCmd);
-
-    m_vertexBuffer.releaseStaging();
-    m_indexBuffer.releaseStaging();
-    m_fallbackWhite.releaseStaging();
-    for (auto& tex : m_textures)
-        tex.releaseStaging();
-
-    spdlog::info("Model uploaded: {} meshes, {} vertices, {} indices",
-                 m_importedModel.meshes.size(), allVertices.size(), allIndices.size());
 }
 
 // ── Pipeline ──────────────────────────────────────────────────────────────────
@@ -1250,16 +1103,17 @@ void Renderer::rebuildActiveSceneDrawBounds()
 {
     m_activeScene.drawBounds.clear();
     m_activeScene.drawBounds.reserve(m_activeScene.submission.draws.size());
+    const auto& meshes = m_resources.meshes();
 
     for (const DrawCommand& draw : m_activeScene.submission.draws) {
-        if (!draw.mesh.isValid() || draw.mesh.index >= m_importedModel.meshes.size()) {
+        if (!draw.mesh.isValid() || draw.mesh.index >= meshes.size()) {
             m_activeScene.drawBounds.push_back({});
             continue;
         }
 
-        const Mesh& importedMesh = m_importedModel.meshes[draw.mesh.index];
-        const glm::vec3& lo = importedMesh.boundsMin;
-        const glm::vec3& hi = importedMesh.boundsMax;
+        const MeshRenderData& mesh = meshes[draw.mesh.index];
+        const glm::vec3& lo = mesh.boundsMin;
+        const glm::vec3& hi = mesh.boundsMax;
         glm::vec3 worldMin(std::numeric_limits<float>::max());
         glm::vec3 worldMax(-std::numeric_limits<float>::max());
 
@@ -1815,7 +1669,7 @@ void Renderer::rewriteFrameSceneShadowBindings()
 void Renderer::createMaterialDescriptorPool()
 {
     // Renderer owns material texture descriptors alongside persistent uploaded materials.
-    const uint32_t materialCount = static_cast<uint32_t>(m_renderMaterials.size());
+    const uint32_t materialCount = m_resources.materialCount();
     if (materialCount == 0) {
         return;
     }
@@ -1839,7 +1693,9 @@ void Renderer::createMaterialDescriptorPool()
 
 void Renderer::allocateMaterialDescriptorSets()
 {
-    const uint32_t materialCount = static_cast<uint32_t>(m_renderMaterials.size());
+    const auto& materials = m_resources.materials();
+    const auto& textures = m_resources.textures();
+    const uint32_t materialCount = static_cast<uint32_t>(materials.size());
     if (materialCount == 0) return;
 
     // Allocate all material sets in one batch — more efficient than N individual calls.
@@ -1856,20 +1712,20 @@ void Renderer::allocateMaterialDescriptorSets()
 
     // Helpers: resolve a texture index to its view/sampler, falling back to white.
     auto getView = [&](int32_t idx) -> VkImageView {
-        if (idx >= 0 && idx < static_cast<int32_t>(m_textures.size())
-            && m_textures[static_cast<size_t>(idx)].isValid())
-            return m_textures[static_cast<size_t>(idx)].getImageView();
-        return m_fallbackWhite.getImageView();
+        if (idx >= 0 && idx < static_cast<int32_t>(textures.size())
+            && textures[static_cast<size_t>(idx)].isValid())
+            return textures[static_cast<size_t>(idx)].getImageView();
+        return m_resources.fallbackWhite().getImageView();
     };
     auto getSampler = [&](int32_t idx) -> VkSampler {
-        if (idx >= 0 && idx < static_cast<int32_t>(m_textures.size())
-            && m_textures[static_cast<size_t>(idx)].isValid())
-            return m_textures[static_cast<size_t>(idx)].getSampler();
-        return m_fallbackWhite.getSampler();
+        if (idx >= 0 && idx < static_cast<int32_t>(textures.size())
+            && textures[static_cast<size_t>(idx)].isValid())
+            return textures[static_cast<size_t>(idx)].getSampler();
+        return m_resources.fallbackWhite().getSampler();
     };
 
     for (uint32_t i = 0; i < materialCount; ++i) {
-        const Material& mat = m_renderMaterials[i];
+        const Material& mat = materials[i];
 
         const VkDescriptorImageInfo albedoInfo{
             .sampler     = getSampler(mat.albedoTextureIndex),
@@ -1926,16 +1782,30 @@ void Renderer::allocateMaterialDescriptorSets()
 void Renderer::handleResize()
 {
     const VkExtent2D oldExt = m_swapchain.getExtent();
+    handleResize(oldExt.width, oldExt.height);
+}
+
+void Renderer::resize(uint32_t width, uint32_t height)
+{
+    if (width == 0 || height == 0) {
+        return;
+    }
+    handleResize(width, height);
+}
+
+void Renderer::handleResize(uint32_t width, uint32_t height)
+{
+    const VkExtent2D oldExt = m_swapchain.getExtent();
 
     // Resize contract:
     // wait idle -> recreate swapchain -> recreate renderer resize resources
     // -> refresh bindings that point at recreated resources -> keep scene/frame state coherent.
     vkDeviceWaitIdle(m_ctx.getDevice());
 
-    // Recreate swapchain. Passing current extent as hint; Swapchain::createSwapchain()
-    // reads surface capabilities and uses cap.currentExtent when available (most platforms),
-    // falling back to clamped requested dimensions otherwise.
-    m_swapchain.recreate(oldExt.width, oldExt.height);
+    // Swapchain::createSwapchain() reads surface capabilities and uses
+    // cap.currentExtent when available, falling back to clamped requested
+    // dimensions otherwise.
+    m_swapchain.recreate(width, height);
 
     const VkExtent2D newExt = m_swapchain.getExtent();
     if (newExt.width > 0 && newExt.height > 0) {
@@ -1980,7 +1850,7 @@ bool Renderer::beginFrame()
     return true;
 }
 
-void Renderer::render()
+void Renderer::render(RendererOverlay* overlay)
 {
     VkCommandBuffer cmd = m_commandBuffer.getFrameCommandBuffer();
     FrameResources& frame = currentFrameResources();
@@ -2007,21 +1877,29 @@ void Renderer::render()
     m_renderStats.alphaToCoverageEnabled = m_antiAliasingStatus.alphaToCoverageEnabled;
     m_renderStats.estimatedMsaaAttachmentMemoryBytes = estimateMsaaAttachmentMemoryBytes();
 
-    // update shadow matrices each frame so the shadow follows the camera.
-    // Also recalculates shadowRadius/shadowDepth from m_sceneInfo.normalizedRadius.
-    m_shadowPass.record(cmd,
-                        frame.sceneDescriptorSet,
-                        m_frameSync.getCurrentFrame(),
-                        m_vertexBuffer,
-                        m_indexBuffer,
-                        m_activeScene.submission.draws,
-                        m_activeScene.drawBounds,
-                        m_meshRenderData,
-                        m_renderMaterials,
-                        m_materialDescriptorSets,
-                        m_gpuTimer);
-    if (m_shadowPass.consumeDescriptorDirty()) {
-        rewriteFrameSceneShadowBindings();
+    const auto& meshes = m_resources.meshes();
+    const auto& materials = m_resources.materials();
+    const bool hasSceneGeometry =
+        !meshes.empty() &&
+        m_resources.vertexBuffer().getBuffer() != VK_NULL_HANDLE &&
+        m_resources.indexBuffer().getBuffer() != VK_NULL_HANDLE;
+
+    // Update shadow matrices each frame so the shadow follows the camera.
+    if (hasSceneGeometry) {
+        m_shadowPass.record(cmd,
+                            frame.sceneDescriptorSet,
+                            m_frameSync.getCurrentFrame(),
+                            m_resources.vertexBuffer(),
+                            m_resources.indexBuffer(),
+                            m_activeScene.submission.draws,
+                            m_activeScene.drawBounds,
+                            meshes,
+                            materials,
+                            m_materialDescriptorSets,
+                            m_gpuTimer);
+        if (m_shadowPass.consumeDescriptorDirty()) {
+            rewriteFrameSceneShadowBindings();
+        }
     }
 
     m_gpuTimer.writeTimestamp(cmd, "ClusterCull_Begin");
@@ -2158,72 +2036,74 @@ void Renderer::render()
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout,
                             shader_interface::kSceneSet, 1, &frame.sceneDescriptorSet, 0, nullptr);
 
-    // Bind vertex and index buffers
-    const VkDeviceSize vertexOffset = 0;
-    const VkBuffer vertexBuf = m_vertexBuffer.getBuffer();
-    vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuf, &vertexOffset);
-    vkCmdBindIndexBuffer(cmd, m_indexBuffer.getBuffer(), 0, VK_INDEX_TYPE_UINT32);
+    if (hasSceneGeometry) {
+        // Bind vertex and index buffers
+        const VkDeviceSize vertexOffset = 0;
+        const VkBuffer vertexBuf = m_resources.vertexBuffer().getBuffer();
+        vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuf, &vertexOffset);
+        vkCmdBindIndexBuffer(cmd, m_resources.indexBuffer().getBuffer(), 0, VK_INDEX_TYPE_UINT32);
 
-    // Push normalization model matrix (bytes 0–63): same transform as shadow pass.
-    for (const DrawCommand& draw : m_activeScene.submission.draws) {
-        if (!draw.mesh.isValid() || draw.mesh.index >= m_meshRenderData.size())
-            continue;
+        // Push normalization model matrix (bytes 0–63): same transform as shadow pass.
+        for (const DrawCommand& draw : m_activeScene.submission.draws) {
+            if (!draw.mesh.isValid() || draw.mesh.index >= meshes.size())
+                continue;
 
-        const MeshRenderData& mesh = m_meshRenderData[draw.mesh.index];
-        const bool alphaMasked = isDrawAlphaMasked(draw);
+            const MeshRenderData& mesh = meshes[draw.mesh.index];
+            const bool alphaMasked = isDrawAlphaMasked(draw);
 
-        VkPipeline drawPipeline = selectSolidPipelineForDraw(draw);
-        if (m_showNormals) {
-            drawPipeline = m_normalsPipeline;
-        } else if (m_wireframe) {
-            drawPipeline = m_wireframePipeline;
-        }
-        const bool drawUsesAlphaCoverage =
-            alphaMasked && drawPipeline == m_maskedA2cPipeline;
-        bindScenePipeline(drawPipeline);
+            VkPipeline drawPipeline = selectSolidPipelineForDraw(draw);
+            if (m_showNormals) {
+                drawPipeline = m_normalsPipeline;
+            } else if (m_wireframe) {
+                drawPipeline = m_wireframePipeline;
+            }
+            const bool drawUsesAlphaCoverage =
+                alphaMasked && drawPipeline == m_maskedA2cPipeline;
+            bindScenePipeline(drawPipeline);
 
-        vkCmdPushConstants(cmd, m_pipelineLayout,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                           shader_interface::kModelMatrixPcOffset, sizeof(glm::mat4), &draw.transform);
-
-        if (draw.material.isValid() &&
-            draw.material.index < m_materialDescriptorSets.size() &&
-            draw.material.index < m_renderMaterials.size()) {
-
-            // Bind material texture set (set=1) — set=0 remains bound and unaffected.
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    m_pipelineLayout,
-                                    shader_interface::kMaterialSet, 1, &m_materialDescriptorSets[draw.material.index],
-                                    0, nullptr);
-
-            // Push material factors to fragment stage (offset 64, after model matrix).
-            const Material& mat = m_renderMaterials[draw.material.index];
-            const MaterialPushConstants matPC{
-                .baseColorFactor  = mat.baseColorFactor,
-                .metallicFactor   = mat.metallicFactor,
-                .roughnessFactor  = mat.roughnessFactor,
-                .alphaCutoff      = alphaMasked ? mat.alphaCutoff : 0.0f,
-                .alphaCoverageMode = drawUsesAlphaCoverage ? 1.0f : 0.0f,
-            };
             vkCmdPushConstants(cmd, m_pipelineLayout,
                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                               shader_interface::kMaterialPcOffset, sizeof(MaterialPushConstants), &matPC);
-        } else {
-            // No material — push default white/neutral factors.
-            const MaterialPushConstants defaultPC{};
-            vkCmdPushConstants(cmd, m_pipelineLayout,
-                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                               shader_interface::kMaterialPcOffset, sizeof(MaterialPushConstants), &defaultPC);
-        }
+                               shader_interface::kModelMatrixPcOffset, sizeof(glm::mat4), &draw.transform);
 
-        vkCmdDrawIndexed(cmd, mesh.indexCount, 1, mesh.firstIndex, 0, 0);
-        m_renderStats.drawCalls++;
-        if (alphaMasked) {
-            m_renderStats.maskedDrawCalls++;
-        } else {
-            m_renderStats.opaqueDrawCalls++;
+            if (draw.material.isValid() &&
+                draw.material.index < m_materialDescriptorSets.size() &&
+                draw.material.index < materials.size()) {
+
+                // Bind material texture set (set=1) — set=0 remains bound and unaffected.
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        m_pipelineLayout,
+                                        shader_interface::kMaterialSet, 1, &m_materialDescriptorSets[draw.material.index],
+                                        0, nullptr);
+
+                // Push material factors to fragment stage (offset 64, after model matrix).
+                const Material& mat = materials[draw.material.index];
+                const MaterialPushConstants matPC{
+                    .baseColorFactor  = mat.baseColorFactor,
+                    .metallicFactor   = mat.metallicFactor,
+                    .roughnessFactor  = mat.roughnessFactor,
+                    .alphaCutoff      = alphaMasked ? mat.alphaCutoff : 0.0f,
+                    .alphaCoverageMode = drawUsesAlphaCoverage ? 1.0f : 0.0f,
+                };
+                vkCmdPushConstants(cmd, m_pipelineLayout,
+                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                   shader_interface::kMaterialPcOffset, sizeof(MaterialPushConstants), &matPC);
+            } else {
+                // No material — push default white/neutral factors.
+                const MaterialPushConstants defaultPC{};
+                vkCmdPushConstants(cmd, m_pipelineLayout,
+                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                   shader_interface::kMaterialPcOffset, sizeof(MaterialPushConstants), &defaultPC);
+            }
+
+            vkCmdDrawIndexed(cmd, mesh.indexCount, 1, mesh.firstIndex, 0, 0);
+            m_renderStats.drawCalls++;
+            if (alphaMasked) {
+                m_renderStats.maskedDrawCalls++;
+            } else {
+                m_renderStats.opaqueDrawCalls++;
+            }
+            m_renderStats.triangles += mesh.indexCount / 3;
         }
-        m_renderStats.triangles += mesh.indexCount / 3;
     }
 
     vkCmdEndRendering(cmd);
@@ -2255,12 +2135,13 @@ void Renderer::render()
 
     m_gpuTimer.writeTimestamp(cmd, "TonemapPass_End");
 
-    // ImGui overlay pass (LOAD_OP_LOAD preserves the tone-mapped image).
-    if (m_imguiManager) {
-        m_imguiManager->recordRenderPass(
-            cmd,
-            m_swapchain.getCurrentImageView(),
-            m_swapchain.getExtent());
+    // Optional viewer/debug overlay pass (LOAD_OP_LOAD preserves the tone-mapped image).
+    if (overlay) {
+        overlay->record(RendererOverlayRenderInfo{
+            .commandBuffer = cmd,
+            .swapchainView = m_swapchain.getCurrentImageView(),
+            .extent = m_swapchain.getExtent(),
+        });
     }
 
     m_gpuTimer.writeTimestamp(cmd, "ImGuiPass_End");
@@ -2297,9 +2178,9 @@ void Renderer::submitFrame(const RenderFramePacket& packet)
     applyFrameSubmission(packet);
 }
 
-void Renderer::endFrame()
+void Renderer::endFrame(RendererOverlay* overlay)
 {
-    render();
+    render(overlay);
 
     // Reset fence immediately before the submit that will signal it.
     // (Moved from beginFrame to prevent deadlock on skipped frames.)

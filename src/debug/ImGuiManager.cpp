@@ -19,19 +19,21 @@
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
-ImGuiManager::ImGuiManager(VulkanContext& ctx, Swapchain& swapchain)
-    : m_ctx(ctx)
-    , m_swapchain(swapchain)
-{
-}
+ImGuiManager::ImGuiManager() = default;
 
 ImGuiManager::~ImGuiManager()
 {
     shutdown();
 }
 
-void ImGuiManager::init(void* sdlWindow)
+void ImGuiManager::init(const RendererOverlayInitInfo& info)
 {
+    if (!info.context || !info.swapchain || !info.platformWindow) {
+        throw std::runtime_error("ImGuiManager::init received incomplete overlay init info");
+    }
+    m_ctx = info.context;
+    m_swapchain = info.swapchain;
+
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
 
@@ -50,10 +52,10 @@ void ImGuiManager::init(void* sdlWindow)
     loadFonts();
 
     // ── SDL3 platform backend ─────────────────────────────────────────────────
-    ImGui_ImplSDL3_InitForVulkan(static_cast<SDL_Window*>(sdlWindow));
+    ImGui_ImplSDL3_InitForVulkan(static_cast<SDL_Window*>(info.platformWindow));
 
     // ── Vulkan renderer backend (dynamic rendering) ───────────────────────────
-    const VkFormat colorFormat = m_swapchain.getFormat();
+    const VkFormat colorFormat = m_swapchain->getFormat();
 
     const VkPipelineRenderingCreateInfoKHR pipelineRenderingCI{
         .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR,
@@ -62,14 +64,14 @@ void ImGuiManager::init(void* sdlWindow)
     };
 
     ImGui_ImplVulkan_InitInfo initInfo{};
-    initInfo.Instance                = m_ctx.getInstance();
-    initInfo.PhysicalDevice          = m_ctx.getPhysicalDevice();
-    initInfo.Device                  = m_ctx.getDevice();
-    initInfo.QueueFamily             = m_ctx.getGraphicsQueueFamily();
-    initInfo.Queue                   = m_ctx.getGraphicsQueue();
+    initInfo.Instance                = m_ctx->getInstance();
+    initInfo.PhysicalDevice          = m_ctx->getPhysicalDevice();
+    initInfo.Device                  = m_ctx->getDevice();
+    initInfo.QueueFamily             = m_ctx->getGraphicsQueueFamily();
+    initInfo.Queue                   = m_ctx->getGraphicsQueue();
     initInfo.RenderPass              = VK_NULL_HANDLE;
     initInfo.MinImageCount           = 2;
-    initInfo.ImageCount              = m_swapchain.getImageCount();
+    initInfo.ImageCount              = m_swapchain->getImageCount();
     initInfo.MSAASamples             = VK_SAMPLE_COUNT_1_BIT;
     initInfo.DescriptorPoolSize      = 2;
     initInfo.UseDynamicRendering     = true;
@@ -88,11 +90,13 @@ void ImGuiManager::init(void* sdlWindow)
 void ImGuiManager::shutdown()
 {
     if (!m_initialized) return;
-    vkDeviceWaitIdle(m_ctx.getDevice());
+    vkDeviceWaitIdle(m_ctx->getDevice());
     ImGui_ImplVulkan_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
     m_initialized = false;
+    m_ctx = nullptr;
+    m_swapchain = nullptr;
 }
 
 // ── Font loading ──────────────────────────────────────────────────────────────
@@ -398,15 +402,13 @@ void ImGuiManager::endFrame()
     ImGui::Render();
 }
 
-void ImGuiManager::recordRenderPass(VkCommandBuffer cmd,
-                                     VkImageView     swapchainView,
-                                     VkExtent2D      extent)
+void ImGuiManager::record(const RendererOverlayRenderInfo& info)
 {
     if (!m_visible) return;
 
     const VkRenderingAttachmentInfo colorAttachment{
         .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView   = swapchainView,
+        .imageView   = info.swapchainView,
         .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         .loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD,
         .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
@@ -414,15 +416,15 @@ void ImGuiManager::recordRenderPass(VkCommandBuffer cmd,
 
     const VkRenderingInfo renderingInfo{
         .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
-        .renderArea           = { .offset = { 0, 0 }, .extent = extent },
+        .renderArea           = { .offset = { 0, 0 }, .extent = info.extent },
         .layerCount           = 1,
         .colorAttachmentCount = 1,
         .pColorAttachments    = &colorAttachment,
     };
 
-    vkCmdBeginRendering(cmd, &renderingInfo);
-    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
-    vkCmdEndRendering(cmd);
+    vkCmdBeginRendering(info.commandBuffer, &renderingInfo);
+    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), info.commandBuffer);
+    vkCmdEndRendering(info.commandBuffer);
 }
 
 void ImGuiManager::processEvent(const void* sdlEvent)

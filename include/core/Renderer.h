@@ -9,6 +9,7 @@
 #include "core/RenderFramePacket.h"
 #include "core/RenderScenePacket.h"
 #include "core/RenderSettings.h"
+#include "core/RendererOverlay.h"
 #include "core/ShaderInterface.h"
 #include "debug/GPUTimer.h"
 #include "debug/Screenshot.h"
@@ -19,15 +20,11 @@
 #include "resource/Buffer.h"
 #include "resource/Image.h"
 #include "resource/Model.h"
-#include "resource/SceneInfo.h"
-#include "resource/Texture.h"
-#include "resource/SamplerCache.h"
+#include "resource/RendererResourceManager.h"
 #include <glm/glm.hpp>
 #include <array>
-#include <string>
 #include <vector>
-
-class ImGuiManager;  // forward declare — full header pulled in by Renderer.cpp
+#include <string>
 
 class Renderer {
 public:
@@ -46,25 +43,17 @@ public:
     bool beginFrame();
 
     // Record commands, submit, present, advance frame indices.
-    void endFrame();
+    void endFrame(RendererOverlay* overlay = nullptr);
 
     void submitFrame(const RenderFramePacket& packet);
     // Sticky scene submission remains active until the caller submits a replacement packet.
     void submitScene(RenderScenePacket scene);
 
-    // Unload current model and load a new glTF at the given path.
-    // Destroys model-dependent GPU resources, loads new model data, and recreates
-    // renderer-owned descriptors. The caller must submit a new RenderScenePacket
-    // after this returns to reactivate scene content.
-    // Must be called on the main thread while no frames are in flight.
-    void reloadModel(const std::string& modelPath);
+    // Upload CPU import data into renderer-owned GPU resources. Import/reload
+    // policy remains application-side; Renderer only owns GPU resource state.
+    void uploadModelResources(const Model& model);
 
-    // Phase 2.5: wire an ImGuiManager to receive an overlay render pass each frame
-    void setImGuiManager(ImGuiManager* mgr) { m_imguiManager = mgr; }
-
-    // Read-only access for UI panels
-    const Model&     getImportedModel() const { return m_importedModel; }
-    const SceneInfo& getSceneInfo()     const { return m_sceneInfo; }
+    void resize(uint32_t width, uint32_t height);
 
     // Phase 4.3: cascade shadow map constants
     static constexpr uint32_t CASCADE_COUNT = shader_interface::kCascadeCount;
@@ -151,8 +140,9 @@ private:
         std::vector<SceneDrawBounds> drawBounds;
     };
 
-    void render();
+    void render(RendererOverlay* overlay);
     void handleResize();
+    void handleResize(uint32_t width, uint32_t height);
     void createResizeDependentResources();
     void destroyResizeDependentResources();
     void recreateResizeDependentResources();
@@ -160,7 +150,6 @@ private:
     void createPbrPipeline();
     void createPbrGraphicsPipelines();
     void destroyPbrGraphicsPipelines();
-    void loadImportedModel(const std::string& modelPath);
     void destroyPipeline();
     void destroyRendererDescriptorPools();
     AntiAliasingStatus resolveAntiAliasingSettings(const AntiAliasingSettings& settings) const;
@@ -198,17 +187,7 @@ private:
     FrameSync      m_frameSync;
 
     // Renderer-persistent uploaded geometry/resources.
-    Buffer m_vertexBuffer;
-    Buffer m_indexBuffer;
-    SamplerCache         m_samplerCache;
-    std::vector<Texture> m_textures;
-    Texture              m_fallbackWhite;
-
-    // Imported glTF bridge input plus renderer-owned persistent mesh/material metadata.
-    Model                       m_importedModel;
-    SceneInfo                   m_sceneInfo;
-    std::vector<MeshRenderData> m_meshRenderData;
-    std::vector<Material>       m_renderMaterials;
+    RendererResourceManager m_resources;
 
     // Sticky scene submission state derived from caller-owned scene packets.
     ActiveSceneState m_activeScene;
@@ -279,9 +258,6 @@ private:
     AntiAliasingSettings m_antiAliasingSettings;
     AntiAliasingStatus   m_antiAliasingStatus;
     bool                 m_loggedSampleShadingFallback = false;
-
-    // Phase 2.5: optional ImGui overlay
-    ImGuiManager*    m_imguiManager   = nullptr;
 
     // Phase 2.6: profiling and stats
     GPUTimer     m_gpuTimer;

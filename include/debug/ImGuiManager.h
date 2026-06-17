@@ -1,7 +1,6 @@
 #pragma once
 
-#include "core/VulkanContext.h"
-#include "core/Swapchain.h"
+#include "core/RendererOverlay.h"
 #include <functional>
 #include <string>
 #include <vector>
@@ -25,19 +24,18 @@ struct DebugPanel {
     DockLocation          dockLocation = DockLocation::Floating;
 };
 
-class ImGuiManager {
+class ImGuiManager : public RendererOverlay {
 public:
     enum class Theme { Dark, Light };
 
-    ImGuiManager(VulkanContext& ctx, Swapchain& swapchain);
+    ImGuiManager();
     ~ImGuiManager();
 
     ImGuiManager(const ImGuiManager&)            = delete;
     ImGuiManager& operator=(const ImGuiManager&) = delete;
 
-    // sdlWindow must be the SDL_Window* cast to void* (matches Window::getHandle()).
-    void init(void* sdlWindow);
-    void shutdown();
+    void init(const RendererOverlayInitInfo& info) override;
+    void shutdown() override;
 
     void registerPanel(const std::string& name, std::function<void()> drawFn,
                        DockLocation dock = DockLocation::Floating);
@@ -47,14 +45,14 @@ public:
     void beginFrame();
 
     // Builds the dockspace, draws all visible panels, and finalizes draw data
-    // (ImGui::Render). Call after beginFrame() and before recordRenderPass().
+    // (ImGui::Render). Call after beginFrame() and before Renderer invokes record().
     // When hidden, becomes a no-op except for ImGui::Render() to keep state consistent.
     void endFrame();
 
     // Record the ImGui overlay pass into cmd using dynamic rendering (LOAD_OP_LOAD).
     // Call after the PBR vkCmdEndRendering and before the PRESENT_SRC transition.
     // Skips all GPU commands when ImGui is hidden.
-    void recordRenderPass(VkCommandBuffer cmd, VkImageView swapchainView, VkExtent2D extent);
+    void record(const RendererOverlayRenderInfo& info) override;
 
     // Forward an SDL_Event to ImGui (pass pointer to the SDL_Event).
     void processEvent(const void* sdlEvent);
@@ -91,8 +89,8 @@ public:
     void setOpenModelCallback(std::function<void()> cb) { m_openModelCallback = std::move(cb); }
 
 private:
-    VulkanContext& m_ctx;
-    Swapchain&     m_swapchain;
+    VulkanContext* m_ctx = nullptr;
+    Swapchain*     m_swapchain = nullptr;
 
     std::vector<DebugPanel> m_panels;
     bool                    m_initialized = false;

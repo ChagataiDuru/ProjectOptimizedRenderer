@@ -1,6 +1,6 @@
 # 04 — Engine API Direction
 
-Date: 2026-06-10
+Date: 2026-06-17
 
 ## Purpose
 
@@ -10,7 +10,7 @@ The current decision is:
 
 > ProjectOptimizedRenderer remains the core C++ Vulkan renderer repository. A future Odin engine/editor is a separate host project connected through a narrow C ABI.
 
-This document is a design contract, not an implementation task. The renderer should not be converted into a C ABI library immediately.
+This document is a design contract. A draft C header and initial wrapper target now exist, but they are ABI preparation artifacts rather than a stable external integration commitment.
 
 ## Non-Goals
 
@@ -102,7 +102,7 @@ The API should evolve in stages.
 
 ## Stage 0 — Documentation Only
 
-Current stage.
+Completed.
 
 Actions:
 
@@ -132,11 +132,15 @@ struct SkySettings;
 struct DebugViewSettings;
 ```
 
-Goal:
+Current status:
 
-The C++ viewer should talk to the renderer in the same conceptual shape that an external host eventually will.
+- `RendererInstance` owns the first renderer-owned SDL window/runtime lifecycle
+- the viewer submits frame state through `RenderFramePacket`
+- scene content is sticky through `RenderScenePacket`
+- glTF import/reload policy lives in viewer code
+- GPU resources are grouped behind `RendererResourceManager`
 
-This reduces risk because the API design is tested inside C++ before FFI is involved.
+This reduces risk because the API design is tested inside C++ before FFI becomes a long-term contract.
 
 ## Stage 2 — C Header Draft
 
@@ -148,14 +152,14 @@ include/api/por_renderer_api.h
 
 This header should compile as C and C++.
 
-At this stage, it can remain unused or be tested with a tiny C harness.
+Current status: `include/por/por_renderer.h` exists and is compile/run tested from C11 and C++20 against a mock implementation.
 
 ## Stage 3 — C Wrapper Around C++ Backend
 
-Implement a thin C wrapper:
+An initial thin C wrapper target exists:
 
 ```txt
-src/api/por_renderer_api.cpp
+src/api/por_renderer.cpp
 ```
 
 The wrapper owns translation between C API structs and C++ renderer internals.
@@ -167,6 +171,8 @@ Rules:
 - never expose C++ exceptions through C ABI
 - never expose C++ object layout
 - never require Odin to know about Vulkan internals
+
+Current limitation: individual mesh/material/texture create/destroy functions are declared but return `POR_ERROR_UNSUPPORTED_FEATURE` in the real wrapper until the resource manager grows stable per-resource lifetime semantics.
 
 ## Stage 4 — Mock Host Test
 
@@ -793,20 +799,20 @@ Do not remove it just because Odin is planned.
 
 ## Implementation Preconditions
 
-Do not implement the real C ABI until these exist or are actively being introduced:
+Before treating the real C ABI as stable, these must exist or be actively introduced:
 
 1. grouped renderer settings structs
 2. internal `RenderFramePacket`
 3. explicit resize method
-4. resource handle model
+4. stable resource handle create/destroy model
 5. at least one extracted pass or clearer pass ownership
 6. clearer viewer/backend split
 7. documented frame flow
 8. documented resource lifetime rules
 
-## First Real Implementation Slice
+## First Stable Implementation Slice
 
-When the time comes, the first slice should be intentionally small.
+The draft already contains lifecycle/frame/stat functions. The first stable slice should remain intentionally small.
 
 Recommended first slice:
 
@@ -815,19 +821,18 @@ por_renderer_create
 por_renderer_destroy
 por_renderer_resize
 por_renderer_get_stats
-por_renderer_submit_frame
+por_renderer_render_frame
 ```
 
-No resource loading yet.
-
-Instead, the renderer can keep its default test scene internally while accepting camera/light/settings through a frame packet.
+No Odin yet. Resource creation should only become stable after deletion/reuse/lifetime rules are explicit.
 
 Second slice:
 
 ```c
-por_renderer_load_mesh
 por_renderer_create_material
-por_renderer_submit_frame with draw commands
+por_renderer_create_mesh
+por_renderer_create_texture
+por_renderer_render_frame with draw/scene submission
 ```
 
 This sequence reduces risk.
@@ -850,11 +855,11 @@ For the near term:
 
 1. Keep developing the renderer in C++.
 2. Keep the C++ viewer as the research/debug shell.
-3. Refactor toward internal frame packets and grouped settings.
-4. Add render feature work only in ways that support future pass extraction.
-5. Design Odin integration on paper only.
+3. Harden `RendererInstance`, `RenderScenePacket`, and resource handles before adding more feature scope.
+4. Add render feature work only in ways that support current pass ownership.
+5. Keep Odin integration on paper only.
 6. Build an Odin mock host later, separate from this repository.
-7. Connect the real renderer only after the internal renderer boundary is stable.
+7. Connect a real Odin host only after resource lifetime and ABI tests are stable.
 
 ## Next Recommended Document
 

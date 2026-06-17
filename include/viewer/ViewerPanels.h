@@ -3,13 +3,15 @@
 class Camera;
 class ImGuiLogSink;
 class ImGuiManager;
-class Renderer;
-class Window;
+class RendererInstance;
+struct Model;
+struct SceneInfo;
 struct ViewerState;
 
 void registerViewerPanels(ImGuiManager& imguiManager,
-                          Renderer& renderer,
+                          RendererInstance& renderer,
+                          const Model& model,
+                          const SceneInfo& sceneInfo,
                           Camera& camera,
-                          Window& window,
                           ImGuiLogSink& imguiSink,
                           ViewerState& state);

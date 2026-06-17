@@ -51,9 +51,9 @@ cmake --build --preset conan-debug
 
 ### Linux Build Status
 
-Linux CI/builds are disabled and unsupported until a Linux CMake preset (for example, `linux-debug`) is added to `CMakePresets.json`.
+Linux has a `linux-debug` preset in `CMakePresets.json`, but Linux CI/builds remain experimental and unvalidated unless a maintainer explicitly runs and documents them.
 
-Do not assume a Linux preset exists. If Linux support is requested, add the preset first, then document and validate exact commands such as:
+Do not describe Linux as supported without validation. If Linux support is requested, validate and document exact commands such as:
 
 ```bash
 conan install . --output-folder=build --build=missing

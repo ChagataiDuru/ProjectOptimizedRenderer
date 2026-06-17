@@ -1,12 +1,10 @@
 #include "core/Camera.h"
-#include "core/Device.h"
 #include "core/RenderFramePacket.h"
-#include "core/Renderer.h"
-#include "core/Swapchain.h"
-#include "core/VulkanContext.h"
-#include "core/Window.h"
+#include "core/RendererInstance.h"
 #include "debug/ImGuiManager.h"
 #include "debug/LogSink.h"
+#include "resource/GLTFLoader.h"
+#include "resource/SceneInfo.h"
 #include "viewer/ViewerPanels.h"
 #include "viewer/ViewerState.h"
 
@@ -21,6 +19,13 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
+
+#ifndef ASSET_DIR
+#define ASSET_DIR "assets"
+#endif
 
 namespace {
 
@@ -55,18 +60,16 @@ std::vector<shader_interface::GpuPointLight> buildDefaultScenePointLights(float 
     };
 }
 
-RenderScenePacket buildRenderScenePacket(const Renderer& renderer)
+RenderScenePacket buildRenderScenePacket(const Model& model, const SceneInfo& sceneInfo)
 {
     RenderScenePacket scene{};
-    const Model& importedModel = renderer.getImportedModel();
-    const SceneInfo& sceneInfo = renderer.getSceneInfo();
 
-    scene.draws.reserve(importedModel.meshes.size());
-    for (size_t i = 0; i < importedModel.meshes.size(); ++i) {
+    scene.draws.reserve(model.meshes.size());
+    for (size_t i = 0; i < model.meshes.size(); ++i) {
         MaterialHandle material{};
-        const Mesh& importedMesh = importedModel.meshes[i];
+        const Mesh& importedMesh = model.meshes[i];
         if (importedMesh.materialIndex >= 0 &&
-            importedMesh.materialIndex < static_cast<int32_t>(importedModel.materials.size())) {
+            importedMesh.materialIndex < static_cast<int32_t>(model.materials.size())) {
             material.index = static_cast<uint32_t>(importedMesh.materialIndex);
         }
 
@@ -81,7 +84,57 @@ RenderScenePacket buildRenderScenePacket(const Renderer& renderer)
     return scene;
 }
 
-void drawSunDirectionOverlay(const Camera& camera, Window& window, const ViewerState& state)
+void submitModel(RendererInstance& renderer,
+                 const Model& model,
+                 const SceneInfo& sceneInfo)
+{
+    if (renderer.uploadModelResources(model) != RendererResult::Success) {
+        throw std::runtime_error("Renderer resource upload failed: " + renderer.getLastError());
+    }
+    if (renderer.submitScene(buildRenderScenePacket(model, sceneInfo)) != RendererResult::Success) {
+        throw std::runtime_error("Renderer scene submission failed: " + renderer.getLastError());
+    }
+}
+
+bool loadViewerModel(RendererInstance& renderer,
+                     const std::string& requestedPath,
+                     const std::string& fallbackPath,
+                     Model& outModel,
+                     SceneInfo& outSceneInfo)
+{
+    const auto tryLoad = [&](const std::string& path) {
+        Model model = GLTFLoader::loadGLTF(path);
+        SceneInfo sceneInfo = computeSceneInfo(model.boundsMin, model.boundsMax);
+        submitModel(renderer, model, sceneInfo);
+        outModel = std::move(model);
+        outSceneInfo = sceneInfo;
+        spdlog::info("Viewer model active: '{}' (scale {:.4f}, radius {:.2f})",
+                     path, outSceneInfo.scaleFactor, outSceneInfo.normalizedRadius);
+    };
+
+    try {
+        tryLoad(requestedPath);
+        return true;
+    } catch (const std::exception& e) {
+        spdlog::error("Failed to load model '{}': {}", requestedPath, e.what());
+        if (requestedPath == fallbackPath) {
+            return false;
+        }
+    }
+
+    try {
+        spdlog::info("Falling back to default model '{}'", fallbackPath);
+        tryLoad(fallbackPath);
+        return true;
+    } catch (const std::exception& e) {
+        spdlog::critical("Failed to load fallback model '{}': {}", fallbackPath, e.what());
+        return false;
+    }
+}
+
+void drawSunDirectionOverlay(const Camera& camera,
+                             const RendererInstance& renderer,
+                             const ViewerState& state)
 {
     if (glm::length(state.light.direction) <= 0.0001f) {
         return;
@@ -99,8 +152,9 @@ void drawSunDirectionOverlay(const Camera& camera, Window& window, const ViewerS
 
     const glm::vec3 ndc = glm::vec3(clipPos) / clipPos.w;
 
-    uint32_t fbW, fbH;
-    window.getExtent(fbW, fbH);
+    uint32_t fbW = 0;
+    uint32_t fbH = 0;
+    renderer.getWindowExtent(fbW, fbH);
     const float screenX = (ndc.x * 0.5f + 0.5f) * static_cast<float>(fbW);
     const float screenY = (0.5f - ndc.y * 0.5f) * static_cast<float>(fbH);
 
@@ -132,27 +186,28 @@ int main()
     spdlog::info("ProjectOptimizedRenderer starting");
 
     try {
-        Window window(1280, 720, "ProjectOptimizedRenderer");
-        window.init();
+        RendererInstance renderer;
+        const RendererCreateInfo createInfo{
+            .width = 1280,
+            .height = 720,
+            .title = "ProjectOptimizedRenderer",
+        };
+        if (RendererInstance::create(createInfo, renderer) != RendererResult::Success) {
+            throw std::runtime_error("Renderer creation failed: " + renderer.getLastError());
+        }
 
-        VulkanContext vulkanContext;
-        vulkanContext.init();
+        Model activeModel;
+        SceneInfo activeSceneInfo;
+        const std::string defaultModelPath = std::string(ASSET_DIR) + "/source/Sponza.gltf";
+        if (!loadViewerModel(renderer, defaultModelPath, defaultModelPath,
+                             activeModel, activeSceneInfo)) {
+            throw std::runtime_error("Could not load the default viewer model");
+        }
 
-        uint32_t w, h;
-        window.getExtent(w, h);
-
-        Swapchain swapchain(vulkanContext);
-        swapchain.init(window.getHandle(), w, h);
-
-        Device device(vulkanContext);
-
-        Renderer renderer(vulkanContext, swapchain);
-        renderer.init();
-        renderer.submitScene(buildRenderScenePacket(renderer));
-
-        ImGuiManager imguiManager(vulkanContext, swapchain);
-        imguiManager.init(window.getHandle());
-        renderer.setImGuiManager(&imguiManager);
+        ImGuiManager imguiManager;
+        if (renderer.attachOverlay(&imguiManager) != RendererResult::Success) {
+            throw std::runtime_error("ImGui overlay init failed: " + renderer.getLastError());
+        }
 
         ViewerState viewerState;
         ImGuiManager::RenderToggles renderToggles;
@@ -160,22 +215,27 @@ int main()
         renderToggles.showNormals = &viewerState.debugView.showNormals;
         imguiManager.setRenderToggles(renderToggles);
 
+        uint32_t w = 0;
+        uint32_t h = 0;
+        renderer.getWindowExtent(w, h);
+
         Camera camera;
-        const float aspectRatio = static_cast<float>(w) / static_cast<float>(h);
+        const float aspectRatio = h > 0 ? static_cast<float>(w) / static_cast<float>(h) : 16.0f / 9.0f;
         camera.setPerspective(45.0f, aspectRatio, 0.01f, 1000.0f);
-        camera.fitToScene(renderer.getSceneInfo().normalizedRadius);
+        camera.fitToScene(activeSceneInfo.normalizedRadius);
 
         registerViewerPanels(imguiManager,
                              renderer,
+                             activeModel,
+                             activeSceneInfo,
                              camera,
-                             window,
                              *imguiSink,
                              viewerState);
 
         auto lastTime = std::chrono::high_resolution_clock::now();
+        auto* sdlWindow = static_cast<SDL_Window*>(renderer.getWindowHandle());
 
-        SDL_SetWindowRelativeMouseMode(
-            static_cast<SDL_Window*>(window.getHandle()), viewerState.mouseCaptured);
+        SDL_SetWindowRelativeMouseMode(sdlWindow, viewerState.mouseCaptured);
 
         spdlog::info("Entering render loop");
 
@@ -204,9 +264,7 @@ int main()
                     case SDL_EVENT_KEY_DOWN:
                         if (event.key.scancode == SDL_SCANCODE_F1) {
                             viewerState.mouseCaptured = !viewerState.mouseCaptured;
-                            SDL_SetWindowRelativeMouseMode(
-                                static_cast<SDL_Window*>(window.getHandle()),
-                                viewerState.mouseCaptured);
+                            SDL_SetWindowRelativeMouseMode(sdlWindow, viewerState.mouseCaptured);
                             spdlog::debug("Mouse capture: {}",
                                           viewerState.mouseCaptured ? "on" : "off");
                         }
@@ -222,8 +280,7 @@ int main()
                                              : "hidden (F11 fullscreen)");
                             if (!imguiManager.isVisible() && !viewerState.mouseCaptured) {
                                 viewerState.mouseCaptured = true;
-                                SDL_SetWindowRelativeMouseMode(
-                                    static_cast<SDL_Window*>(window.getHandle()), true);
+                                SDL_SetWindowRelativeMouseMode(sdlWindow, true);
                             }
                         }
                         break;
@@ -240,13 +297,14 @@ int main()
 
                     case SDL_EVENT_WINDOW_RESIZED: {
                         int pw, ph;
-                        SDL_GetWindowSizeInPixels(
-                            static_cast<SDL_Window*>(window.getHandle()), &pw, &ph);
+                        SDL_GetWindowSizeInPixels(sdlWindow, &pw, &ph);
                         if (pw > 0 && ph > 0) {
-                            // Viewer owns camera projection updates before the next submitFrame().
-                            const float newAspect =
-                                static_cast<float>(pw) / static_cast<float>(ph);
+                            const float newAspect = static_cast<float>(pw) / static_cast<float>(ph);
                             camera.setPerspective(45.0f, newAspect, 0.01f, 1000.0f);
+                            if (renderer.resize(static_cast<uint32_t>(pw), static_cast<uint32_t>(ph))
+                                != RendererResult::Success) {
+                                throw std::runtime_error("Renderer resize failed: " + renderer.getLastError());
+                            }
                         }
                         spdlog::info("Window resized to {}x{} px", pw, ph);
                         break;
@@ -262,15 +320,24 @@ int main()
             }
 
             if (!viewerState.pendingModelPath.empty()) {
-                renderer.reloadModel(viewerState.pendingModelPath);
-                renderer.submitScene(buildRenderScenePacket(renderer));
-                camera.fitToScene(renderer.getSceneInfo().normalizedRadius);
-                viewerState.selectedMeshIndex = -1;
+                if (loadViewerModel(renderer,
+                                    viewerState.pendingModelPath,
+                                    defaultModelPath,
+                                    activeModel,
+                                    activeSceneInfo)) {
+                    camera.fitToScene(activeSceneInfo.normalizedRadius);
+                    viewerState.selectedMeshIndex = -1;
+                }
                 viewerState.pendingModelPath.clear();
             }
 
             if (!viewerState.pendingPanoramaPath.empty()) {
-                renderer.loadHdrPanorama(viewerState.pendingPanoramaPath);
+                if (renderer.loadHdrPanorama(viewerState.pendingPanoramaPath)
+                    != RendererResult::Success) {
+                    spdlog::error("Failed to load HDR panorama '{}': {}",
+                                  viewerState.pendingPanoramaPath,
+                                  renderer.getLastError());
+                }
                 viewerState.pendingPanoramaPath.clear();
             }
 
@@ -280,23 +347,18 @@ int main()
             camera.update(viewerState.deltaTime);
 
             imguiManager.beginFrame();
-            drawSunDirectionOverlay(camera, window, viewerState);
+            drawSunDirectionOverlay(camera, renderer, viewerState);
             imguiManager.endFrame();
 
-            if (!renderer.beginFrame()) {
-                continue;
+            const RendererResult frameResult =
+                renderer.renderFrame(buildRenderFramePacket(camera, viewerState));
+            if (frameResult == RendererResult::Error) {
+                throw std::runtime_error("Renderer frame failed: " + renderer.getLastError());
             }
-            renderer.submitFrame(buildRenderFramePacket(camera, viewerState));
-            renderer.endFrame();
         }
 
         spdlog::info("Render loop ended, shutting down...");
-
-        imguiManager.shutdown();
         renderer.shutdown();
-        swapchain.shutdown();
-        vulkanContext.shutdown();
-        window.shutdown();
 
     } catch (const std::exception& e) {
         spdlog::critical("Fatal: {}", e.what());

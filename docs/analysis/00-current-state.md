@@ -1,6 +1,6 @@
 # 00 — Current Renderer State Analysis
 
-Date: 2026-06-13
+Date: 2026-06-17
 
 ## Project Direction
 
@@ -17,13 +17,16 @@ The repo is no longer just "a viewer with renderer code inside it." It is active
 
 ## Latest Architectural Movement
 
-Recent commits materially changed the repo shape:
+Recent work materially changed the repo shape:
 
-- `Refactor viewer UI and renderer frame/pass interfaces`
-- `Prepare renderer for internal draw command submission`
-- `Add renderer device capability model for optional feature gating`
+- build boundary split into `por_renderer_core`, `por_viewer`, `por_shaders`, and ABI helper/test targets
+- `RendererInstance` introduced as the lifecycle facade over window, Vulkan context, swapchain, and `Renderer`
+- glTF import/reload policy moved to the viewer; `Renderer` now accepts uploaded CPU model data
+- `RendererResourceManager` owns renderer-side GPU mesh/material/texture data behind existing handles
+- ImGui dependency removed from `Renderer` and routed through a viewer-only `RendererOverlay`
+- `include/por/por_renderer.h` added as an ABI draft with C11/C++20 compile tests and a mock implementation
 
-Those changes mean the project is now past the purely aspirational stage for several roadmap items.
+Those changes mean the project is now past the purely aspirational stage for ABI preparation, though the ABI is still a draft rather than a stable external contract.
 
 Implemented architectural progress includes:
 
@@ -32,6 +35,10 @@ Implemented architectural progress includes:
 - an internal `RenderFramePacket` introduced in `include/core/RenderFramePacket.h`
 - tone mapping extracted into `include/renderpasses/TonemapPass.h` / `src/renderpasses/TonemapPass.cpp`
 - `DrawCommand` introduced as an explicit internal submission primitive
+- `RendererInstance` introduced as the viewer-facing lifecycle boundary
+- `RenderScenePacket` introduced as sticky scene submission beside per-frame state
+- `RendererResourceManager` introduced for renderer-owned GPU resources
+- `include/por/por_renderer.h` introduced as a C ABI draft
 - handle types introduced in `include/resource/RenderHandles.h`
 - centralized shader interface constants and layout structs in `include/core/ShaderInterface.h`
 - runtime device capability modeling added in `VulkanContext`
@@ -43,11 +50,12 @@ This is still not a fully modular renderer backend, but it is no longer accurate
 
 Observed high-level structure:
 
-- `src/main.cpp` still owns application lifecycle, SDL loop, camera/input flow, deferred file actions, and viewer bootstrap.
+- `src/main.cpp` owns viewer policy: camera/input flow, file dialogs, CPU glTF import/reload, and ImGui interaction.
+- `RendererInstance` owns renderer lifecycle: SDL window creation, Vulkan context, swapchain, renderer creation, resize, frame rendering, and overlay attachment.
 - `include/viewer` and `src/viewer` now hold viewer-specific panel registration rather than keeping all panel setup in `main.cpp`.
-- `include/core` and `src/core` hold renderer-facing orchestration and internal submission/state types such as `Renderer`, `RenderFramePacket`, `RenderSettings`, `DrawCommand`, `ShaderInterface`, `VulkanContext`, `Swapchain`, and sync/command helpers.
+- `include/core` and `src/core` hold renderer-facing orchestration and internal submission/state types such as `RendererInstance`, `Renderer`, `RenderFramePacket`, `RenderScenePacket`, `RenderSettings`, `DrawCommand`, `ShaderInterface`, `VulkanContext`, `Swapchain`, and sync/command helpers.
 - `include/renderpasses` and `src/renderpasses` now contain extracted pass objects including `ShadowPass`, `SkyPass`, `TonemapPass`, and `ClusteredLightCullingPass`.
-- `include/resource` and `src/resource` contain GPU resource wrappers, glTF loading, models, textures, samplers, descriptors, scene normalization, and render handles.
+- `include/resource` and `src/resource` contain GPU resource wrappers, the renderer resource manager, glTF loading, CPU model data, textures, samplers, descriptors, scene normalization, and render handles.
 - `include/debug` and `src/debug` contain ImGui integration, GPU timing, screenshots, and log UI support.
 - `shaders` contains scene, shadow, sky, tone mapping, VSM blur, and clustered light culling shader stages.
 - `cmake` contains build helpers for shader compilation, MoltenVK detection, and dependency discovery.
@@ -72,6 +80,7 @@ Current platform intent remains:
 
 - macOS / Apple Silicon through MoltenVK
 - Windows / NVIDIA through native Vulkan SDK
+- Linux through a `linux-debug` preset, currently experimental/unvalidated unless explicitly tested
 
 The repository is still explicitly cross-platform in intent even if feature parity and validation depth are stronger on some paths than others.
 
@@ -94,9 +103,9 @@ The current renderer includes or clearly exposes the following systems:
 
 ### Scene and material baseline
 
-- glTF/Sponza loading
-- scene normalization transform
-- flattened mesh/index upload
+- viewer-side glTF/Sponza loading
+- viewer-side scene normalization transform
+- renderer-side flattened mesh/index upload through `RendererResourceManager`
 - material descriptor sets
 - texture loading with fallback white texture
 - explicit internal mesh/material vectors
@@ -133,7 +142,7 @@ The current renderer includes or clearly exposes the following systems:
 - render statistics
 - GPU timing
 - screenshots
-- runtime model reload
+- runtime model reload owned by the viewer/application path
 - centralized shader binding/layout constants
 - static layout checks for shader-facing structs
 
@@ -158,6 +167,8 @@ The repository now sits in an intermediate but much healthier state.
 
 The following roadmap ideas have moved from concept into code:
 
+- renderer lifecycle is now hidden behind `RendererInstance`
+- viewer-owned model import/reload is separated from renderer GPU resource upload
 - viewer-only panel registration is no longer fully trapped in `main.cpp`
 - grouped settings structs exist
 - a first internal frame-packet type exists
@@ -171,16 +182,13 @@ The following roadmap ideas have moved from concept into code:
 
 The renderer is still not yet a clean external backend boundary.
 
-`Renderer` still owns too much of the end-to-end system, including:
+`Renderer` is less application-shaped than before, but it still owns substantial backend orchestration:
 
-- asset import orchestration
-- GPU resource creation and upload
-- scene/material vectors and draw-list rebuilding
 - scene pass orchestration
 - pass coordination
 - resize handling
 - screenshot/profiling integration
-- legacy setter-based state mutation alongside packet-based submission
+- descriptor/pipeline ownership across resource and resize changes
 
 That means the architecture is improving, but the project is still in transition rather than in a final backend form.
 
@@ -205,26 +213,42 @@ Responsibilities:
 - debug UI registration
 - building immediate research-viewer state
 
-### 2. Renderer orchestration layer
+### 2. Renderer instance facade
+
+Represented mainly by:
+
+- `RendererInstance`
+- `RendererOverlay`
+
+Responsibilities:
+
+- renderer-owned SDL window/runtime for the first ABI model
+- `VulkanContext`, `Swapchain`, and `Renderer` lifecycle
+- formal `resize(width, height)`
+- `renderFrame(RenderFramePacket)`
+- viewer-only overlay attachment
+
+### 3. Renderer orchestration layer
 
 Represented mainly by:
 
 - `Renderer`
 - `RenderFramePacket`
+- `RenderScenePacket`
 - `RenderSettings`
 - `DrawCommand`
+- `RendererResourceManager`
 - `ShaderInterface`
 
 Responsibilities:
 
-- frame submission boundary
+- frame and sticky scene submission boundaries
 - renderer-side persistent state
-- draw-list rebuilding
 - resource ownership coordination
 - per-frame settings handoff
 - pass ordering
 
-### 3. Pass/backend layer
+### 4. Pass/backend layer
 
 Represented mainly by:
 
@@ -249,17 +273,17 @@ A practical status read of the roadmap is:
 
 | Item | Status | Notes |
 |---|---|---|
-| Viewer shell separation | Partial | `ViewerPanels` extracted, but `main.cpp` still owns lifecycle and input flow. |
+| Viewer shell separation | Partial, improved | `RendererInstance` now owns renderer lifecycle; `main.cpp` still owns viewer loop/input/import policy. |
 | Renderer settings structs | Done (initial) | `RenderSettings.h` exists and is in active use. |
 | Internal frame packet | Done, internal-only | `RenderFramePacket` is the primary per-frame submission path and now pairs with sticky `RenderScenePacket` scene submission. |
-| Resource handle model | Partial | `MeshHandle`, `MaterialHandle`, `TextureHandle` exist; generation/versioning and public resource APIs do not. |
+| Resource handle model | Partial | Handles exist and `RendererResourceManager` owns uploaded resources; stable per-resource create/destroy APIs are still incomplete. |
 | Pass ownership extraction | Partial, meaningful | `TonemapPass`, `ShadowPass`, `SkyPass`, and clustered light culling pass exist. |
 | Shader interface validation | Partial | Centralized constants and static asserts exist; reflection/codegen does not. |
 | Capability-driven optional features | Established foundation | `RendererDeviceFeatures` is a centralized detect-once snapshot with baseline-vs-optional policy clarified in code and logging. |
 | HDR MSAA | Foundation implemented | Immediate native AA milestone with explicit scene attachments, resolve, pipeline compatibility, sample-shading controls, and masked-material A2C. |
 | SMAA | Not started | Later native spatial comparison or fallback path. |
 | Perceptual VRS | Not started, groundwork present | Capability query and optional feature gating now exist. |
-| C ABI boundary | Not started | Still documentation-first, not implementation-ready. |
+| C ABI boundary | Drafted, not stable | `include/por/por_renderer.h` compiles as C11/C++20 with a mock backend; real wrapper exists as an internal target but resource APIs are not mature. |
 
 ## Future Odin Boundary Rule
 
@@ -291,11 +315,11 @@ The recent internal additions are useful precisely because they move the codebas
 
 The next slice should not be "jump straight into Odin" and it also should not be "add more big features without consolidating the new architecture." The right next move is:
 
-1. make `RenderFramePacket` the dominant internal submission path rather than keeping many parallel setters
-2. decide how `DrawCommand` enters the frame packet or a closely related scene submission object
-3. continue moving pass-local resources out of `Renderer`
-4. document capability-driven feature policy for unsupported platforms
-5. implement capability-driven HDR MSAA on top of the new pass/resource direction
+1. harden `RendererInstance` as the only viewer-facing renderer lifecycle boundary
+2. evolve `RendererResourceManager` from batch model upload into stable handle create/destroy operations
+3. extend C ABI compile/mock tests while keeping Odin out
+4. continue moving pass-local resources out of `Renderer` only where it lowers current coupling
+5. keep SMAA, VRS, and render-graph work deferred until the boundary stabilizes
 
 ## Current Strategic Recommendation
 
@@ -304,10 +328,9 @@ Do not integrate Odin directly into this repository yet.
 Instead:
 
 1. continue using this repo as the C++ renderer and research viewer
-2. consolidate the internal submission boundary now that packet/handle/pass concepts exist
-3. use the current viewer as the first client of that cleaner renderer interface
-4. add HDR MSAA as the first major feature that truly stress-tests the extracted pass architecture
-5. only draft the public C ABI after the internal packet/handle/pass model stops shifting
+2. consolidate the `RendererInstance`/packet/handle/resource boundary now that the viewer is its first client
+3. use the C header/mock tests to validate ABI shape without treating it as stable
+4. avoid new major renderer features until resource lifetime and C++ boundary semantics settle
 
 ## Next Document
 

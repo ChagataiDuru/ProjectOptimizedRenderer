@@ -1,11 +1,12 @@
 #include "viewer/ViewerPanels.h"
 
 #include "core/Camera.h"
-#include "core/Renderer.h"
-#include "core/Window.h"
+#include "core/RendererInstance.h"
 #include "debug/ImGuiManager.h"
 #include "debug/LogSink.h"
 #include "resource/Material.h"
+#include "resource/Model.h"
+#include "resource/SceneInfo.h"
 #include "viewer/ViewerState.h"
 
 #include <SDL3/SDL.h>
@@ -67,9 +68,10 @@ std::string supportedSampleCountsLabel(const std::array<bool, 4>& supported)
 } // namespace
 
 void registerViewerPanels(ImGuiManager& imguiManager,
-                          Renderer& renderer,
+                          RendererInstance& renderer,
+                          const Model& model,
+                          const SceneInfo& sceneInfo,
                           Camera& camera,
-                          Window& window,
                           ImGuiLogSink& imguiSink,
                           ViewerState& state)
 {
@@ -86,7 +88,7 @@ void registerViewerPanels(ImGuiManager& imguiManager,
                 }
             },
             &state.pendingModelPath,
-            static_cast<SDL_Window*>(window.getHandle()),
+            static_cast<SDL_Window*>(renderer.getWindowHandle()),
             filters,
             static_cast<int>(std::size(filters)),
             nullptr,
@@ -187,7 +189,7 @@ void registerViewerPanels(ImGuiManager& imguiManager,
                             }
                         },
                         &state.pendingPanoramaPath,
-                        static_cast<SDL_Window*>(window.getHandle()),
+                        static_cast<SDL_Window*>(renderer.getWindowHandle()),
                         hdrFilters,
                         static_cast<int>(std::size(hdrFilters)),
                         nullptr,
@@ -358,7 +360,8 @@ void registerViewerPanels(ImGuiManager& imguiManager,
             if (camera.getFarZ() > state.shadow.maxDistance * 4.0f) {
                 ImGui::TextDisabled("Camera far plane is much larger than shadow distance");
             }
-            for (uint32_t c = 0; c < Renderer::CASCADE_COUNT; ++c) {
+            const uint32_t cascadeCount = std::min<uint32_t>(shadow.cascadeCount, 4u);
+            for (uint32_t c = 0; c < cascadeCount; ++c) {
                 const uint32_t drawn = shadow.drawnMeshes[c];
                 ImGui::Text("Cascade %u: %u / %u drawn (-%u culled)",
                             c, drawn, total[c], culled[c]);
@@ -495,7 +498,6 @@ void registerViewerPanels(ImGuiManager& imguiManager,
     }, DockLocation::Bottom);
 
     imguiManager.registerPanel(ICON_FA_SITEMAP " Scene", [&]() {
-        const auto& model = renderer.getImportedModel();
         const auto& stats = renderer.getRenderStats();
 
         ImGui::Text("%zu meshes, %u materials", model.meshes.size(), stats.materialCount);
@@ -529,9 +531,6 @@ void registerViewerPanels(ImGuiManager& imguiManager,
     }, DockLocation::Right);
 
     imguiManager.registerPanel(ICON_FA_SLIDERS " Properties", [&]() {
-        const auto& model     = renderer.getImportedModel();
-        const auto& sceneInfo = renderer.getSceneInfo();
-
         ImGui::Text(ICON_FA_CUBE " Scene Bounds");
         ImGui::Separator();
         ImGui::Text("Original: (%.1f, %.1f, %.1f)",
