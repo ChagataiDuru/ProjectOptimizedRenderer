@@ -42,7 +42,8 @@ void FrameSync::shutdown()
     const VkDevice dev = m_ctx.getDevice();
     if (dev == VK_NULL_HANDLE) return;
 
-    for (uint32_t i = 0; i < m_framesInFlight; ++i) {
+    const uint32_t frameCount = static_cast<uint32_t>(m_imageAvailable.size());
+    for (uint32_t i = 0; i < frameCount; ++i) {
         if (m_imageAvailable[i] != VK_NULL_HANDLE)
             vkDestroySemaphore(dev, m_imageAvailable[i], nullptr);
         if (m_renderFinished[i] != VK_NULL_HANDLE)
@@ -53,6 +54,8 @@ void FrameSync::shutdown()
     m_imageAvailable.clear();
     m_renderFinished.clear();
     m_inFlight.clear();
+    m_currentFrame = 0;
+    m_framesInFlight = 0;
 }
 
 void FrameSync::waitForFrame()
