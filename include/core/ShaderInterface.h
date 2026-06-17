@@ -84,7 +84,7 @@ struct MaterialPushConstants {
     float     metallicFactor  = 1.0f;
     float     roughnessFactor = 1.0f;
     float     alphaCutoff     = 0.0f;
-    float     _pad            = 0.0f;
+    float     alphaCoverageMode = 0.0f;
 };
 
 struct CameraUBO {
@@ -142,6 +142,7 @@ static_assert(offsetof(MaterialPushConstants, baseColorFactor) == 0);
 static_assert(offsetof(MaterialPushConstants, metallicFactor) == 16);
 static_assert(offsetof(MaterialPushConstants, roughnessFactor) == 20);
 static_assert(offsetof(MaterialPushConstants, alphaCutoff) == 24);
+static_assert(offsetof(MaterialPushConstants, alphaCoverageMode) == 28);
 
 static_assert(offsetof(CameraUBO, view) == 0);
 static_assert(offsetof(CameraUBO, projection) == 64);

@@ -345,6 +345,12 @@ void Renderer::refreshRenderStats()
     m_renderStats.meshCount          = static_cast<uint32_t>(m_meshRenderData.size());
     m_renderStats.materialCount      = static_cast<uint32_t>(m_renderMaterials.size());
     m_renderStats.textureCount       = static_cast<uint32_t>(m_textures.size());
+    m_renderStats.aaMode             = m_antiAliasingStatus.mode;
+    m_renderStats.activeSampleCount  = sampleCountValue(m_antiAliasingStatus.activeSampleCount);
+    m_renderStats.sampleShadingEnabled = m_antiAliasingStatus.sampleShadingEnabled;
+    m_renderStats.minSampleShading   = m_antiAliasingStatus.minSampleShading;
+    m_renderStats.alphaToCoverageEnabled = m_antiAliasingStatus.alphaToCoverageEnabled;
+    m_renderStats.estimatedMsaaAttachmentMemoryBytes = estimateMsaaAttachmentMemoryBytes();
     m_renderStats.textureMemoryBytes = 0;
     for (const auto& tex : m_textures) {
         if (tex.isValid()) {
@@ -398,6 +404,11 @@ bool Renderer::isMsaaEnabled() const
     return m_antiAliasingStatus.activeSampleCount != MsaaSampleCount::X1;
 }
 
+bool Renderer::isAlphaToCoverageActive() const
+{
+    return isMsaaEnabled() && m_antiAliasingStatus.alphaToCoverageEnabled;
+}
+
 VkSampleCountFlagBits Renderer::getActiveSceneSampleCount() const
 {
     return toVkSampleCount(m_antiAliasingStatus.activeSampleCount);
@@ -413,6 +424,55 @@ VkImageView Renderer::getActiveSceneColorAttachmentView() const
 VkImageView Renderer::getResolvedHdrView() const
 {
     return m_resolvedHdrTarget.getImageView();
+}
+
+bool Renderer::isDrawAlphaMasked(const DrawCommand& draw) const
+{
+    return draw.material.isValid() &&
+           draw.material.index < m_renderMaterials.size() &&
+           m_renderMaterials[draw.material.index].alphaMode == Material::AlphaMode::Mask;
+}
+
+VkPipeline Renderer::selectSolidPipelineForDraw(const DrawCommand& draw) const
+{
+    if (!isDrawAlphaMasked(draw)) {
+        return m_pipeline;
+    }
+    if (isAlphaToCoverageActive() && m_maskedA2cPipeline != VK_NULL_HANDLE) {
+        return m_maskedA2cPipeline;
+    }
+    return m_maskedPipeline != VK_NULL_HANDLE ? m_maskedPipeline : m_pipeline;
+}
+
+size_t Renderer::estimateMsaaAttachmentMemoryBytes() const
+{
+    if (!isMsaaEnabled()) {
+        return 0;
+    }
+
+    const VkExtent2D ext = m_swapchain.getExtent();
+    if (ext.width == 0 || ext.height == 0) {
+        return 0;
+    }
+
+    constexpr size_t kHdrBytesPerPixel = 8;   // R16G16B16A16_SFLOAT
+    constexpr size_t kDepthBytesPerPixel = 4; // D32_SFLOAT
+    const size_t pixels = static_cast<size_t>(ext.width) * ext.height;
+    const size_t samples = sampleCountValue(m_antiAliasingStatus.activeSampleCount);
+    return pixels * samples * (kHdrBytesPerPixel + kDepthBytesPerPixel);
+}
+
+void Renderer::refreshTimingStats()
+{
+    const float shadowMs = m_gpuTimer.getElapsedMs("ShadowPass_Begin", "ShadowPass_End");
+    const float blurMs = m_gpuTimer.getElapsedMs("BlurPass_Begin", "BlurPass_End");
+    const float clusterMs = m_gpuTimer.getElapsedMs("ClusterCull_Begin", "ClusterCull_End");
+    m_renderStats.sceneGpuMs = m_gpuTimer.getElapsedMs("ScenePass_Begin", "ScenePass_End");
+    m_renderStats.tonemapGpuMs = m_gpuTimer.getElapsedMs("TonemapPass_Begin", "TonemapPass_End");
+    const float imguiMs = m_gpuTimer.getElapsedMs("TonemapPass_End", "ImGuiPass_End");
+    m_renderStats.totalGpuFrameMs =
+        shadowMs + blurMs + clusterMs + m_renderStats.sceneGpuMs +
+        m_renderStats.tonemapGpuMs + imguiMs;
 }
 
 void Renderer::logAntiAliasingStatus() const
@@ -436,6 +496,7 @@ void Renderer::setAntiAliasingSettings(const AntiAliasingSettings& settings)
     const AntiAliasingStatus previousStatus = m_antiAliasingStatus;
     m_antiAliasingSettings = settings;
     m_antiAliasingStatus = resolveAntiAliasingSettings(m_antiAliasingSettings);
+    refreshRenderStats();
     logAntiAliasingStatus();
     if (m_antiAliasingSettings.sampleShadingEnabled &&
         !m_antiAliasingStatus.sampleRateShadingSupported &&
@@ -466,13 +527,14 @@ void Renderer::setAntiAliasingSettings(const AntiAliasingSettings& settings)
 
     vkDeviceWaitIdle(m_ctx.getDevice());
 
-    if (sampleCountChanged) {
-        destroyResizeDependentResources();
-    }
-
     if (pbrPipelineStateChanged) {
         destroyPbrGraphicsPipelines();
-        createPbrGraphicsPipelines();
+    }
+
+    if (sampleCountChanged) {
+        destroyResizeDependentResources();
+        createResizeDependentResources();
+        refreshResizeDependentBindings();
     }
 
     if (scenePipelineSampleStateChanged) {
@@ -482,9 +544,8 @@ void Renderer::setAntiAliasingSettings(const AntiAliasingSettings& settings)
                                    m_antiAliasingStatus.minSampleShading);
     }
 
-    if (sampleCountChanged) {
-        createResizeDependentResources();
-        refreshResizeDependentBindings();
+    if (pbrPipelineStateChanged) {
+        createPbrGraphicsPipelines();
     }
 }
 
@@ -649,8 +710,10 @@ void Renderer::createPbrPipeline()
         .rasterizationSamples = getActiveSceneSampleCount(),
         .sampleShadingEnable  = m_antiAliasingStatus.sampleShadingEnabled ? VK_TRUE : VK_FALSE,
         .minSampleShading     = m_antiAliasingStatus.minSampleShading,
-        .alphaToCoverageEnable = m_antiAliasingStatus.alphaToCoverageEnabled ? VK_TRUE : VK_FALSE,
+        .alphaToCoverageEnable = VK_FALSE,
     };
+    VkPipelineMultisampleStateCreateInfo maskedA2cMultisample = multisample;
+    maskedA2cMultisample.alphaToCoverageEnable = isAlphaToCoverageActive() ? VK_TRUE : VK_FALSE;
 
     const VkPipelineDepthStencilStateCreateInfo depthStencil{
         .sType             = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
@@ -836,6 +899,11 @@ void Renderer::createPbrPipeline()
         dynamicState,
         m_pipelineLayout);
 
+    VkGraphicsPipelineCreateInfo maskedPipelineInfo = pipelineInfo;
+
+    VkGraphicsPipelineCreateInfo maskedA2cPipelineInfo = pipelineInfo;
+    maskedA2cPipelineInfo.pMultisampleState = &maskedA2cMultisample;
+
     VkGraphicsPipelineCreateInfo wireframePipelineInfo = pipelineInfo;
     wireframePipelineInfo.pRasterizationState = &wireframeRasterization;
 
@@ -844,28 +912,38 @@ void Renderer::createPbrPipeline()
     normalsPipelineInfo.pStages    = normalsStages.data();
     normalsPipelineInfo.stageCount = static_cast<uint32_t>(normalsStages.size());
 
-    const std::array<VkGraphicsPipelineCreateInfo, 3> pipelineInfos = {
-        pipelineInfo,
-        wireframePipelineInfo,
-        normalsPipelineInfo,
-    };
+    std::vector<VkGraphicsPipelineCreateInfo> pipelineInfos;
+    pipelineInfos.reserve(isAlphaToCoverageActive() ? 5 : 4);
+    pipelineInfos.push_back(pipelineInfo);
+    pipelineInfos.push_back(maskedPipelineInfo);
+    if (isAlphaToCoverageActive()) {
+        pipelineInfos.push_back(maskedA2cPipelineInfo);
+    }
+    pipelineInfos.push_back(wireframePipelineInfo);
+    pipelineInfos.push_back(normalsPipelineInfo);
 
-    std::array<VkPipeline, 3> pipelines{};
+    std::vector<VkPipeline> pipelines(pipelineInfos.size(), VK_NULL_HANDLE);
     VK_CHECK(vkCreateGraphicsPipelines(
         m_ctx.getDevice(), VK_NULL_HANDLE,
         static_cast<uint32_t>(pipelineInfos.size()),
         pipelineInfos.data(), nullptr, pipelines.data()));
 
-    m_pipeline          = pipelines[0];
-    m_wireframePipeline = pipelines[1];
-    m_normalsPipeline   = pipelines[2];
+    size_t pipelineIndex = 0;
+    m_pipeline          = pipelines[pipelineIndex++];
+    m_maskedPipeline    = pipelines[pipelineIndex++];
+    m_maskedA2cPipeline = isAlphaToCoverageActive()
+        ? pipelines[pipelineIndex++]
+        : VK_NULL_HANDLE;
+    m_wireframePipeline = pipelines[pipelineIndex++];
+    m_normalsPipeline   = pipelines[pipelineIndex++];
 
     // Shader modules are only needed during pipeline compilation — free them immediately
     vkDestroyShaderModule(m_ctx.getDevice(), m_vertModule, nullptr);         m_vertModule        = VK_NULL_HANDLE;
     vkDestroyShaderModule(m_ctx.getDevice(), m_fragModule, nullptr);         m_fragModule        = VK_NULL_HANDLE;
     vkDestroyShaderModule(m_ctx.getDevice(), m_normalsFragModule, nullptr);  m_normalsFragModule = VK_NULL_HANDLE;
 
-    spdlog::info("PBR pipelines created: solid + wireframe + normals");
+    spdlog::info("PBR pipelines created: opaque + masked{} + wireframe + normals",
+                 isAlphaToCoverageActive() ? " + masked A2C" : "");
 }
 
 void Renderer::createPbrGraphicsPipelines()
@@ -943,8 +1021,10 @@ void Renderer::createPbrGraphicsPipelines()
         .rasterizationSamples = getActiveSceneSampleCount(),
         .sampleShadingEnable  = m_antiAliasingStatus.sampleShadingEnabled ? VK_TRUE : VK_FALSE,
         .minSampleShading     = m_antiAliasingStatus.minSampleShading,
-        .alphaToCoverageEnable = m_antiAliasingStatus.alphaToCoverageEnabled ? VK_TRUE : VK_FALSE,
+        .alphaToCoverageEnable = VK_FALSE,
     };
+    VkPipelineMultisampleStateCreateInfo maskedA2cMultisample = multisample;
+    maskedA2cMultisample.alphaToCoverageEnable = isAlphaToCoverageActive() ? VK_TRUE : VK_FALSE;
 
     const VkPipelineDepthStencilStateCreateInfo depthStencil{
         .sType             = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
@@ -1003,6 +1083,11 @@ void Renderer::createPbrGraphicsPipelines()
         dynamicState,
         m_pipelineLayout);
 
+    VkGraphicsPipelineCreateInfo maskedPipelineInfo = pipelineInfo;
+
+    VkGraphicsPipelineCreateInfo maskedA2cPipelineInfo = pipelineInfo;
+    maskedA2cPipelineInfo.pMultisampleState = &maskedA2cMultisample;
+
     VkGraphicsPipelineCreateInfo wireframePipelineInfo = pipelineInfo;
     wireframePipelineInfo.pRasterizationState = &wireframeRasterization;
 
@@ -1010,28 +1095,38 @@ void Renderer::createPbrGraphicsPipelines()
     normalsPipelineInfo.pStages    = normalsStages.data();
     normalsPipelineInfo.stageCount = static_cast<uint32_t>(normalsStages.size());
 
-    const std::array<VkGraphicsPipelineCreateInfo, 3> pipelineInfos = {
-        pipelineInfo,
-        wireframePipelineInfo,
-        normalsPipelineInfo,
-    };
+    std::vector<VkGraphicsPipelineCreateInfo> pipelineInfos;
+    pipelineInfos.reserve(isAlphaToCoverageActive() ? 5 : 4);
+    pipelineInfos.push_back(pipelineInfo);
+    pipelineInfos.push_back(maskedPipelineInfo);
+    if (isAlphaToCoverageActive()) {
+        pipelineInfos.push_back(maskedA2cPipelineInfo);
+    }
+    pipelineInfos.push_back(wireframePipelineInfo);
+    pipelineInfos.push_back(normalsPipelineInfo);
 
-    std::array<VkPipeline, 3> pipelines{};
+    std::vector<VkPipeline> pipelines(pipelineInfos.size(), VK_NULL_HANDLE);
     VK_CHECK(vkCreateGraphicsPipelines(
         m_ctx.getDevice(), VK_NULL_HANDLE,
         static_cast<uint32_t>(pipelineInfos.size()),
         pipelineInfos.data(), nullptr, pipelines.data()));
 
-    m_pipeline          = pipelines[0];
-    m_wireframePipeline = pipelines[1];
-    m_normalsPipeline   = pipelines[2];
+    size_t pipelineIndex = 0;
+    m_pipeline          = pipelines[pipelineIndex++];
+    m_maskedPipeline    = pipelines[pipelineIndex++];
+    m_maskedA2cPipeline = isAlphaToCoverageActive()
+        ? pipelines[pipelineIndex++]
+        : VK_NULL_HANDLE;
+    m_wireframePipeline = pipelines[pipelineIndex++];
+    m_normalsPipeline   = pipelines[pipelineIndex++];
 
     vkDestroyShaderModule(m_ctx.getDevice(), m_vertModule, nullptr);         m_vertModule        = VK_NULL_HANDLE;
     vkDestroyShaderModule(m_ctx.getDevice(), m_fragModule, nullptr);         m_fragModule        = VK_NULL_HANDLE;
     vkDestroyShaderModule(m_ctx.getDevice(), m_normalsFragModule, nullptr);  m_normalsFragModule = VK_NULL_HANDLE;
 
-    spdlog::info("PBR graphics pipelines created for {}x scene samples",
-                 sampleCountValue(m_antiAliasingStatus.activeSampleCount));
+    spdlog::info("PBR graphics pipelines created for {}x scene samples{}",
+                 sampleCountValue(m_antiAliasingStatus.activeSampleCount),
+                 isAlphaToCoverageActive() ? " with masked A2C" : "");
 }
 
 void Renderer::destroyPbrGraphicsPipelines()
@@ -1041,6 +1136,8 @@ void Renderer::destroyPbrGraphicsPipelines()
     if (m_fragModule         != VK_NULL_HANDLE) { vkDestroyShaderModule(dev, m_fragModule, nullptr);               m_fragModule        = VK_NULL_HANDLE; }
     if (m_normalsFragModule  != VK_NULL_HANDLE) { vkDestroyShaderModule(dev, m_normalsFragModule, nullptr);        m_normalsFragModule = VK_NULL_HANDLE; }
     if (m_pipeline           != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_pipeline, nullptr);                     m_pipeline          = VK_NULL_HANDLE; }
+    if (m_maskedPipeline     != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_maskedPipeline, nullptr);               m_maskedPipeline    = VK_NULL_HANDLE; }
+    if (m_maskedA2cPipeline  != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_maskedA2cPipeline, nullptr);            m_maskedA2cPipeline = VK_NULL_HANDLE; }
     if (m_wireframePipeline  != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_wireframePipeline, nullptr);            m_wireframePipeline = VK_NULL_HANDLE; }
     if (m_normalsPipeline    != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_normalsPipeline, nullptr);              m_normalsPipeline   = VK_NULL_HANDLE; }
 }
@@ -1399,6 +1496,7 @@ void Renderer::createResizeDependentResources()
 
     createSceneDepthTarget();
     createSceneHdrTargets();
+    refreshRenderStats();
     if (m_pointLightBuffer.getBuffer() != VK_NULL_HANDLE) {
         resizeClusteredLightResources();
     }
@@ -1856,6 +1954,7 @@ bool Renderer::beginFrame()
     m_frameSync.waitForFrame();
     // Fence has signaled — previous frame's GPU work is complete; safe to read timestamps.
     m_gpuTimer.collectResults();
+    refreshTimingStats();
 
     // NOTE: fence is NOT reset here. It is reset in endFrame() immediately before submit.
     // This prevents a deadlock if beginFrame() returns false (skip frame): the fence
@@ -1899,6 +1998,14 @@ void Renderer::render()
     // Reset per-frame draw statistics
     m_renderStats.drawCalls = 0;
     m_renderStats.triangles = 0;
+    m_renderStats.opaqueDrawCalls = 0;
+    m_renderStats.maskedDrawCalls = 0;
+    m_renderStats.aaMode = m_antiAliasingStatus.mode;
+    m_renderStats.activeSampleCount = sampleCountValue(m_antiAliasingStatus.activeSampleCount);
+    m_renderStats.sampleShadingEnabled = m_antiAliasingStatus.sampleShadingEnabled;
+    m_renderStats.minSampleShading = m_antiAliasingStatus.minSampleShading;
+    m_renderStats.alphaToCoverageEnabled = m_antiAliasingStatus.alphaToCoverageEnabled;
+    m_renderStats.estimatedMsaaAttachmentMemoryBytes = estimateMsaaAttachmentMemoryBytes();
 
     // update shadow matrices each frame so the shadow follows the camera.
     // Also recalculates shadowRadius/shadowDepth from m_sceneInfo.normalizedRadius.
@@ -2039,12 +2146,13 @@ void Renderer::render()
     m_skyPass.record(cmd, frame.sceneDescriptorSet, ext, m_skyEnabled, m_skyMode);
 
     // ── PBR geometry pass ─────────────────────────────────────────────────────
-    VkPipeline activePipeline = m_pipeline;
-    if (m_showNormals)
-        activePipeline = m_normalsPipeline;
-    else if (m_wireframe)
-        activePipeline = m_wireframePipeline;
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activePipeline);
+    VkPipeline boundScenePipeline = VK_NULL_HANDLE;
+    auto bindScenePipeline = [&](VkPipeline pipeline) {
+        if (pipeline != VK_NULL_HANDLE && boundScenePipeline != pipeline) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+            boundScenePipeline = pipeline;
+        }
+    };
 
     // Bind camera UBO descriptor set (set=0, binding=0 — view/projection matrices)
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout,
@@ -2062,6 +2170,17 @@ void Renderer::render()
             continue;
 
         const MeshRenderData& mesh = m_meshRenderData[draw.mesh.index];
+        const bool alphaMasked = isDrawAlphaMasked(draw);
+
+        VkPipeline drawPipeline = selectSolidPipelineForDraw(draw);
+        if (m_showNormals) {
+            drawPipeline = m_normalsPipeline;
+        } else if (m_wireframe) {
+            drawPipeline = m_wireframePipeline;
+        }
+        const bool drawUsesAlphaCoverage =
+            alphaMasked && drawPipeline == m_maskedA2cPipeline;
+        bindScenePipeline(drawPipeline);
 
         vkCmdPushConstants(cmd, m_pipelineLayout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -2083,8 +2202,8 @@ void Renderer::render()
                 .baseColorFactor  = mat.baseColorFactor,
                 .metallicFactor   = mat.metallicFactor,
                 .roughnessFactor  = mat.roughnessFactor,
-                .alphaCutoff      = (mat.alphaMode == Material::AlphaMode::Mask)
-                                    ? mat.alphaCutoff : 0.0f,
+                .alphaCutoff      = alphaMasked ? mat.alphaCutoff : 0.0f,
+                .alphaCoverageMode = drawUsesAlphaCoverage ? 1.0f : 0.0f,
             };
             vkCmdPushConstants(cmd, m_pipelineLayout,
                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -2099,6 +2218,11 @@ void Renderer::render()
 
         vkCmdDrawIndexed(cmd, mesh.indexCount, 1, mesh.firstIndex, 0, 0);
         m_renderStats.drawCalls++;
+        if (alphaMasked) {
+            m_renderStats.maskedDrawCalls++;
+        } else {
+            m_renderStats.opaqueDrawCalls++;
+        }
         m_renderStats.triangles += mesh.indexCount / 3;
     }
 

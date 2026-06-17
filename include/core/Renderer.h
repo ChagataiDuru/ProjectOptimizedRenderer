@@ -80,10 +80,21 @@ public:
     struct RenderStats {
         uint32_t drawCalls          = 0;
         uint32_t triangles          = 0;
+        uint32_t opaqueDrawCalls    = 0;
+        uint32_t maskedDrawCalls    = 0;
         uint32_t meshCount          = 0;
         uint32_t materialCount      = 0;
         uint32_t textureCount       = 0;
         size_t   textureMemoryBytes = 0;   // approximate GPU texture memory usage
+        AntiAliasingMode aaMode = AntiAliasingMode::None;
+        uint32_t activeSampleCount = 1;
+        bool     sampleShadingEnabled = false;
+        float    minSampleShading = 0.0f;
+        bool     alphaToCoverageEnabled = false;
+        size_t   estimatedMsaaAttachmentMemoryBytes = 0;
+        float    sceneGpuMs = 0.0f;
+        float    tonemapGpuMs = 0.0f;
+        float    totalGpuFrameMs = 0.0f;
     };
     const RenderStats& getRenderStats() const { return m_renderStats; }
 
@@ -155,9 +166,14 @@ private:
     AntiAliasingStatus resolveAntiAliasingSettings(const AntiAliasingSettings& settings) const;
     void logAntiAliasingStatus() const;
     bool isMsaaEnabled() const;
+    bool isAlphaToCoverageActive() const;
     VkSampleCountFlagBits getActiveSceneSampleCount() const;
     VkImageView getActiveSceneColorAttachmentView() const;
     VkImageView getResolvedHdrView() const;
+    bool isDrawAlphaMasked(const DrawCommand& draw) const;
+    VkPipeline selectSolidPipelineForDraw(const DrawCommand& draw) const;
+    size_t estimateMsaaAttachmentMemoryBytes() const;
+    void refreshTimingStats();
     void refreshRenderStats();
     void createFrameResources();
     void applyFrameSubmission(const RenderFramePacket& packet);
@@ -202,6 +218,8 @@ private:
 
     // Renderer-shared descriptor layouts and PBR pipeline state.
     VkPipeline            m_pipeline           = VK_NULL_HANDLE;
+    VkPipeline            m_maskedPipeline     = VK_NULL_HANDLE;
+    VkPipeline            m_maskedA2cPipeline  = VK_NULL_HANDLE;
     VkPipeline            m_wireframePipeline  = VK_NULL_HANDLE;
     VkPipeline            m_normalsPipeline    = VK_NULL_HANDLE;
     VkPipelineLayout      m_pipelineLayout     = VK_NULL_HANDLE;

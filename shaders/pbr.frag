@@ -79,6 +79,7 @@ layout(push_constant) uniform MaterialPC {
     float metallicFactor;
     float roughnessFactor;
     float alphaCutoff;
+    float alphaCoverageMode;
 } material;
 
 // ── Output ────────────────────────────────────────────────────────────────────
@@ -350,12 +351,22 @@ void main() {
     vec4  albedoSample = texture(texAlbedo, fs_in.uv) * material.baseColorFactor;
     vec3  baseColor    = albedoSample.rgb;
     float alpha        = albedoSample.a;
+    float coverageAlpha = alpha;
 
-    // Alpha masking: discard fragments below the cutoff.
-    // Without this, alpha-masked materials (vegetation, chains, curtain edges)
-    // write black pixels from their texture's masked regions, occluding geometry behind.
-    if (material.alphaCutoff > 0.0 && alpha < material.alphaCutoff)
+    // Alpha masking: hard-cut normally, or emit smoothed coverage alpha when
+    // the masked A2C pipeline is active. Color blending remains disabled.
+    if (material.alphaCutoff > 0.0 && material.alphaCoverageMode > 0.5) {
+        if (alpha <= 0.0001)
+            discard;
+        float width = max(fwidth(alpha), 1e-4);
+        coverageAlpha = smoothstep(material.alphaCutoff - width,
+                                   material.alphaCutoff + width,
+                                   alpha);
+        if (coverageAlpha <= 0.0001)
+            discard;
+    } else if (material.alphaCutoff > 0.0 && alpha < material.alphaCutoff) {
         discard;
+    }
 
     // Metallic-roughness: green = roughness, blue = metallic (glTF convention).
     // Texture is UNORM (linear data). Multiply by material factors.
@@ -452,5 +463,5 @@ void main() {
         color = mix(color, overlay, 0.4);
     }
 
-    outColor = vec4(color, alpha);
+    outColor = vec4(color, coverageAlpha);
 }

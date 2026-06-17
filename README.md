@@ -67,10 +67,12 @@ Implemented or partially implemented systems include:
 - capability-driven native MSAA foundation for HDR scene rendering
 - explicit scene HDR/depth attachment ownership with single-sample HDR resolve for tone mapping
 - optional sample shading controls for MSAA experiments
+- masked-material alpha-to-coverage controls for the main HDR scene path
 
 Planned research directions include:
 
 - HDR MSAA, sample shading, and alpha-to-coverage quality comparisons
+- alpha-masked shadow quality research, separate from main-scene alpha-to-coverage
 - SMAA as a later comparison or fallback path
 - perceptual VRS
 - improved render pass ownership
@@ -140,28 +142,20 @@ git submodule update --init --recursive
 From the repository root:
 
 ```bash
-# 1. Fetch submodules
-git submodule update --init --recursive
-
-# 2. Install Conan dependencies and generate the CMake toolchain
-conan profile detect --force
-conan install . --output-folder=build/conan --build=missing -s build_type=Debug
-
-# 3. Configure with CMake
-# The presets inherit build/conan/conan_toolchain.cmake from the Conan install step.
-cmake --preset debug
-
-# 4. Build
-cmake --build --preset debug
+# Recommended macOS quickstart
+./scripts/doctor-macos.sh
+./scripts/bootstrap-macos.sh Debug
+./scripts/build-macos.sh Debug
+./scripts/run-macos.sh Debug
 ```
 
-For Windows presets:
+For Windows:
 
-```bash
-conan profile detect --force
-conan install . --output-folder=build/conan --build=missing -s build_type=Debug
-cmake --preset win-debug
-cmake --build --preset win-debug
+```powershell
+.\scripts\doctor-windows.ps1
+.\scripts\bootstrap-windows.ps1 Debug
+.\scripts\build-windows.ps1 Debug
+.\scripts\run-windows.ps1 Debug
 ```
 
 Available presets are defined in [`CMakePresets.json`](CMakePresets.json), including:
@@ -175,13 +169,20 @@ Available presets are defined in [`CMakePresets.json`](CMakePresets.json), inclu
 - `win-relwithdebinfo`
 - `win-release`
 
-The documented Conan output folder is `build/conan`; CMake presets expect the generated toolchain at `build/conan/conan_toolchain.cmake`. If you configure a non-Debug preset, rerun `conan install` with the matching `-s build_type=<BuildType>`.
+The wrapper scripts pass the Conan toolchain explicitly from `build/conan/conan_toolchain.cmake`. If you configure manually, pass that toolchain path yourself and rerun `conan install` with the matching `-s build_type=<BuildType>`. Detailed workflow notes live in [`docs/developer-tooling.md`](docs/developer-tooling.md).
 
 ## Shader Compilation
 
 GLSL shaders live in [`shaders/`](shaders/).
 
 Shader compilation is integrated through the CMake helper in [`cmake/CompileShaders.cmake`](cmake/CompileShaders.cmake). Compiled SPIR-V outputs are build artifacts and should not be committed.
+
+Standalone tooling is also available:
+
+```bash
+python tools/shaders/compile_shaders.py
+python tools/shaders/compile_shaders.py --validate-only --preset debug
+```
 
 Currently referenced shader stages include:
 
@@ -198,7 +199,7 @@ Currently referenced shader stages include:
 The renderer currently expects a Sponza test scene path similar to:
 
 ```txt
-assets/models/sponza/glTF/Sponza.gltf
+assets/source/Sponza.gltf
 ```
 
 If the application fails to start because the default model is missing, ensure the expected test assets exist under `assets/` or adjust the model path in the viewer/runtime path.
@@ -225,7 +226,7 @@ The ImGui overlay exposes panels for:
 - shadow filter mode
 - sky mode
 - tone mapping
-- anti-aliasing sample count and sample shading
+- anti-aliasing sample count, sample shading, and alpha-to-coverage
 - render stats
 - GPU timings
 - scene hierarchy

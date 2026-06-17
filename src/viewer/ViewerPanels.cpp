@@ -219,6 +219,7 @@ void registerViewerPanels(ImGuiManager& imguiManager,
     imguiManager.registerPanel(ICON_FA_WAND_MAGIC_SPARKLES " Anti-Aliasing", [&]() {
         AntiAliasingSettings pending = state.antiAliasing;
         const AntiAliasingStatus& status = renderer.getAntiAliasingStatus();
+        const auto& stats = renderer.getRenderStats();
         bool changed = false;
 
         int mode = pending.mode == AntiAliasingMode::MSAA ? 1 : 0;
@@ -283,6 +284,32 @@ void registerViewerPanels(ImGuiManager& imguiManager,
                     status.sampleShadingEnabled ? "enabled" : "disabled",
                     status.minSampleShading);
 
+        ImGui::Separator();
+        ImGui::Text("Alpha-to-Coverage");
+        const bool a2cAvailable = status.activeSampleCount != MsaaSampleCount::X1;
+        if (!a2cAvailable) {
+            ImGui::TextDisabled("Requires active MSAA above 1x");
+        }
+        ImGui::BeginDisabled(!a2cAvailable);
+        bool alphaToCoverageEnabled = pending.alphaToCoverageEnabled;
+        if (ImGui::Checkbox("Enable for Masked Materials", &alphaToCoverageEnabled)) {
+            pending.alphaToCoverageEnabled = alphaToCoverageEnabled;
+            changed = true;
+        }
+        ImGui::EndDisabled();
+        ImGui::Text("Effective: %s",
+                    status.alphaToCoverageEnabled ? "enabled" : "disabled");
+
+        ImGui::Separator();
+        ImGui::Text("Diagnostics");
+        ImGui::Text("Requested: %ux", sampleCountValue(status.requestedSampleCount));
+        ImGui::Text("Sample-rate shading: %s",
+                    status.sampleRateShadingSupported ? "supported" : "unsupported");
+        ImGui::Text("Masked draws: %u", stats.maskedDrawCalls);
+        ImGui::Text("Opaque draws: %u", stats.opaqueDrawCalls);
+        ImGui::Text("Estimated MSAA attachments: %.2f MB",
+                    stats.estimatedMsaaAttachmentMemoryBytes / (1024.0f * 1024.0f));
+
         if (changed) {
             state.antiAliasing = pending;
             renderer.setAntiAliasingSettings(state.antiAliasing);
@@ -292,6 +319,8 @@ void registerViewerPanels(ImGuiManager& imguiManager,
     imguiManager.registerPanel(ICON_FA_CUBES " Render Stats", [&]() {
         const auto& stats = renderer.getRenderStats();
         ImGui::Text("Draw calls:  %u", stats.drawCalls);
+        ImGui::Text("Opaque:      %u", stats.opaqueDrawCalls);
+        ImGui::Text("Masked:      %u", stats.maskedDrawCalls);
         ImGui::Text("Triangles:   %u", stats.triangles);
         ImGui::Text("Meshes:      %u", stats.meshCount);
         ImGui::Text("Materials:   %u", stats.materialCount);
@@ -300,6 +329,19 @@ void registerViewerPanels(ImGuiManager& imguiManager,
             ImGui::Text("Tex memory:  %.1f MB",
                         stats.textureMemoryBytes / (1024.0f * 1024.0f));
         }
+
+        ImGui::Separator();
+        ImGui::Text("AA mode:     %s", stats.aaMode == AntiAliasingMode::MSAA ? "MSAA" : "None");
+        ImGui::Text("Samples:     %ux", stats.activeSampleCount);
+        ImGui::Text("Sample shade:%s %.2f",
+                    stats.sampleShadingEnabled ? " on" : " off",
+                    stats.minSampleShading);
+        ImGui::Text("A2C:         %s", stats.alphaToCoverageEnabled ? "on" : "off");
+        ImGui::Text("MSAA memory: %.1f MB est.",
+                    stats.estimatedMsaaAttachmentMemoryBytes / (1024.0f * 1024.0f));
+        ImGui::Text("Scene GPU:   %.3f ms", stats.sceneGpuMs);
+        ImGui::Text("Tonemap GPU: %.3f ms", stats.tonemapGpuMs);
+        ImGui::Text("Total GPU:   %.3f ms", stats.totalGpuFrameMs);
 
         ImGui::Separator();
         if (ImGui::TreeNode("Shadow Culling")) {
@@ -344,8 +386,15 @@ void registerViewerPanels(ImGuiManager& imguiManager,
         const float imguiMs   = timer.getElapsedMs("TonemapPass_End", "ImGuiPass_End");
         const float totalMs   = shadowMs + blurMs + clusterMs + sceneMs + tonemapMs + imguiMs;
         const float budget    = 16.67f;
+        const auto& stats = renderer.getRenderStats();
 
         ImGui::Text("Budget: %.2f / %.2f ms (60 Hz)", totalMs, budget);
+        ImGui::Text("AA: %s %ux, sample shading %s %.2f, A2C %s",
+                    stats.aaMode == AntiAliasingMode::MSAA ? "MSAA" : "None",
+                    stats.activeSampleCount,
+                    stats.sampleShadingEnabled ? "on" : "off",
+                    stats.minSampleShading,
+                    stats.alphaToCoverageEnabled ? "on" : "off");
 
         const float barWidth  = ImGui::GetContentRegionAvail().x;
         const float barHeight = 20.0f;

@@ -1033,6 +1033,7 @@ void ShadowPass::record(VkCommandBuffer cmd,
                     .metallicFactor = mat.metallicFactor,
                     .roughnessFactor = mat.roughnessFactor,
                     .alphaCutoff = mat.alphaCutoff,
+                    .alphaCoverageMode = 0.0f,
                 };
                 vkCmdPushConstants(cmd, m_pipelineLayout,
                                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,

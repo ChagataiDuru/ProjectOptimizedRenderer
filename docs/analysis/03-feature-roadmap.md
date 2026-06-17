@@ -145,7 +145,8 @@ Architecture requirements:
 - exact-format sample-count capability discovery
 - multisampled scene color/depth with a single resolved HDR target
 - pipeline sample-count compatibility for scene-space contributors
-- runtime sample-count and sample-shading controls
+- runtime sample-count, sample-shading, and alpha-to-coverage controls
+- masked-material pipeline selection that avoids enabling alpha-to-coverage globally
 - GPU timing and screenshots for repeatable comparisons
 
 Recommended first implementation:
@@ -157,7 +158,10 @@ Renderer-owned HDR MSAA foundation
   - MSAA color/depth attachments
   - single-sample HDR resolve for TonemapPass
   - optional sample shading controls
+  - masked alpha-to-coverage pipeline variant
 ```
+
+Alpha-to-coverage only improves multisampled main-scene coverage for masked materials. It does not solve shadow-map aliasing by itself; masked shadow casters remain a separate alpha-test and shadow-filtering research problem.
 
 SMAA remains a later native spatial comparison or fallback path rather than the immediate AA milestone.
 
