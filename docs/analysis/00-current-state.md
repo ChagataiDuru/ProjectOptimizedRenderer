@@ -1,6 +1,6 @@
 # 00 — Current Renderer State Analysis
 
-Date: 2026-06-17
+Date: 2026-09-16
 
 ## Project Direction
 
@@ -269,21 +269,8 @@ This layering is still incomplete, but it is a real shift toward an engine-facin
 
 ## Current Roadmap Position
 
-A practical status read of the roadmap is:
-
-| Item | Status | Notes |
-|---|---|---|
-| Viewer shell separation | Partial, improved | `RendererInstance` now owns renderer lifecycle; `main.cpp` still owns viewer loop/input/import policy. |
-| Renderer settings structs | Done (initial) | `RenderSettings.h` exists and is in active use. |
-| Internal frame packet | Done, internal-only | `RenderFramePacket` is the primary per-frame submission path and now pairs with sticky `RenderScenePacket` scene submission. |
-| Resource handle model | Partial | Handles exist and `RendererResourceManager` owns uploaded resources; stable per-resource create/destroy APIs are still incomplete. |
-| Pass ownership extraction | Partial, meaningful | `TonemapPass`, `ShadowPass`, `SkyPass`, and clustered light culling pass exist. |
-| Shader interface validation | Partial | Centralized constants and static asserts exist; reflection/codegen does not. |
-| Capability-driven optional features | Established foundation | `RendererDeviceFeatures` is a centralized detect-once snapshot with baseline-vs-optional policy clarified in code and logging. |
-| HDR MSAA | Foundation implemented | Immediate native AA milestone with explicit scene attachments, resolve, pipeline compatibility, sample-shading controls, and masked-material A2C. |
-| SMAA | Not started | Later native spatial comparison or fallback path. |
-| Perceptual VRS | Not started, groundwork present | Capability query and optional feature gating now exist. |
-| C ABI boundary | Drafted, not stable | `include/por/por_renderer.h` compiles as C11/C++20 with a mock backend; real wrapper exists as an internal target but resource APIs are not mature. |
+The authoritative, re-marked roadmap status table lives in
+[`03-feature-roadmap.md`](03-feature-roadmap.md) so it is maintained in exactly one place.
 
 ## Future Odin Boundary Rule
 
@@ -311,16 +298,6 @@ Forbidden across boundary:
 
 The recent internal additions are useful precisely because they move the codebase closer to C-compatible concepts without prematurely locking the external ABI.
 
-## Immediate Strategic Recommendation
-
-The next slice should not be "jump straight into Odin" and it also should not be "add more big features without consolidating the new architecture." The right next move is:
-
-1. harden `RendererInstance` as the only viewer-facing renderer lifecycle boundary
-2. evolve `RendererResourceManager` from batch model upload into stable handle create/destroy operations
-3. extend C ABI compile/mock tests while keeping Odin out
-4. continue moving pass-local resources out of `Renderer` only where it lowers current coupling
-5. keep SMAA, VRS, and render-graph work deferred until the boundary stabilizes
-
 ## Current Strategic Recommendation
 
 Do not integrate Odin directly into this repository yet.
@@ -332,19 +309,3 @@ Instead:
 3. use the C header/mock tests to validate ABI shape without treating it as stable
 4. avoid new major renderer features until resource lifetime and C++ boundary semantics settle
 
-## Next Document
-
-Recommended next file:
-
-`docs/analysis/03-feature-roadmap.md`
-
-Purpose:
-
-Re-mark the roadmap based on actual progress already landed in the repository, especially:
-
-- viewer extraction progress
-- pass extraction progress
-- handle/draw-command progress
-- frame-packet progress
-- capability-gated optional feature groundwork
-- what still remains before deeper AA comparisons, VRS, and any future C ABI work

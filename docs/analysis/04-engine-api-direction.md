@@ -1,6 +1,6 @@
 # 04 — Engine API Direction
 
-Date: 2026-06-17
+Date: 2026-09-16
 
 ## Purpose
 
@@ -96,11 +96,11 @@ Forbidden:
 - internal descriptor/pipeline objects
 - pointers to renderer-owned internal containers
 
-## API Maturity Stages
+## API Maturity Levels
 
 The API should evolve in stages.
 
-## Stage 0 — Documentation Only
+## Documentation Only
 
 Completed.
 
@@ -118,7 +118,7 @@ Exit criteria:
 - API concepts are stable enough to discuss
 - renderer roadmap knows what future host needs
 
-## Stage 1 — Internal C++ Boundary
+## Internal C++ Boundary
 
 Before exposing C ABI, create internal C++ equivalents:
 
@@ -142,7 +142,7 @@ Current status:
 
 This reduces risk because the API design is tested inside C++ before FFI becomes a long-term contract.
 
-## Stage 2 — C Header Draft
+## C Header Draft
 
 Create a header such as:
 
@@ -154,7 +154,7 @@ This header should compile as C and C++.
 
 Current status: `include/por/por_renderer.h` exists and is compile/run tested from C11 and C++20 against a mock implementation.
 
-## Stage 3 — C Wrapper Around C++ Backend
+## C Wrapper Around C++ Backend
 
 An initial thin C wrapper target exists:
 
@@ -174,7 +174,7 @@ Rules:
 
 Current limitation: individual mesh/material/texture create/destroy functions are declared but return `POR_ERROR_UNSUPPORTED_FEATURE` in the real wrapper until the resource manager grows stable per-resource lifetime semantics.
 
-## Stage 4 — Mock Host Test
+## Mock Host Test
 
 Before using Odin, test from C or C++ as if it were an external host.
 
@@ -182,7 +182,7 @@ Goal:
 
 Validate the ABI without adding cross-language complexity.
 
-## Stage 5 — Odin Mock Renderer
+## Odin Mock Renderer
 
 Separate Odin project.
 
@@ -192,7 +192,7 @@ Goal:
 
 Learn Odin and build engine/editor concepts without destabilizing the Vulkan renderer.
 
-## Stage 6 — Real Odin Host Integration
+## Real Odin Host Integration
 
 Only after:
 
@@ -861,10 +861,3 @@ For the near term:
 6. Build an Odin mock host later, separate from this repository.
 7. Connect a real Odin host only after resource lifetime and ABI tests are stable.
 
-## Next Recommended Document
-
-`docs/decisions/ADR-0003-cpp-core-odin-host-boundary.md`
-
-Purpose:
-
-Record the key project decision in ADR format so future context windows do not reopen the same architectural question.

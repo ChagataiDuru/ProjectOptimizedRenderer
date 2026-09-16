@@ -1,6 +1,6 @@
 # 01 — Architecture Boundaries
 
-Date: 2026-06-10
+Date: 2026-09-16
 
 ## Decision Context
 
@@ -696,10 +696,3 @@ For now:
 - avoid adding irreversible coupling
 - keep Odin as a future separate host, not an immediate dependency
 
-## Recommended Next Document
-
-`docs/analysis/02-renderer-technical-debt.md`
-
-Purpose:
-
-List concrete technical debt items with severity, why they matter, when to fix them, and what not to over-engineer yet.

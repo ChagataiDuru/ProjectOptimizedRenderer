@@ -1,6 +1,6 @@
 # 02 — Renderer Technical Debt Map
 
-Date: 2026-06-17
+Date: 2026-09-16
 
 ## Purpose
 
@@ -17,20 +17,8 @@ The goal is not to shame the codebase. The renderer is still in a productive res
 
 Several debts originally recorded here have moved from “missing entirely” to “partially addressed.”
 
-Already landed in code:
-
-- viewer panel extraction into `ViewerPanels`
-- grouped renderer settings in `RenderSettings.h`
-- internal `RenderFramePacket`
-- internal `DrawCommand`
-- handle types in `RenderHandles.h`
-- pass extraction via `TonemapPass`, `ShadowPass`, `SkyPass`, and `ClusteredLightCullingPass`
-- centralized shader interface constants/layout structs in `ShaderInterface.h`
-- runtime device capability modeling in `VulkanContext`
-- build split into `por_renderer_core` and `por_viewer`
-- `RendererInstance` lifecycle facade
-- `RendererResourceManager` batch GPU resource ownership
-- C ABI draft header with C11/C++20 mock-backed compile tests
+The list of infrastructure that has already landed is maintained in
+[`00-current-state.md`](00-current-state.md) instead of being duplicated here.
 
 Because of that, the main technical debt is no longer “these concepts do not exist.” The real debt is that they exist in first-cut form and need hardening before they become stable ABI-facing commitments.
 

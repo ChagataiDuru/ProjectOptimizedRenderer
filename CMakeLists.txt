@@ -115,6 +115,7 @@ set(POR_VIEWER_SOURCES
     src/debug/ImGuiManager.cpp
     src/debug/LogSink.cpp
     src/viewer/ViewerPanels.cpp
+    src/viewer/CapturePresets.cpp
     external/imgui/imgui.cpp
     external/imgui/imgui_draw.cpp
     external/imgui/imgui_tables.cpp
@@ -278,16 +279,6 @@ endif()
 # ── Shader compilation ────────────────────────────────────────────────────────
 add_custom_target(por_shaders)
 
-shader_compile_glsl(
-    TARGET por_shaders
-    SOURCE "${CMAKE_SOURCE_DIR}/shaders/triangle.vert"
-    OUTPUT "triangle.vert.spv"
-)
-shader_compile_glsl(
-    TARGET por_shaders
-    SOURCE "${CMAKE_SOURCE_DIR}/shaders/triangle.frag"
-    OUTPUT "triangle.frag.spv"
-)
 shader_compile_glsl(
     TARGET por_shaders
     SOURCE "${CMAKE_SOURCE_DIR}/shaders/pbr.vert"

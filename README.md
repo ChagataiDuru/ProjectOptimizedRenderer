@@ -30,55 +30,14 @@ See:
 
 ## Current Feature Baseline
 
-The current renderer is already beyond a minimal triangle/sample project.
+The renderer is well past a minimal triangle sample. It has a PBR scene pass with
+normal mapping and alpha masking, clustered forward-plus point lights, cascaded
+shadow maps, a tone mapping pass, procedural/HDR sky, MSAA, ImGui tooling, and an
+extracted pass structure.
 
-Implemented or partially implemented systems include:
-
-- Vulkan 1.4 initialization
-- `volk` Vulkan function loading
-- VMA allocation support
-- SDL3 windowing
-- dynamic rendering
-- synchronization2
-- reverse-Z depth usage
-- glTF/Sponza loading
-- mesh and texture upload
-- material descriptor sets
-- Cook-Torrance PBR direct lighting
-- normal mapping
-- clustered forward-plus point lights
-- HDR offscreen rendering
-- Reinhard, AgX, and Khronos PBR Neutral tone mapping
-- split-screen tone map comparison
-- cascaded shadow maps
-- hard shadows, PCF, and VSM modes
-- VSM compute blur
-- procedural/HDR sky support
-- ImGui debug/editor panels
-- GPU timing
-- render statistics
-- screenshot support
-- runtime model reload
-- extracted render passes for tone mapping, sky, shadows, and clustered light culling
-- centralized shader interface/binding definitions
-- internal render settings structs
-- internal frame packet plus sticky scene packet submission
-- device capability modeling for optional feature gating
-- capability-driven native MSAA foundation for HDR scene rendering
-- explicit scene HDR/depth attachment ownership with single-sample HDR resolve for tone mapping
-- optional sample shading controls for MSAA experiments
-- masked-material alpha-to-coverage controls for the main HDR scene path
-
-Planned research directions include:
-
-- HDR MSAA, sample shading, and alpha-to-coverage quality comparisons
-- alpha-masked shadow quality research, separate from main-scene alpha-to-coverage
-- SMAA as a later comparison or fallback path
-- perceptual VRS
-- improved render pass ownership
-- clearer frame packet model
-- renderer resource handles
-- eventual C ABI boundary
+The maintained feature baseline and status table live in
+[`docs/analysis/00-current-state.md`](docs/analysis/00-current-state.md) and
+[`docs/analysis/03-feature-roadmap.md`](docs/analysis/03-feature-roadmap.md).
 
 ## Technology Stack
 
@@ -176,6 +135,28 @@ The wrapper scripts pass the Conan toolchain explicitly from `build/conan/conan_
 GLSL shaders live in [`shaders/`](shaders/).
 
 Shader compilation is integrated through the CMake helper in [`cmake/CompileShaders.cmake`](cmake/CompileShaders.cmake). Compiled SPIR-V outputs are build artifacts and should not be committed.
+
+## Scripted Capture Mode
+
+The viewer can render a fixed settings matrix to PNGs and exit, which makes rendering
+findings reproducible without driving the ImGui overlay by hand:
+
+```bash
+# One PNG per preset into screenshots/<dir>/<preset>.png
+./build/debug/ProjectOptimizedRenderer --capture screenshots/run --preset all --frames 30
+
+# List preset ids (shadow filter modes, cascade debug, MSAA variants, tone maps, ...)
+./build/debug/ProjectOptimizedRenderer --list-presets
+
+# Inspect a single preset against a different scene
+./build/debug/ProjectOptimizedRenderer --capture screenshots/run --preset shadow-vsm --scene assets/source/Sponza.gltf
+```
+
+Supported arguments: `--capture <dir>`, `--preset <id|all>` (repeatable), `--scene <gltf>`,
+`--frames <n>`, `--width <n>`, `--height <n>`, `--list-presets`, `-h/--help`.
+Capture output is written under `screenshots/`, which is gitignored. Preset definitions
+live in `include/viewer/CapturePresets.h` / `src/viewer/CapturePresets.cpp`; the artifact
+workflow that uses them is described in [`docs/workstreams/README.md`](docs/workstreams/README.md).
 
 Standalone tooling is also available:
 
@@ -340,20 +321,19 @@ Decisions:
 
 - [`docs/decisions/ADR-0003-cpp-core-odin-host-boundary.md`](docs/decisions/ADR-0003-cpp-core-odin-host-boundary.md)
 
+Artifact / cleanup workstreams:
+
+- [`docs/workstreams/README.md`](docs/workstreams/README.md)
+- [`docs/workstreams/inventory.md`](docs/workstreams/inventory.md)
+
 Agent/project guidance:
 
 - [`AGENTS.md`](AGENTS.md)
 
 ## Near-Term Roadmap
 
-Recommended next engineering direction:
-
-1. Harden `RendererInstance` as the viewer's only renderer lifecycle boundary.
-2. Turn the batch `RendererResourceManager` model into stable mesh/material/texture create/destroy operations.
-3. Expand ABI tests around `include/por/por_renderer.h` without adding Odin yet.
-4. Keep SMAA and VRS deferred until the boundary/resource work settles.
-5. Continue extracting pass-local ownership only when it simplifies current code.
-6. Avoid introducing a full render graph, ECS, asset database, editor, or Odin runtime in this repository.
+The maintained roadmap and its current status live in
+[`docs/analysis/03-feature-roadmap.md`](docs/analysis/03-feature-roadmap.md).
 
 ## Status
 
