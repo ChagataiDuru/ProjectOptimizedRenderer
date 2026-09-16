@@ -851,11 +851,18 @@ void ShadowPass::updateMatrices(uint32_t frameIndex)
     shader_interface::ShadowCascadeUBO ubo{};
     ubo.splitDepths = { splitDepths[1], splitDepths[2], splitDepths[3], splitDepths[4] };
 
+    // Cascade corners are unprojected with the camera projection matrix, so the
+    // reverse-Z NDC values must be derived from that same near/far pair. Using the
+    // shadow-distance ladder (n/f) here places every cascade at the wrong depth and
+    // makes projectToCascade() reject the whole scene.
+    const float projNear = glm::max(m_cameraNearZ, 1e-4f);
+    const float projFar  = glm::max(m_cameraFarZ, projNear + 1e-3f);
+
     for (uint32_t c = 0; c < CASCADE_COUNT; ++c) {
         const float cNear = splitDepths[c];
         const float cFar = splitDepths[c + 1];
-        const float cNearNDC = viewDepthToReverseZNdc(cNear, n, f);
-        const float cFarNDC = viewDepthToReverseZNdc(cFar, n, f);
+        const float cNearNDC = viewDepthToReverseZNdc(cNear, projNear, projFar);
+        const float cFarNDC = viewDepthToReverseZNdc(cFar, projNear, projFar);
         const auto corners = frustumCornersWorld(m_viewMatrix, m_projMatrix, cNearNDC, cFarNDC);
         auto [center, radius] = boundingSphere(corners);
         radius = glm::max(radius, 0.01f);

@@ -36,6 +36,11 @@ public:
 
     // Returns true when image/sampler descriptors should be rewritten.
     bool updateSettings(const ShadowSettings& settings);
+
+    // Sanitized settings actually in use. Callers that feed shadow parameters to the
+    // lighting UBO must use these so the shader and the pass cannot disagree.
+    const ShadowSettings& getSettings() const { return m_settings; }
+
     void updateLightDirection(glm::vec3 lightDirection);
     void updateCamera(const glm::mat4& view,
                       const glm::mat4& projection,

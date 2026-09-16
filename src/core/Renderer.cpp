@@ -1145,6 +1145,10 @@ void Renderer::applyFrameSubmission(const RenderFramePacket& packet)
     m_shadowPass.updateCamera(m_viewMatrix, m_projMatrix, m_cameraNearZ, m_cameraFarZ, m_cameraPos);
     m_shadowPass.updateLightDirection(m_lightDirection);
     const bool shadowResourcesChanged = m_shadowPass.updateSettings(m_shadowSettings);
+    // Adopt the pass's sanitized settings: the light UBO (filter mode, PCF spread,
+    // VSM bleed reduction) must describe the shadow pass that actually runs, not the
+    // raw caller values. An unsanitized vsmBleedReduction of 1.0 would divide by zero.
+    m_shadowSettings = m_shadowPass.getSettings();
     const bool shadowDescriptorsDirty = m_shadowPass.consumeDescriptorDirty();
     if (shadowResourcesChanged || shadowDescriptorsDirty) {
         rewriteFrameSceneShadowBindings();
