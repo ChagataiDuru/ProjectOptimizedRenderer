@@ -76,9 +76,14 @@ void Camera::processKeyboard(const bool *keys) {
 
 void Camera::fitToScene(float sceneRadius) {
   // Place the camera outside the scene, looking toward the origin with a slight downward tilt.
-  position = glm::vec3(0.0f, sceneRadius * 0.5f, sceneRadius * 2.0f);
-  yaw   = 0.0f;
-  pitch = -10.0f;
+  setView(glm::vec3(0.0f, sceneRadius * 0.5f, sceneRadius * 2.0f), 0.0f, -10.0f);
+}
+
+void Camera::setView(const glm::vec3& newPosition, float yawDegrees, float pitchDegrees) {
+  position = newPosition;
+  yaw      = yawDegrees;
+  pitch    = glm::clamp(pitchDegrees, -89.0f, 89.0f);
+  velocity = glm::vec3(0.0f);
 
   // Rebuild orientation from the new yaw/pitch immediately (same as update()).
   glm::quat quatYaw   = glm::angleAxis(glm::radians(yaw),   glm::vec3(0, 1, 0));

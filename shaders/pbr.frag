@@ -257,17 +257,23 @@ float sampleShadowPCF(vec3 worldPos, int cascadeIdx) {
     vec2  texelSz = 1.0 / vec2(mapSize.xy);
     float spread  = light.pcfSpreadRadius * texelSz.x;  // spread in UV space
 
-    const float bias = 0.005;
+    const float bias = 0.005;  // receiver-side epsilon on top of the pass depth bias
     float lit = 0.0;
+    float samples = 0.0;
     for (int i = 0; i < 16; ++i) {
         vec2 sampleUV = shadowUV + POISSON_DISK[i] * spread;
-        sampleUV = clamp(sampleUV, vec2(0.0), vec2(1.0));
-        ivec2 texel = ivec2(sampleUV * vec2(mapSize.xy));
-        texel = clamp(texel, ivec2(0), mapSize.xy - 1);
+        // Taps pushed outside the cascade must count as lit. Clamping them to the
+        // border would duplicate edge texels and smear the cascade boundary.
+        if (sampleUV.x < 0.0 || sampleUV.x > 1.0 ||
+            sampleUV.y < 0.0 || sampleUV.y > 1.0) {
+            continue;
+        }
+        ivec2 texel = clamp(ivec2(sampleUV * vec2(mapSize.xy)), ivec2(0), mapSize.xy - 1);
         float storedDepth = texelFetch(shadowMap, ivec3(texel, cascadeIdx), 0).r;
         lit += (currentDepth - bias) <= storedDepth ? 1.0 : 0.0;
+        samples += 1.0;
     }
-    return lit / 16.0;
+    return samples > 0.0 ? lit / samples : 1.0;
 }
 
 // ── VSM: Chebyshev upper bound on probability of being lit ───────────────────
@@ -393,11 +399,17 @@ void main() {
         vec2 st1 = dFdx(fs_in.uv);
         vec2 st2 = dFdy(fs_in.uv);
 
-        vec3 T   = normalize(Q1 * st2.t - Q2 * st1.t);
-        vec3 B   = normalize(cross(N, T));
-        mat3 TBN = mat3(T, B, N);
-
-        N = normalize(TBN * tangentNormal);
+        // Degenerate UV derivatives (UV seams, zero-area triangles) make the tangent
+        // reconstruction collapse to 0/NaN. Fall back to the geometric normal instead
+        // of producing invalid shading.
+        vec3 T = Q1 * st2.t - Q2 * st1.t;
+        float tangentLen = length(T);
+        if (tangentLen > 1e-6) {
+            T /= tangentLen;
+            vec3 B   = normalize(cross(N, T));
+            mat3 TBN = mat3(T, B, N);
+            N = normalize(TBN * tangentNormal);
+        }
     }
 
     // ── View vector (from surface toward camera) ─────────────────────────
@@ -437,8 +449,9 @@ void main() {
     vec3 color = ambient + Lo;
 
     // NOTE: No tone mapping here — pbr.frag outputs linear HDR to R16G16B16A16_SFLOAT.
-    // tonemap.frag reads that target, applies exposure + Reinhard (Phase 6: AgX/PBR Neutral),
-    // and writes LDR to the SRGB swapchain where hardware applies the linear→sRGB transfer.
+    // tonemap.frag reads that target, applies exposure + the selected operator
+    // (Reinhard / AgX / Khronos PBR Neutral), and writes LDR to the SRGB swapchain
+    // where hardware applies the linear→sRGB transfer.
 
     // ── Cascade debug overlay ─────────────────────────────────────────────
     if (light.debugCascades != 0u) {

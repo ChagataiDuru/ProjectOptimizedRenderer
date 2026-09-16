@@ -206,3 +206,30 @@ build/conan/conan_toolchain.cmake
 ```
 
 If you configure manually, pass that toolchain path yourself. Do not rely on a stale local `CMakeUserPresets.json` from an older Conan output folder.
+
+## Render Capture Tooling
+
+The viewer doubles as a deterministic capture tool so rendering changes can be compared
+without driving the ImGui overlay:
+
+```bash
+./build/debug/ProjectOptimizedRenderer --list-presets
+./build/debug/ProjectOptimizedRenderer --capture screenshots/run --preset all --frames 30
+./build/debug/ProjectOptimizedRenderer --capture screenshots/one --preset shadow-vsm --frames 10
+```
+
+| Argument | Meaning |
+|---|---|
+| `--capture <dir>` | Render presets to `<dir>/<preset>.png` and exit |
+| `--preset <id\|all>` | Preset to capture; repeatable, defaults to all |
+| `--scene <gltf>` | Model to load (default `<assets>/source/Sponza.gltf`) |
+| `--frames <n>` | Warmup frames per preset (default 30) |
+| `--width/--height <n>` | Window extent (default 1280x720) |
+| `--list-presets` | Print preset ids and exit |
+| `-h`, `--help` | Usage |
+
+Capture mode does not attach the ImGui overlay, uses a fixed `deltaTime`, and writes output
+under the gitignored `screenshots/` directory. Presets are defined in
+`include/viewer/CapturePresets.h` and `src/viewer/CapturePresets.cpp`. The artifact
+workstreams that consume this tooling are documented in
+[`docs/workstreams/README.md`](workstreams/README.md).

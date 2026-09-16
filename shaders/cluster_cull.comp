@@ -90,18 +90,28 @@ void main()
         }
 
         const vec4 clipCenter = camera.projection * viewCenter4;
-        if (abs(clipCenter.w) <= 0.0001) {
-            continue;
+
+        // Points at or behind the camera plane project to mirrored screen positions.
+        // Using that projection would put the light in the wrong tiles (visible popping),
+        // so fall back to a conservative full-screen footprint for those lights.
+        vec2 lightMin;
+        vec2 lightMax;
+        if (clipCenter.w <= 0.0001) {
+            lightMin = vec2(0.0);
+            lightMax = clusterMeta.screenSizeDepth.xy;
+        } else {
+            const vec2 ndc = clipCenter.xy / clipCenter.w;
+            const vec2 screenCenter = (ndc * 0.5 + 0.5) * clusterMeta.screenSizeDepth.xy;
+            // Y radius uses projection[1][1]; the X radius must use projection[0][0]
+            // so an off-centre aspect ratio is not over- or under-estimated.
+            const vec2 radiusPixels = vec2(
+                abs(camera.projection[0][0]),
+                abs(camera.projection[1][1])) * radius / max(viewDepth, 0.0001) *
+                clusterMeta.screenSizeDepth.xy * 0.5;
+            lightMin = screenCenter - radiusPixels;
+            lightMax = screenCenter + radiusPixels;
         }
 
-        const vec2 ndc = clipCenter.xy / clipCenter.w;
-        const vec2 screenCenter = (ndc * 0.5 + 0.5) * clusterMeta.screenSizeDepth.xy;
-        const float radiusPixels =
-            abs(camera.projection[1][1]) * radius / max(viewDepth, 0.0001) *
-            clusterMeta.screenSizeDepth.y * 0.5;
-
-        const vec2 lightMin = screenCenter - vec2(radiusPixels);
-        const vec2 lightMax = screenCenter + vec2(radiusPixels);
         const bool overlapsTile =
             rangesOverlap(lightMin.x, lightMax.x, tileMin.x, tileMax.x) &&
             rangesOverlap(lightMin.y, lightMax.y, tileMin.y, tileMax.y);

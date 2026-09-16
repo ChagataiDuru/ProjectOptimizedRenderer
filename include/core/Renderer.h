@@ -55,17 +55,17 @@ public:
 
     void resize(uint32_t width, uint32_t height);
 
-    // Phase 4.3: cascade shadow map constants
+    // Cascade shadow map constants
     static constexpr uint32_t CASCADE_COUNT = shader_interface::kCascadeCount;
     static constexpr uint32_t CASCADE_SIZE  = 1024;
 
-    // Phase 4.2.5: shadow culling stats
+    // Shadow culling stats
     const std::array<uint32_t, CASCADE_COUNT>& getShadowCulledMeshes() const { return m_shadowPass.getDebugInfo().culledMeshes; }
     const std::array<uint32_t, CASCADE_COUNT>& getShadowTotalMeshes()  const { return m_shadowPass.getDebugInfo().totalMeshes; }
     const ShadowDebugInfo& getShadowDebugInfo() const { return m_shadowPass.getDebugInfo(); }
     void loadHdrPanorama(const std::string& path);
 
-    // Phase 2.6: render statistics — populated each frame in render()
+    // Render statistics — populated each frame in render()
     struct RenderStats {
         uint32_t drawCalls          = 0;
         uint32_t triangles          = 0;
@@ -87,10 +87,10 @@ public:
     };
     const RenderStats& getRenderStats() const { return m_renderStats; }
 
-    // Phase 2.6: GPU timer — read timing results from the previous completed frame
+    // GPU timer — read timing results from the previous completed frame
     const GPUTimer& getGPUTimer() const { return m_gpuTimer; }
 
-    // Phase 2.6: queue a screenshot capture at the end of the current frame
+    // Queue a screenshot capture at the end of the current frame
     void requestScreenshot(const std::string& filename = "");
 
     // Persistent renderer configuration: AA is not frame-local because sample
@@ -105,8 +105,8 @@ private:
     // Push constant: bytes 64-95 in the pipeline layout (after 64-byte model matrix)
     using MaterialPushConstants = shader_interface::MaterialPushConstants;
 
-    // Camera UBO (host-visible, updated every frame)
-    // Phase 6.5: added inverseVP between projection and cameraPos for sky ray reconstruction.
+    // Camera UBO (host-visible, updated every frame).
+    // inverseVP sits between projection and cameraPos for sky ray reconstruction.
     using CameraUBO = shader_interface::CameraUBO;
 
     // Directional light UBO (host-visible, std140: 48 bytes = 3×vec4)
@@ -259,7 +259,7 @@ private:
     AntiAliasingStatus   m_antiAliasingStatus;
     bool                 m_loggedSampleShadingFallback = false;
 
-    // Phase 2.6: profiling and stats
+    // Profiling and stats
     GPUTimer     m_gpuTimer;
     Screenshot   m_screenshot;
     RenderStats  m_renderStats;

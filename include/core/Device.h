@@ -3,7 +3,7 @@
 #include "core/VulkanContext.h"
 
 // Wraps VulkanContext and serves as the extensibility point for frame
-// synchronization, command pools, and per-frame resources (Phase 0.3+).
+// synchronization, command pools, and per-frame resources.
 class Device {
 public:
     explicit Device(VulkanContext& context);

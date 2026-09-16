@@ -38,6 +38,6 @@ void main() {
 
     vs_out.uv = inUV;
 
-    // Clip-space output
-    gl_Position = camera.projection * camera.view * worldPos * 2;
+    // Clip-space output. camera.projection is the reverse-Z matrix from Camera.
+    gl_Position = camera.projection * camera.view * worldPos;
 }

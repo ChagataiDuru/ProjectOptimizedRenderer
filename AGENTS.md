@@ -75,7 +75,33 @@ cmake --build --preset linux-debug
 - `include/` — Header files
 - `cmake/` — CMake helper modules/scripts
 - `build/` — Build output (gitignored)
+- `docs/analysis/` — Architecture, roadmap, and technical-debt notes
+- `docs/decisions/` — ADRs
+- `docs/workstreams/` — Per-subsystem artifact briefs and the artifact inventory
 
 ## Shaders
 
 SPIR-V compiled shader artifacts (`.spv`) are gitignored. Shaders need to be compiled separately (e.g. via `glslc` or `glslangValidator`) before the renderer can run.
+
+## Rendering Artifacts and Capture Mode
+
+Rendering output must be reproducible before you reason about it. The viewer has a
+scripted capture path that renders a fixed preset matrix to PNGs and exits, so no manual
+UI interaction is needed:
+
+```bash
+cmake --build --preset debug
+./build/debug/ProjectOptimizedRenderer --list-presets
+./build/debug/ProjectOptimizedRenderer --capture screenshots/run --preset all --frames 30
+```
+
+- Presets live in `include/viewer/CapturePresets.h` / `src/viewer/CapturePresets.cpp`; add
+  presets there, never in `src/main.cpp`.
+- Capture output under `screenshots/` is gitignored and is never committed.
+- **A byte-identical PNG for two presets that should differ is a defect signal**, not a
+  neutral result: it usually means the setting never reaches the shader.
+- Debugging probes added to shaders (for example dumping `shadowFactor`) are temporary and
+  must be reverted before committing. The HDR target is tone mapped, so decode before
+  reading numeric values out of a capture.
+- The workflow, file ownership, and findings are documented in
+  `docs/workstreams/README.md` and `docs/workstreams/inventory.md`.

@@ -1,6 +1,6 @@
 # 03 — Feature and Architecture Roadmap
 
-Date: 2026-06-17
+Date: 2026-09-16
 
 ## Purpose
 
@@ -38,14 +38,29 @@ Core pillars:
 
 ## Current Status Snapshot
 
-The repo has moved materially since the first version of this roadmap.
+This table is the single source of truth for roadmap status; other documents link here
+instead of restating it.
 
-Already landed in code:
+| Item | Status | Notes |
+|---|---|---|
+| Viewer shell separation | Partial, improved | `RendererInstance` owns renderer lifecycle; `main.cpp` still owns viewer loop/input/import policy. |
+| Renderer settings structs | Done (initial) | `RenderSettings.h` exists and is in active use. |
+| Internal frame packet | Done, internal-only | `RenderFramePacket` is the primary per-frame submission path and pairs with sticky `RenderScenePacket` scene submission. |
+| Resource handle model | Partial | Handles exist and `RendererResourceManager` owns uploaded resources; stable per-resource create/destroy APIs are still incomplete. |
+| Pass ownership extraction | Partial, meaningful | `TonemapPass`, `ShadowPass`, `SkyPass`, and the clustered light culling pass exist. |
+| Shader interface validation | Partial | Centralized constants and static asserts exist; reflection/codegen does not. |
+| Capability-driven optional features | Established foundation | `RendererDeviceFeatures` is a centralized detect-once snapshot with a documented baseline-vs-optional policy. |
+| HDR MSAA | Foundation implemented | Explicit scene attachments, resolve, pipeline compatibility, sample-shading controls, masked-material A2C. |
+| Scripted capture / artifact workflow | Done (2026-09) | `--capture` preset matrix plus `docs/workstreams/` briefs and inventory. |
+| SMAA | Not started | Later native spatial comparison or fallback path. |
+| Perceptual VRS | Not started, groundwork present | Capability query and optional feature gating exist. |
+| C ABI boundary | Drafted, not stable | `include/por/por_renderer.h` compiles as C11/C++20 with a mock backend; resource APIs are not mature. |
+
+Other infrastructure that has already landed:
 
 - `ViewerPanels` extraction from `main.cpp`
 - grouped renderer settings in `RenderSettings.h`
-- internal `RenderFramePacket`
-- internal `DrawCommand`
+- internal `RenderFramePacket` and `DrawCommand`
 - handle types in `RenderHandles.h`
 - `TonemapPass`, `ShadowPass`, `SkyPass`, and `ClusteredLightCullingPass`
 - centralized shader interface constants/layout structs in `ShaderInterface.h`
