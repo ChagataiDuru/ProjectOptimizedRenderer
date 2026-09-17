@@ -81,6 +81,10 @@ public:
         float    minSampleShading = 0.0f;
         bool     alphaToCoverageEnabled = false;
         size_t   estimatedMsaaAttachmentMemoryBytes = 0;
+        uint32_t culledDrawCalls    = 0;
+        float    shadowGpuMs = 0.0f;
+        float    blurGpuMs = 0.0f;
+        float    clusterGpuMs = 0.0f;
         float    sceneGpuMs = 0.0f;
         float    tonemapGpuMs = 0.0f;
         float    totalGpuFrameMs = 0.0f;

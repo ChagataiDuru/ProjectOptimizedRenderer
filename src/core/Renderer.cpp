@@ -410,15 +410,15 @@ size_t Renderer::estimateMsaaAttachmentMemoryBytes() const
 
 void Renderer::refreshTimingStats()
 {
-    const float shadowMs = m_gpuTimer.getElapsedMs("ShadowPass_Begin", "ShadowPass_End");
-    const float blurMs = m_gpuTimer.getElapsedMs("BlurPass_Begin", "BlurPass_End");
-    const float clusterMs = m_gpuTimer.getElapsedMs("ClusterCull_Begin", "ClusterCull_End");
+    m_renderStats.shadowGpuMs = m_gpuTimer.getElapsedMs("ShadowPass_Begin", "ShadowPass_End");
+    m_renderStats.blurGpuMs = m_gpuTimer.getElapsedMs("BlurPass_Begin", "BlurPass_End");
+    m_renderStats.clusterGpuMs = m_gpuTimer.getElapsedMs("ClusterCull_Begin", "ClusterCull_End");
     m_renderStats.sceneGpuMs = m_gpuTimer.getElapsedMs("ScenePass_Begin", "ScenePass_End");
     m_renderStats.tonemapGpuMs = m_gpuTimer.getElapsedMs("TonemapPass_Begin", "TonemapPass_End");
     const float imguiMs = m_gpuTimer.getElapsedMs("TonemapPass_End", "ImGuiPass_End");
     m_renderStats.totalGpuFrameMs =
-        shadowMs + blurMs + clusterMs + m_renderStats.sceneGpuMs +
-        m_renderStats.tonemapGpuMs + imguiMs;
+        m_renderStats.shadowGpuMs + m_renderStats.blurGpuMs + m_renderStats.clusterGpuMs +
+        m_renderStats.sceneGpuMs + m_renderStats.tonemapGpuMs + imguiMs;
 }
 
 void Renderer::logAntiAliasingStatus() const
@@ -499,117 +499,6 @@ void Renderer::setAntiAliasingSettings(const AntiAliasingSettings& settings)
 
 void Renderer::createPbrPipeline()
 {
-    const std::string dir = SHADER_DIR;
-    m_vertModule        = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/pbr.vert.spv"));
-    m_fragModule        = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/" + pbrFragmentShaderName()));
-    m_normalsFragModule = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/pbr_normals.frag.spv"));
-
-    const std::array<VkPipelineShaderStageCreateInfo, 2> stages{{
-        {
-            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .stage  = VK_SHADER_STAGE_VERTEX_BIT,
-            .module = m_vertModule,
-            .pName  = "main",
-        },
-        {
-            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .stage  = VK_SHADER_STAGE_FRAGMENT_BIT,
-            .module = m_fragModule,
-            .pName  = "main",
-        },
-    }};
-
-    const std::array<VkPipelineShaderStageCreateInfo, 2> normalsStages{{
-        {
-            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .stage  = VK_SHADER_STAGE_VERTEX_BIT,
-            .module = m_vertModule,
-            .pName  = "main",
-        },
-        {
-            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .stage  = VK_SHADER_STAGE_FRAGMENT_BIT,
-            .module = m_normalsFragModule,
-            .pName  = "main",
-        },
-    }};
-
-    // Vertex buffer layout from Vertex struct (position, normal, uv, tangent)
-    const auto bindingDesc  = Vertex::getBindingDescription();
-    const auto attribDescs  = Vertex::getAttributeDescriptions();
-    const VkPipelineVertexInputStateCreateInfo vertexInput{
-        .sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-        .vertexBindingDescriptionCount   = 1,
-        .pVertexBindingDescriptions      = &bindingDesc,
-        .vertexAttributeDescriptionCount = static_cast<uint32_t>(attribDescs.size()),
-        .pVertexAttributeDescriptions    = attribDescs.data(),
-    };
-
-    const VkPipelineInputAssemblyStateCreateInfo inputAssembly{
-        .sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-    };
-
-    // Viewport and scissor are dynamic — avoids recreating the pipeline on swapchain resize
-    const VkPipelineViewportStateCreateInfo viewportState{
-        .sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-        .viewportCount = 1,
-        .scissorCount  = 1,
-    };
-
-    VkPipelineRasterizationStateCreateInfo rasterization{
-        .sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-        .polygonMode = VK_POLYGON_MODE_FILL,
-        // glTF front faces are CCW. The camera projection flips Y, which keeps them CCW in
-        // framebuffer space, so gl_FrontFacing is only correct with COUNTER_CLOCKWISE here
-        // (pbr.frag negates N for back faces).
-        .cullMode    = VK_CULL_MODE_NONE,
-        .frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE,
-        .lineWidth   = 1.0f,
-    };
-
-    const VkPipelineMultisampleStateCreateInfo multisample{
-        .sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = getActiveSceneSampleCount(),
-        .sampleShadingEnable  = m_antiAliasingStatus.sampleShadingEnabled ? VK_TRUE : VK_FALSE,
-        .minSampleShading     = m_antiAliasingStatus.minSampleShading,
-        .alphaToCoverageEnable = VK_FALSE,
-    };
-    VkPipelineMultisampleStateCreateInfo maskedA2cMultisample = multisample;
-    maskedA2cMultisample.alphaToCoverageEnable = isAlphaToCoverageActive() ? VK_TRUE : VK_FALSE;
-
-    const VkPipelineDepthStencilStateCreateInfo depthStencil{
-        .sType             = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-        .depthTestEnable   = VK_TRUE,
-        .depthWriteEnable  = VK_TRUE,
-        // Reverse-Z: a closer fragment has a LARGER depth value, so it passes if greater
-        .depthCompareOp    = VK_COMPARE_OP_GREATER,
-        .depthBoundsTestEnable = VK_FALSE,
-        .stencilTestEnable = VK_FALSE,
-    };
-
-    const VkPipelineColorBlendAttachmentState blendAttachment{
-        .blendEnable    = VK_FALSE,
-        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
-    };
-
-    const VkPipelineColorBlendStateCreateInfo colorBlend{
-        .sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-        .attachmentCount = 1,
-        .pAttachments    = &blendAttachment,
-    };
-
-    const std::array<VkDynamicState, 2> dynamicStates = {
-        VK_DYNAMIC_STATE_VIEWPORT,
-        VK_DYNAMIC_STATE_SCISSOR,
-    };
-    const VkPipelineDynamicStateCreateInfo dynamicState{
-        .sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-        .dynamicStateCount = static_cast<uint32_t>(dynamicStates.size()),
-        .pDynamicStates    = dynamicStates.data(),
-    };
-
     // Descriptor set layout: set 0 — camera(b0), light(b1), shadowUBO(b2), depth array(b3), moments(b4).
     const std::array<VkDescriptorSetLayoutBinding, 9> setBindings{{
         {   // binding 0: camera matrices — read in vertex + fragment shaders
@@ -733,80 +622,9 @@ void Renderer::createPbrPipeline()
     };
     VK_CHECK(vkCreatePipelineLayout(m_ctx.getDevice(), &layoutInfo, nullptr, &m_pipelineLayout));
 
-    // VkPipelineRenderingCreateInfo replaces VkRenderPass for dynamic rendering (core in 1.3/1.4)
-    const VkFormat colorFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
-    const VkPipelineRenderingCreateInfo renderingInfo{
-        .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-        .colorAttachmentCount    = 1,
-        .pColorAttachmentFormats = &colorFormat,
-        .depthAttachmentFormat   = VK_FORMAT_D32_SFLOAT,
-        .stencilAttachmentFormat = VK_FORMAT_UNDEFINED,
-    };
-
-    // ── Create both solid and wireframe pipelines in one batch call ──────────
-    // The wireframe pipeline is identical except for polygonMode = LINE.
-    VkPipelineRasterizationStateCreateInfo wireframeRasterization = rasterization;
-    wireframeRasterization.polygonMode = VK_POLYGON_MODE_LINE;
-
-    const VkGraphicsPipelineCreateInfo pipelineInfo = makeGraphicsPipelineCreateInfo(
-        renderingInfo,
-        stages.data(),
-        static_cast<uint32_t>(stages.size()),
-        vertexInput,
-        inputAssembly,
-        viewportState,
-        rasterization,
-        multisample,
-        depthStencil,
-        colorBlend,
-        dynamicState,
-        m_pipelineLayout);
-
-    VkGraphicsPipelineCreateInfo maskedPipelineInfo = pipelineInfo;
-
-    VkGraphicsPipelineCreateInfo maskedA2cPipelineInfo = pipelineInfo;
-    maskedA2cPipelineInfo.pMultisampleState = &maskedA2cMultisample;
-
-    VkGraphicsPipelineCreateInfo wireframePipelineInfo = pipelineInfo;
-    wireframePipelineInfo.pRasterizationState = &wireframeRasterization;
-
-    // Normals pipeline: same as solid but with the normals-only fragment shader
-    VkGraphicsPipelineCreateInfo normalsPipelineInfo = pipelineInfo;
-    normalsPipelineInfo.pStages    = normalsStages.data();
-    normalsPipelineInfo.stageCount = static_cast<uint32_t>(normalsStages.size());
-
-    std::vector<VkGraphicsPipelineCreateInfo> pipelineInfos;
-    pipelineInfos.reserve(isAlphaToCoverageActive() ? 5 : 4);
-    pipelineInfos.push_back(pipelineInfo);
-    pipelineInfos.push_back(maskedPipelineInfo);
-    if (isAlphaToCoverageActive()) {
-        pipelineInfos.push_back(maskedA2cPipelineInfo);
-    }
-    pipelineInfos.push_back(wireframePipelineInfo);
-    pipelineInfos.push_back(normalsPipelineInfo);
-
-    std::vector<VkPipeline> pipelines(pipelineInfos.size(), VK_NULL_HANDLE);
-    VK_CHECK(vkCreateGraphicsPipelines(
-        m_ctx.getDevice(), VK_NULL_HANDLE,
-        static_cast<uint32_t>(pipelineInfos.size()),
-        pipelineInfos.data(), nullptr, pipelines.data()));
-
-    size_t pipelineIndex = 0;
-    m_pipeline          = pipelines[pipelineIndex++];
-    m_maskedPipeline    = pipelines[pipelineIndex++];
-    m_maskedA2cPipeline = isAlphaToCoverageActive()
-        ? pipelines[pipelineIndex++]
-        : VK_NULL_HANDLE;
-    m_wireframePipeline = pipelines[pipelineIndex++];
-    m_normalsPipeline   = pipelines[pipelineIndex++];
-
-    // Shader modules are only needed during pipeline compilation — free them immediately
-    vkDestroyShaderModule(m_ctx.getDevice(), m_vertModule, nullptr);         m_vertModule        = VK_NULL_HANDLE;
-    vkDestroyShaderModule(m_ctx.getDevice(), m_fragModule, nullptr);         m_fragModule        = VK_NULL_HANDLE;
-    vkDestroyShaderModule(m_ctx.getDevice(), m_normalsFragModule, nullptr);  m_normalsFragModule = VK_NULL_HANDLE;
-
-    spdlog::info("PBR pipelines created: opaque + masked{} + wireframe + normals",
-                 isAlphaToCoverageActive() ? " + masked A2C" : "");
+    // Graphics pipelines are (re)created separately so AA changes can rebuild them
+    // without touching the descriptor/pipeline layouts above.
+    createPbrGraphicsPipelines();
 }
 
 void Renderer::createPbrGraphicsPipelines()
@@ -1884,6 +1702,7 @@ void Renderer::render(RendererOverlay* overlay)
     m_renderStats.triangles = 0;
     m_renderStats.opaqueDrawCalls = 0;
     m_renderStats.maskedDrawCalls = 0;
+    m_renderStats.culledDrawCalls = 0;
     m_renderStats.aaMode = m_antiAliasingStatus.mode;
     m_renderStats.activeSampleCount = sampleCountValue(m_antiAliasingStatus.activeSampleCount);
     m_renderStats.sampleShadingEnabled = m_antiAliasingStatus.sampleShadingEnabled;

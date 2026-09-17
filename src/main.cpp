@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <fstream>
 #include <glm/glm.hpp>
 #include <imgui.h>
 #include <memory>
@@ -279,6 +280,56 @@ std::vector<const CapturePreset*> resolveCapturePresets(const std::vector<std::s
     return selected;
 }
 
+// Averages the per-pass GPU timings over the second half of the warmup frames and
+// writes them next to the PNG, so capture runs can be compared for performance too.
+struct CaptureTimingAccumulator {
+    uint32_t samples = 0;
+    double shadowMs = 0.0;
+    double blurMs = 0.0;
+    double clusterMs = 0.0;
+    double sceneMs = 0.0;
+    double tonemapMs = 0.0;
+    double totalMs = 0.0;
+
+    void add(const Renderer::RenderStats& stats)
+    {
+        ++samples;
+        shadowMs += stats.shadowGpuMs;
+        blurMs += stats.blurGpuMs;
+        clusterMs += stats.clusterGpuMs;
+        sceneMs += stats.sceneGpuMs;
+        tonemapMs += stats.tonemapGpuMs;
+        totalMs += stats.totalGpuFrameMs;
+    }
+};
+
+bool writeCaptureStats(const std::string& path,
+                       const CaptureTimingAccumulator& timing,
+                       const Renderer::RenderStats& last)
+{
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    const double n = timing.samples > 0 ? static_cast<double>(timing.samples) : 1.0;
+    out << "{\n"
+        << "  \"timing_samples\": " << timing.samples << ",\n"
+        << "  \"gpu_ms\": {\n"
+        << "    \"shadow\": " << timing.shadowMs / n << ",\n"
+        << "    \"blur\": " << timing.blurMs / n << ",\n"
+        << "    \"cluster\": " << timing.clusterMs / n << ",\n"
+        << "    \"scene\": " << timing.sceneMs / n << ",\n"
+        << "    \"tonemap\": " << timing.tonemapMs / n << ",\n"
+        << "    \"total\": " << timing.totalMs / n << "\n"
+        << "  },\n"
+        << "  \"draw_calls\": " << last.drawCalls << ",\n"
+        << "  \"culled_draw_calls\": " << last.culledDrawCalls << ",\n"
+        << "  \"triangles\": " << last.triangles << ",\n"
+        << "  \"texture_memory_bytes\": " << last.textureMemoryBytes << "\n"
+        << "}\n";
+    return static_cast<bool>(out);
+}
+
 int runCaptureMode(const CaptureOptions& options)
 {
     std::string presetError;
@@ -364,11 +415,16 @@ int runCaptureMode(const CaptureOptions& options)
 
         const RenderFramePacket packet = buildRenderFramePacket(camera, state);
 
+        CaptureTimingAccumulator timing;
         for (uint32_t frame = 0; frame < options.frameCount; ++frame) {
             if (renderer.renderFrame(packet) == RendererResult::Error) {
                 spdlog::error("Renderer frame failed for preset '{}': {}",
                               preset->id, renderer.getLastError());
                 return 1;
+            }
+            // GPU timings lag one frame and the first frames include pipeline warmup.
+            if (frame >= options.frameCount / 2) {
+                timing.add(renderer.getRenderStats());
             }
         }
 
@@ -378,6 +434,11 @@ int runCaptureMode(const CaptureOptions& options)
             spdlog::error("Renderer frame failed while capturing preset '{}': {}",
                           preset->id, renderer.getLastError());
             return 1;
+        }
+
+        const std::string statsPath = options.outputDir + "/" + preset->id + ".json";
+        if (!writeCaptureStats(statsPath, timing, renderer.getRenderStats())) {
+            spdlog::warn("Could not write capture stats '{}'", statsPath);
         }
 
         spdlog::info("Captured preset '{}' -> {}", preset->id, outputPath);
