@@ -33,6 +33,7 @@ struct CapturePreset {
     TonemapSettings tonemap{};
     SkySettings sky{};
     DebugViewSettings debug{};
+    CullingSettings culling{};
     AntiAliasingSettings antiAliasing{};
     CaptureCamera camera{};
 

@@ -33,6 +33,15 @@ MUST_DIFFER = [
 # Optimizations that must not change the image.
 MUST_MATCH = [
     ("shadow-cull-side-sun", "shadow-cull-side-sun-off"),
+    ("scene-overview", "perf-culling-off"),
+    ("shadow-interior", "perf-culling-off-interior"),
+]
+
+# Pairs whose difference is reported but not gated (e.g. draw order only affects
+# coplanar depth ties).
+REPORT_ONLY = [
+    ("scene-overview", "perf-sort-off"),
+    ("shadow-interior", "perf-sort-off-interior"),
 ]
 
 
@@ -70,6 +79,11 @@ def gate(run: Path) -> int:
         status = "" if mx == 0 else "  DIFFERS"
         failures += mx != 0
         print(f"{label:<76} {mx:>4} {mean:>8.4f} {changed:>9.3f}{status}")
+    for left, right in REPORT_ONLY:
+        a, b = run / f"{left}.png", run / f"{right}.png"
+        if a.exists() and b.exists():
+            mx, mean, changed = diff(a, b)
+            print(f"{left + ' ~ ' + right:<76} {mx:>4} {mean:>8.4f} {changed:>9.3f}  (report only)")
     print("gate:", "FAIL" if failures else "PASS")
     return 1 if failures else 0
 

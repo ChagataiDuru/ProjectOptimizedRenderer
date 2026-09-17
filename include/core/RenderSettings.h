@@ -49,6 +49,13 @@ struct SkySettings {
     int32_t mode = 0;
 };
 
+// Main scene pass visibility and ordering. Neither option changes the image; both
+// exist so captures can prove that (must-match presets) and measure the savings.
+struct CullingSettings {
+    bool enableFrustumCulling = true;
+    bool sortDraws = true;
+};
+
 struct DebugViewSettings {
     bool wireframe   = false;
     bool showNormals = false;

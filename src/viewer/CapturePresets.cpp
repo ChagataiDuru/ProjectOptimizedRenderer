@@ -194,6 +194,21 @@ std::vector<CapturePreset> buildCapturePresets()
         presets.back().shadow.enableCasterCulling = culling;
     }
 
+    // Main-pass visibility must not change the image (must-match against the defaults).
+    presets.push_back(makeBase("perf-culling-off", "Default framing, main-pass frustum culling off"));
+    presets.back().culling.enableFrustumCulling = false;
+
+    presets.push_back(makeBase("perf-culling-off-interior", "Interior framing, main-pass frustum culling off"));
+    setInteriorCamera(presets.back());
+    presets.back().culling.enableFrustumCulling = false;
+
+    presets.push_back(makeBase("perf-sort-off", "Default framing, draw sorting off"));
+    presets.back().culling.sortDraws = false;
+
+    presets.push_back(makeBase("perf-sort-off-interior", "Interior framing, draw sorting off"));
+    setInteriorCamera(presets.back());
+    presets.back().culling.sortDraws = false;
+
     return presets;
 }
 

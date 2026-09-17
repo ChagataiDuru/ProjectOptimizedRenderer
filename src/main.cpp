@@ -44,6 +44,7 @@ RenderFramePacket buildRenderFramePacket(const Camera& camera, const ViewerState
     packet.tonemap           = state.tonemap;
     packet.sky               = state.sky;
     packet.debug             = state.debugView;
+    packet.culling           = state.culling;
     return packet;
 }
 
@@ -404,6 +405,7 @@ int runCaptureMode(const CaptureOptions& options)
         state.tonemap     = preset->tonemap;
         state.sky         = preset->sky;
         state.debugView   = preset->debug;
+        state.culling     = preset->culling;
         state.antiAliasing = preset->antiAliasing;
 
         const glm::vec3 cameraPosition = preset->camera.boundsRelative

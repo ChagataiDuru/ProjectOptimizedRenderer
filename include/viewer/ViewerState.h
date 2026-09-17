@@ -11,6 +11,7 @@ struct ViewerState {
     TonemapSettings tonemap;
     SkySettings sky;
     DebugViewSettings debugView;
+    CullingSettings culling;
     AntiAliasingSettings antiAliasing;
 
     int selectedMeshIndex = -1;

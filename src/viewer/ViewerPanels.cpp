@@ -341,6 +341,10 @@ void registerViewerPanels(ImGuiManager& imguiManager,
         ImGui::Text("A2C:         %s", stats.alphaToCoverageEnabled ? "on" : "off");
         ImGui::Text("MSAA memory: %.1f MB est.",
                     stats.estimatedMsaaAttachmentMemoryBytes / (1024.0f * 1024.0f));
+        ImGui::Text("Culled draws: %u", stats.culledDrawCalls);
+        ImGui::Checkbox("Frustum culling", &state.culling.enableFrustumCulling);
+        ImGui::SameLine();
+        ImGui::Checkbox("Sort draws", &state.culling.sortDraws);
         ImGui::Text("Scene GPU:   %.3f ms", stats.sceneGpuMs);
         ImGui::Text("Tonemap GPU: %.3f ms", stats.tonemapGpuMs);
         ImGui::Text("Total GPU:   %.3f ms", stats.totalGpuFrameMs);

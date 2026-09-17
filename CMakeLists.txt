@@ -87,6 +87,7 @@ set(POR_RENDERER_CORE_SOURCES
     src/core/FrameSync.cpp
     src/core/Renderer.cpp
     src/core/RendererInstance.cpp
+    src/core/FrustumCulling.cpp
     src/core/VulkanUtil.cpp
     src/renderpasses/SkyPass.cpp
     src/renderpasses/TonemapPass.cpp

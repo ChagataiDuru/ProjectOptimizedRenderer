@@ -1,4 +1,5 @@
 #include "core/Renderer.h"
+#include "core/FrustumCulling.h"
 #include "core/VulkanUtil.h"
 #include "resource/Vertex.h"
 
@@ -932,6 +933,65 @@ void Renderer::createFrameResources()
     spdlog::info("Frame resources created for {} frames in flight", kFramesInFlight);
 }
 
+void Renderer::buildVisibleDrawOrder()
+{
+    const auto& draws = m_activeScene.submission.draws;
+    const auto& bounds = m_activeScene.drawBounds;
+    m_visibleDrawOrder.clear();
+    m_visibleDrawOrder.reserve(draws.size());
+
+    // Camera planes from an equivalent [-1, 1]-depth projection: the reverse-Z camera
+    // matrix does not fit the Gribb–Hartmann near/far rows (same approach as ShadowPass).
+    const float projY = std::abs(m_projMatrix[1][1]);
+    const float projX = std::abs(m_projMatrix[0][0]);
+    const bool cull = m_cullingSettings.enableFrustumCulling &&
+                      projX > 1e-6f && projY > 1e-6f &&
+                      bounds.size() == draws.size();
+    std::array<culling::Plane, 6> planes{};
+    if (cull) {
+        const float nearZ = std::max(m_cameraNearZ, 1e-4f);
+        const float farZ = std::max(m_cameraFarZ, nearZ + 1e-3f);
+        const glm::mat4 proj = glm::perspectiveRH_NO(2.0f * std::atan(1.0f / projY),
+                                                     projY / projX, nearZ, farZ);
+        planes = culling::extractFrustumPlanesNO(proj * m_viewMatrix);
+    }
+
+    for (uint32_t i = 0; i < draws.size(); ++i) {
+        if (cull && culling::aabbOutsideAny(bounds[i].worldMin, bounds[i].worldMax,
+                                            planes.data(), planes.size())) {
+            ++m_renderStats.culledDrawCalls;
+            continue;
+        }
+        m_visibleDrawOrder.push_back(i);
+    }
+
+    if (!m_cullingSettings.sortDraws || bounds.size() != draws.size()) {
+        return;
+    }
+
+    // Opaque first, then alpha-tested, then alpha-to-coverage draws; front to back
+    // within each group so the depth test rejects hidden fragments before shading.
+    m_drawSortScratch.clear();
+    m_drawSortScratch.reserve(m_visibleDrawOrder.size());
+    for (uint32_t i : m_visibleDrawOrder) {
+        const DrawCommand& draw = draws[i];
+        uint64_t group = 0;
+        if (isDrawAlphaMasked(draw)) {
+            group = isAlphaToCoverageActive() ? 2 : 1;
+        }
+        const glm::vec3 closest = glm::clamp(m_cameraPos, bounds[i].worldMin, bounds[i].worldMax);
+        const float distance = glm::length(closest - m_cameraPos);
+        const uint64_t distanceKey = static_cast<uint64_t>(
+            std::min(distance * 1024.0f, static_cast<float>(0xFFFFFFFFu)));
+        m_drawSortScratch.emplace_back((group << 32) | distanceKey, i);
+    }
+    std::stable_sort(m_drawSortScratch.begin(), m_drawSortScratch.end(),
+                     [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (size_t k = 0; k < m_drawSortScratch.size(); ++k) {
+        m_visibleDrawOrder[k] = m_drawSortScratch[k].second;
+    }
+}
+
 void Renderer::rebuildActiveSceneDrawBounds()
 {
     m_activeScene.drawBounds.clear();
@@ -999,6 +1059,8 @@ void Renderer::applyFrameSubmission(const RenderFramePacket& packet)
 
     m_wireframe   = packet.debug.wireframe;
     m_showNormals = packet.debug.showNormals;
+
+    m_cullingSettings = packet.culling;
 }
 
 void Renderer::uploadCurrentFrameCameraState(const CameraData& camera)
@@ -1856,10 +1918,6 @@ void Renderer::render(RendererOverlay* overlay)
     const VkRect2D scissor{ .offset = { 0, 0 }, .extent = ext };
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-    // ── Sky pass: fullscreen triangle at reverse-Z far plane (z = 0) ─────────
-    // GREATER_OR_EQUAL depth: passes where depth == 0.0 (clear value, no geometry yet).
-    // Drawn first — PBR geometry (GREATER at z > 0) overwrites sky on covered pixels.
-    m_skyPass.record(cmd, frame.sceneDescriptorSet, ext, m_skyEnabled, m_skyMode);
 
     // ── PBR geometry pass ─────────────────────────────────────────────────────
     VkPipeline boundScenePipeline = VK_NULL_HANDLE;
@@ -1884,7 +1942,10 @@ void Renderer::render(RendererOverlay* overlay)
         vkCmdBindIndexBuffer(cmd, m_resources.indexBuffer().getBuffer(), 0, VK_INDEX_TYPE_UINT32);
 
         // Push normalization model matrix (bytes 0–63): same transform as shadow pass.
-        for (const DrawCommand& draw : m_activeScene.submission.draws) {
+        buildVisibleDrawOrder();
+        const auto& draws = m_activeScene.submission.draws;
+        for (const uint32_t drawIndex : m_visibleDrawOrder) {
+            const DrawCommand& draw = draws[drawIndex];
             if (!draw.mesh.isValid() || draw.mesh.index >= meshes.size())
                 continue;
 
@@ -1958,6 +2019,12 @@ void Renderer::render(RendererOverlay* overlay)
             m_renderStats.triangles += mesh.indexCount / 3;
         }
     }
+
+    // ── Sky pass: fullscreen triangle at reverse-Z far plane (z = 0) ─────────
+    // GREATER_OR_EQUAL depth only passes where depth is still the 0.0 clear value, so
+    // drawing the sky after the geometry lets early-Z skip the atmosphere shader on
+    // every covered pixel (the result is identical to drawing it first).
+    m_skyPass.record(cmd, frame.sceneDescriptorSet, ext, m_skyEnabled, m_skyMode);
 
     vkCmdEndRendering(cmd);
 

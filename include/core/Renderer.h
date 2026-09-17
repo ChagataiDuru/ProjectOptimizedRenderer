@@ -172,6 +172,8 @@ private:
     void createFrameResources();
     void applyFrameSubmission(const RenderFramePacket& packet);
     void rebuildActiveSceneDrawBounds();
+    // Frustum-culls and orders the active draws into m_visibleDrawOrder.
+    void buildVisibleDrawOrder();
     void uploadCurrentFrameCameraState(const CameraData& camera);
     void uploadCurrentFrameLightState();
     void uploadActiveScenePointLights();
@@ -196,6 +198,9 @@ private:
 
     // Sticky scene submission state derived from caller-owned scene packets.
     ActiveSceneState m_activeScene;
+    CullingSettings  m_cullingSettings;
+    std::vector<uint32_t> m_visibleDrawOrder;
+    std::vector<std::pair<uint64_t, uint32_t>> m_drawSortScratch;
 
     // Frame-slot resources.
     std::vector<FrameResources> m_frameResources;
