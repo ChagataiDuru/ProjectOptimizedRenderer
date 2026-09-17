@@ -19,14 +19,21 @@ public:
                 VkFormat format, VkImageUsageFlags usage,
                 VkImageAspectFlags aspectFlags = VK_IMAGE_ASPECT_COLOR_BIT,
                 uint32_t arrayLayers = 1,
-                VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT);
+                VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT,
+                uint32_t mipLevels = 1);
 
     // Upload pixel data via an internally-created staging buffer recorded into transferCmd.
     // Caller must submit transferCmd and wait for completion before using the image.
     // Final layout after upload: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL.
+    // With generateMips, the full mip chain is built on the GPU with linear blits when the
+    // format supports it; otherwise the image keeps a single level (logged once).
     void createFromData(uint32_t width, uint32_t height, VkFormat format,
                         const void* data, VkDeviceSize dataSize,
-                        VkCommandBuffer transferCmd);
+                        VkCommandBuffer transferCmd,
+                        bool generateMips = false);
+
+    // Number of mip levels for a full chain down to 1x1.
+    static uint32_t fullMipChainLevels(uint32_t width, uint32_t height);
 
     void transitionLayout(VkCommandBuffer cmd,
                           VkImageLayout oldLayout, VkImageLayout newLayout);
@@ -46,10 +53,15 @@ public:
     VkFormat    getFormat()      const { return m_format; }
     VkExtent3D  getExtent()      const { return m_extent; }
     uint32_t    getArrayLayers() const { return m_arrayLayers; }
+    uint32_t    getMipLevels()   const { return m_mipLevels; }
     VkSampleCountFlagBits getSampleCount() const { return m_samples; }
 
 private:
     void createView(VkImageAspectFlags aspectFlags);
+    // Expects every level in TRANSFER_DST_OPTIMAL with level 0 filled; leaves every
+    // level in SHADER_READ_ONLY_OPTIMAL.
+    void generateMipmaps(VkCommandBuffer cmd);
+    bool supportsLinearBlit(VkFormat format) const;
 
     VulkanContext& m_ctx;
     VkImage        m_image       = VK_NULL_HANDLE;
@@ -58,6 +70,7 @@ private:
     VkFormat       m_format      = VK_FORMAT_UNDEFINED;
     VkExtent3D     m_extent      = {};
     uint32_t       m_arrayLayers = 1;  // >1 → 2D array image
+    uint32_t       m_mipLevels   = 1;
     VkSampleCountFlagBits m_samples = VK_SAMPLE_COUNT_1_BIT;
 
     // Staging resources for createFromData — released after GPU completion

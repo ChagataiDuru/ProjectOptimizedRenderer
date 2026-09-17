@@ -1,5 +1,7 @@
 #include "resource/RendererResourceManager.h"
 
+#include <algorithm>
+
 #include "core/VulkanUtil.h"
 #include "resource/Vertex.h"
 
@@ -120,9 +122,13 @@ size_t RendererResourceManager::estimateTextureMemoryBytes() const
             continue;
         }
         const VkExtent3D ext = tex.getExtent();
-        total += static_cast<size_t>(ext.width) *
-                 static_cast<size_t>(ext.height) *
-                 4u;
+        size_t width = ext.width;
+        size_t height = ext.height;
+        for (uint32_t level = 0; level < tex.getMipLevels(); ++level) {
+            total += width * height * 4u;
+            width = std::max<size_t>(width / 2, 1);
+            height = std::max<size_t>(height / 2, 1);
+        }
     }
     return total;
 }
