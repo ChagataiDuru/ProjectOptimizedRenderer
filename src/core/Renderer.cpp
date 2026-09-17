@@ -560,9 +560,11 @@ void Renderer::createPbrPipeline()
     VkPipelineRasterizationStateCreateInfo rasterization{
         .sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
         .polygonMode = VK_POLYGON_MODE_FILL,
-        // Back-face culling enabled: cube normals are outward-facing CCW, so back faces are CW.
+        // glTF front faces are CCW. The camera projection flips Y, which keeps them CCW in
+        // framebuffer space, so gl_FrontFacing is only correct with COUNTER_CLOCKWISE here
+        // (pbr.frag negates N for back faces).
         .cullMode    = VK_CULL_MODE_NONE,
-        .frontFace   = VK_FRONT_FACE_CLOCKWISE,
+        .frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE,
         .lineWidth   = 1.0f,
     };
 
@@ -873,7 +875,7 @@ void Renderer::createPbrGraphicsPipelines()
         .sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
         .polygonMode = VK_POLYGON_MODE_FILL,
         .cullMode    = VK_CULL_MODE_NONE,
-        .frontFace   = VK_FRONT_FACE_CLOCKWISE,
+        .frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE, // see createPbrPipeline()
         .lineWidth   = 1.0f,
     };
 
