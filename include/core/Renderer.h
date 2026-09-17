@@ -156,6 +156,7 @@ private:
     void logAntiAliasingStatus() const;
     bool isMsaaEnabled() const;
     bool isAlphaToCoverageActive() const;
+    const char* pbrFragmentShaderName() const;
     VkSampleCountFlagBits getActiveSceneSampleCount() const;
     VkImageView getActiveSceneColorAttachmentView() const;
     VkImageView getResolvedHdrView() const;

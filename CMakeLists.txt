@@ -289,6 +289,14 @@ shader_compile_glsl(
     SOURCE "${CMAKE_SOURCE_DIR}/shaders/pbr.frag"
     OUTPUT "pbr.frag.spv"
 )
+# Per-sample variant: MoltenVK ignores VkPipelineMultisampleStateCreateInfo::sampleShadingEnable,
+# so sample-rate shading is forced from the shader via sample-qualified inputs.
+shader_compile_glsl(
+    TARGET por_shaders
+    SOURCE "${CMAKE_SOURCE_DIR}/shaders/pbr.frag"
+    OUTPUT "pbr_sample.frag.spv"
+    DEFINES POR_PER_SAMPLE_SHADING
+)
 shader_compile_glsl(
     TARGET por_shaders
     SOURCE "${CMAKE_SOURCE_DIR}/shaders/pbr_normals.frag"
