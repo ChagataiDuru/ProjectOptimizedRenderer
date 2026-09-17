@@ -130,6 +130,12 @@ void registerViewerPanels(ImGuiManager& imguiManager,
         ImGui::SliderFloat("Ambient", &state.light.ambient, 0.0f, 1.0f);
 
         ImGui::Separator();
+        ImGui::Checkbox("Image-based ambient (IBL)", &state.ibl.enabled);
+        if (state.ibl.enabled) {
+            ImGui::SliderFloat("IBL Intensity", &state.ibl.intensity, 0.0f, 4.0f, "%.2f");
+        }
+
+        ImGui::Separator();
         ImGui::Text(ICON_FA_LAYER_GROUP " Cascaded Shadows");
         ImGui::SliderFloat("Max Distance", &state.shadow.maxDistance, 10.0f, 300.0f, "%.0f");
         ImGui::SliderFloat("CSM Lambda", &state.shadow.csmLambda, 0.0f, 1.0f,
@@ -342,6 +348,7 @@ void registerViewerPanels(ImGuiManager& imguiManager,
         ImGui::Text("MSAA memory: %.1f MB est.",
                     stats.estimatedMsaaAttachmentMemoryBytes / (1024.0f * 1024.0f));
         ImGui::Text("Culled draws: %u", stats.culledDrawCalls);
+        ImGui::Text("IBL bakes: %u (%.3f ms)", stats.iblBakeCount, stats.iblBakeGpuMs);
         ImGui::Checkbox("Frustum culling", &state.culling.enableFrustumCulling);
         ImGui::SameLine();
         ImGui::Checkbox("Sort draws", &state.culling.sortDraws);

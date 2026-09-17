@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cmath>
 #include <fstream>
+#include <stb_image_write.h>
 #include <glm/glm.hpp>
 #include <imgui.h>
 #include <memory>
@@ -45,6 +46,7 @@ RenderFramePacket buildRenderFramePacket(const Camera& camera, const ViewerState
     packet.sky               = state.sky;
     packet.debug             = state.debugView;
     packet.culling           = state.culling;
+    packet.ibl               = state.ibl;
     return packet;
 }
 
@@ -331,6 +333,38 @@ bool writeCaptureStats(const std::string& path,
     return static_cast<bool>(out);
 }
 
+// Writes a small equirectangular HDR panorama (sky gradient plus one warm, bright
+// band) so the panorama IBL path can be captured without shipping an HDR asset.
+bool writeSyntheticPanorama(const std::string& path)
+{
+    constexpr int kWidth = 256;
+    constexpr int kHeight = 128;
+    std::vector<float> pixels(static_cast<size_t>(kWidth) * kHeight * 3);
+    for (int y = 0; y < kHeight; ++y) {
+        const float v = (static_cast<float>(y) + 0.5f) / kHeight;
+        const float elevation = (0.5f - v) * 3.14159265f;      // +pi/2 at the zenith
+        for (int x = 0; x < kWidth; ++x) {
+            const float u = (static_cast<float>(x) + 0.5f) / kWidth;
+            const float azimuth = (u - 0.5f) * 2.0f * 3.14159265f;
+            const float up = std::max(std::sin(elevation), 0.0f);
+            glm::vec3 color = glm::mix(glm::vec3(1.6f, 1.2f, 0.7f),   // warm horizon
+                                       glm::vec3(0.25f, 0.5f, 1.4f),  // blue zenith
+                                       up);
+            // A bright band toward +X so the IBL result is clearly directional.
+            const float band = std::exp(-8.0f * (azimuth * azimuth)) * std::max(0.0f, 1.0f - up * 2.0f);
+            color += glm::vec3(18.0f, 14.0f, 9.0f) * band;
+            if (elevation < 0.0f) {
+                color *= 0.05f;                                 // dark ground
+            }
+            const size_t index = (static_cast<size_t>(y) * kWidth + x) * 3;
+            pixels[index + 0] = color.r;
+            pixels[index + 1] = color.g;
+            pixels[index + 2] = color.b;
+        }
+    }
+    return stbi_write_hdr(path.c_str(), kWidth, kHeight, 3, pixels.data()) != 0;
+}
+
 int runCaptureMode(const CaptureOptions& options)
 {
     std::string presetError;
@@ -399,6 +433,18 @@ int runCaptureMode(const CaptureOptions& options)
             return 1;
         }
 
+        if (preset->syntheticPanorama) {
+            const std::string panoramaPath = options.outputDir + "/synthetic-panorama.hdr";
+            if (!writeSyntheticPanorama(panoramaPath)) {
+                spdlog::error("Could not write synthetic panorama '{}'", panoramaPath);
+                return 1;
+            }
+            if (renderer.loadHdrPanorama(panoramaPath) != RendererResult::Success) {
+                spdlog::error("Could not load synthetic panorama: {}", renderer.getLastError());
+                return 1;
+            }
+        }
+
         ViewerState state;
         state.light       = preset->light;
         state.shadow      = preset->shadow;
@@ -406,6 +452,7 @@ int runCaptureMode(const CaptureOptions& options)
         state.sky         = preset->sky;
         state.debugView   = preset->debug;
         state.culling     = preset->culling;
+        state.ibl         = preset->ibl;
         state.antiAliasing = preset->antiAliasing;
 
         const glm::vec3 cameraPosition = preset->camera.boundsRelative

@@ -12,6 +12,7 @@ struct ViewerState {
     SkySettings sky;
     DebugViewSettings debugView;
     CullingSettings culling;
+    IblSettings ibl;
     AntiAliasingSettings antiAliasing;
 
     int selectedMeshIndex = -1;

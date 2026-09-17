@@ -43,6 +43,18 @@ public:
     VkImageView createSingleLayerView(uint32_t layer,
                                       VkImageAspectFlags aspectFlags) const;
 
+    // Create a VkImageView of a single mip level (VK_IMAGE_VIEW_TYPE_2D, layer 0), e.g.
+    // for storage-image writes. Caller owns the returned handle.
+    VkImageView createMipView(uint32_t level) const;
+
+    // Build mip levels 1..N-1 from level 0 with linear blits. Expects every level in
+    // TRANSFER_DST_OPTIMAL with level 0 filled and the image created with
+    // TRANSFER_SRC | TRANSFER_DST usage; leaves every level in SHADER_READ_ONLY_OPTIMAL.
+    void generateMipmaps(VkCommandBuffer cmd);
+
+    // True when the format supports linear blits and linear sampling (checked per call).
+    bool supportsLinearBlit(VkFormat format) const;
+
     // Release staging buffer after GPU transfer is complete.
     void releaseStaging();
 
@@ -58,10 +70,6 @@ public:
 
 private:
     void createView(VkImageAspectFlags aspectFlags);
-    // Expects every level in TRANSFER_DST_OPTIMAL with level 0 filled; leaves every
-    // level in SHADER_READ_ONLY_OPTIMAL.
-    void generateMipmaps(VkCommandBuffer cmd);
-    bool supportsLinearBlit(VkFormat format) const;
 
     VulkanContext& m_ctx;
     VkImage        m_image       = VK_NULL_HANDLE;

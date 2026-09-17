@@ -12,4 +12,5 @@ struct RenderFramePacket {
     SkySettings sky;
     DebugViewSettings debug;
     CullingSettings culling;
+    IblSettings ibl;
 };

@@ -17,6 +17,7 @@
 #include "renderpasses/SkyPass.h"
 #include "renderpasses/TonemapPass.h"
 #include "renderpasses/ClusteredLightCullingPass.h"
+#include "renderpasses/IblPass.h"
 #include "resource/Buffer.h"
 #include "resource/Image.h"
 #include "resource/Model.h"
@@ -82,6 +83,8 @@ public:
         bool     alphaToCoverageEnabled = false;
         size_t   estimatedMsaaAttachmentMemoryBytes = 0;
         uint32_t culledDrawCalls    = 0;
+        uint32_t iblBakeCount       = 0;
+        float    iblBakeGpuMs = 0.0f;       // most recent bake (sticky between bakes)
         float    shadowGpuMs = 0.0f;
         float    blurGpuMs = 0.0f;
         float    clusterGpuMs = 0.0f;
@@ -244,6 +247,8 @@ private:
     ShadowPass                m_shadowPass;
     ClusteredLightCullingPass m_clusteredLightCullingPass;
     SkyPass                   m_skyPass;
+    IblPass                   m_iblPass;
+    IblSettings               m_iblSettings;
 
     // Cached from the last submitFrame() so per-frame uploads stay explicit and traceable.
     ShadowSettings  m_shadowSettings;

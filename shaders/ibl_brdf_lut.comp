@@ -1,0 +1,49 @@
+#version 460 core
+#extension GL_GOOGLE_include_directive : require
+
+// Split-sum environment BRDF: R = F0 * scale + bias, indexed by (NdotV, roughness).
+
+#include "ibl_sampling.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0, set = 0, rg16f) uniform writeonly image2D outLut;
+
+const uint SAMPLE_COUNT = 512u;
+
+float geometrySchlickGGXIbl(float NdotX, float roughness)
+{
+    float k = (roughness * roughness) * 0.5;   // IBL remapping (Karis)
+    return NdotX / (NdotX * (1.0 - k) + k);
+}
+
+void main()
+{
+    ivec2 size  = imageSize(outLut);
+    ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(texel, size))) return;
+
+    float NdotV = max((float(texel.x) + 0.5) / float(size.x), 1e-3);
+    float roughness = (float(texel.y) + 0.5) / float(size.y);
+
+    vec3 V = vec3(sqrt(1.0 - NdotV * NdotV), 0.0, NdotV);
+    const vec3 N = vec3(0.0, 0.0, 1.0);
+
+    float scale = 0.0;
+    float bias = 0.0;
+    for (uint i = 0u; i < SAMPLE_COUNT; ++i) {
+        vec3 H = importanceSampleGGX(hammersley(i, SAMPLE_COUNT), N, roughness);
+        vec3 L = normalize(2.0 * dot(V, H) * H - V);
+        float NdotL = max(L.z, 0.0);
+        if (NdotL <= 0.0) continue;
+
+        float NdotH = max(H.z, 0.0);
+        float VdotH = max(dot(V, H), 0.0);
+        float G = geometrySchlickGGXIbl(NdotV, roughness) * geometrySchlickGGXIbl(NdotL, roughness);
+        float Gvis = G * VdotH / max(NdotH * NdotV, 1e-5);
+        float Fc = pow(1.0 - VdotH, 5.0);
+        scale += (1.0 - Fc) * Gvis;
+        bias += Fc * Gvis;
+    }
+    imageStore(outLut, texel, vec4(scale, bias, 0.0, 0.0) / float(SAMPLE_COUNT));
+}

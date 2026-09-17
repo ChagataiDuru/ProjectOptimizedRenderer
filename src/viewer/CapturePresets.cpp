@@ -194,6 +194,20 @@ std::vector<CapturePreset> buildCapturePresets()
         presets.back().shadow.enableCasterCulling = culling;
     }
 
+    // Image-based ambient lighting (ART-LGT-004).
+    presets.push_back(makeBase("ibl-off", "Default framing with flat ambient instead of IBL"));
+    presets.back().ibl.enabled = false;
+
+    presets.push_back(makeBase("ibl-off-interior", "Interior framing with flat ambient instead of IBL"));
+    setInteriorCamera(presets.back());
+    presets.back().ibl.enabled = false;
+
+    presets.push_back(makeBase("ibl-panorama-interior",
+                               "Interior framing lit by a synthetic HDR panorama"));
+    setInteriorCamera(presets.back());
+    presets.back().sky.mode = 1;
+    presets.back().syntheticPanorama = true;
+
     // Main-pass visibility must not change the image (must-match against the defaults).
     presets.push_back(makeBase("perf-culling-off", "Default framing, main-pass frustum culling off"));
     presets.back().culling.enableFrustumCulling = false;

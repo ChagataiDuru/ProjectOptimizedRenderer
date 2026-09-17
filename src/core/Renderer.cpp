@@ -179,6 +179,7 @@ Renderer::Renderer(VulkanContext& ctx, Swapchain& swapchain)
     , m_shadowPass(ctx)
     , m_clusteredLightCullingPass(ctx)
     , m_skyPass(ctx)
+    , m_iblPass(ctx)
     , m_gpuTimer(ctx)
     , m_screenshot(ctx)
 {
@@ -206,6 +207,8 @@ void Renderer::init()
                    m_antiAliasingStatus.sampleShadingEnabled,
                    m_antiAliasingStatus.minSampleShading,
                    SHADER_DIR);
+    m_iblPass.init(SHADER_DIR, m_skyPass.panoramaView(), m_skyPass.panoramaSampler(),
+                   m_skyPass.panoramaWidth());
     createFrameResources();
     createClusteredLightResources();
     m_shadowPass.init(m_pipelineLayout, kFramesInFlight, SHADER_DIR);
@@ -267,6 +270,7 @@ void Renderer::shutdown()
         m_hdrSampler = VK_NULL_HANDLE;
     }
 
+    m_iblPass.shutdown(m_ctx.getDevice());
     m_skyPass.shutdown(m_ctx.getDevice());
     m_clusteredLightCullingPass.shutdown(m_ctx.getDevice());
     m_shadowPass.shutdown(m_ctx.getDevice());
@@ -416,6 +420,11 @@ void Renderer::refreshTimingStats()
     m_renderStats.clusterGpuMs = m_gpuTimer.getElapsedMs("ClusterCull_Begin", "ClusterCull_End");
     m_renderStats.sceneGpuMs = m_gpuTimer.getElapsedMs("ScenePass_Begin", "ScenePass_End");
     m_renderStats.tonemapGpuMs = m_gpuTimer.getElapsedMs("TonemapPass_Begin", "TonemapPass_End");
+    const float iblBakeMs = m_gpuTimer.getElapsedMs("IblBake_Begin", "IblBake_End");
+    if (iblBakeMs > 0.0f) {
+        m_renderStats.iblBakeGpuMs = iblBakeMs;
+    }
+    m_renderStats.iblBakeCount = m_iblPass.bakeCount();
     const float imguiMs = m_gpuTimer.getElapsedMs("TonemapPass_End", "ImGuiPass_End");
     m_renderStats.totalGpuFrameMs =
         m_renderStats.shadowGpuMs + m_renderStats.blurGpuMs + m_renderStats.clusterGpuMs +
@@ -501,7 +510,7 @@ void Renderer::setAntiAliasingSettings(const AntiAliasingSettings& settings)
 void Renderer::createPbrPipeline()
 {
     // Descriptor set layout: set 0 — camera(b0), light(b1), shadowUBO(b2), depth array(b3), moments(b4).
-    const std::array<VkDescriptorSetLayoutBinding, 9> setBindings{{
+    const std::array<VkDescriptorSetLayoutBinding, 12> setBindings{{
         {   // binding 0: camera matrices — read in vertex + fragment shaders
             .binding         = shader_interface::scene_binding::kCamera,
             .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -557,6 +566,24 @@ void Renderer::createPbrPipeline()
             .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
             .descriptorCount = 1,
             .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
+        },
+        {   // bindings 9-11: IBL irradiance, prefiltered specular, BRDF LUT (IblPass)
+            .binding         = shader_interface::scene_binding::kIblIrradiance,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
+        },
+        {
+            .binding         = shader_interface::scene_binding::kIblPrefiltered,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
+        },
+        {
+            .binding         = shader_interface::scene_binding::kIblBrdfLut,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
         },
     }};
     const VkDescriptorSetLayoutCreateInfo setLayoutInfo{
@@ -890,6 +917,10 @@ Renderer::LightUBO Renderer::buildCurrentLightUBO() const
         static_cast<uint32_t>(m_shadowSettings.filterMode),
         m_shadowSettings.pcfSpreadRadius,
         m_shadowSettings.vsmBleedReduction,
+        m_iblSettings.enabled ? 1u : 0u,
+        std::max(m_iblSettings.intensity, 0.0f),
+        m_iblPass.prefilteredMaxLod(),
+        0.0f,
     };
 }
 
@@ -1028,6 +1059,7 @@ void Renderer::rebuildActiveSceneDrawBounds()
 
 void Renderer::applyFrameSubmission(const RenderFramePacket& packet)
 {
+    m_iblSettings = packet.ibl;
     uploadCurrentFrameCameraState(packet.camera);
     m_lightDirection   = safeNormalizeDirection(packet.light.direction, glm::vec3(0.577f));
     m_lightColor       = packet.light.color;
@@ -1056,6 +1088,9 @@ void Renderer::applyFrameSubmission(const RenderFramePacket& packet)
 
     m_skyEnabled = packet.sky.enabled;
     m_skyMode    = packet.sky.mode;
+    // The IBL environment follows the sky mode even when the sky itself is hidden.
+    m_iblPass.updateSource(m_skyMode, m_lightDirection, m_lightIntensity,
+                           m_skyPass.panoramaGeneration());
 
     m_wireframe   = packet.debug.wireframe;
     m_showNormals = packet.debug.showNormals;
@@ -1343,7 +1378,7 @@ void Renderer::createFrameSceneDescriptorPool()
         },
         {
             .type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = 2 * sceneSetCount,
+            .descriptorCount = 5 * sceneSetCount,
         },
         {
             .type            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -1386,6 +1421,21 @@ void Renderer::allocateFrameSceneDescriptorSets()
         .imageView   = m_shadowPass.getMomentsImageView(),
         .imageLayout = m_shadowPass.getMomentsSampleLayout(),
     };
+    const VkDescriptorImageInfo iblIrradianceInfo{
+        .sampler     = m_iblPass.environmentSampler(),
+        .imageView   = m_iblPass.irradianceView(),
+        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
+    const VkDescriptorImageInfo iblPrefilteredInfo{
+        .sampler     = m_iblPass.environmentSampler(),
+        .imageView   = m_iblPass.prefilteredView(),
+        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
+    const VkDescriptorImageInfo iblBrdfLutInfo{
+        .sampler     = m_iblPass.lutSampler(),
+        .imageView   = m_iblPass.brdfLutView(),
+        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
     const VkDescriptorBufferInfo pointLightInfo{
         .buffer = m_pointLightBuffer.getBuffer(),
         .offset = 0,
@@ -1427,7 +1477,7 @@ void Renderer::allocateFrameSceneDescriptorSets()
             .range = sizeof(ClusterMetadataUBO),
         };
 
-        const std::array<VkWriteDescriptorSet, 9> writes{{
+        const std::array<VkWriteDescriptorSet, 12> writes{{
             {
                 .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                 .dstSet          = frame.sceneDescriptorSet,
@@ -1499,6 +1549,30 @@ void Renderer::allocateFrameSceneDescriptorSets()
                 .descriptorCount = 1,
                 .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                 .pBufferInfo     = &clusterMetadataInfo,
+            },
+            {
+                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet          = frame.sceneDescriptorSet,
+                .dstBinding      = shader_interface::scene_binding::kIblIrradiance,
+                .descriptorCount = 1,
+                .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .pImageInfo      = &iblIrradianceInfo,
+            },
+            {
+                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet          = frame.sceneDescriptorSet,
+                .dstBinding      = shader_interface::scene_binding::kIblPrefiltered,
+                .descriptorCount = 1,
+                .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .pImageInfo      = &iblPrefilteredInfo,
+            },
+            {
+                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet          = frame.sceneDescriptorSet,
+                .dstBinding      = shader_interface::scene_binding::kIblBrdfLut,
+                .descriptorCount = 1,
+                .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .pImageInfo      = &iblBrdfLutInfo,
             },
         }};
         vkUpdateDescriptorSets(m_ctx.getDevice(),
@@ -1839,6 +1913,12 @@ void Renderer::render(RendererOverlay* overlay)
     };
     vkCmdPipelineBarrier2(cmd, &clusterDep);
     m_gpuTimer.writeTimestamp(cmd, "ClusterCull_End");
+
+    // ── IBL environment re-bake (compute, only when the sky source changed) ──
+    if (m_iblPass.needsBake()) {
+        m_iblPass.bake(cmd, m_skyPass.panoramaView(), m_skyPass.panoramaSampler(),
+                       m_skyPass.panoramaWidth(), &m_gpuTimer);
+    }
 
     const bool sceneMsaaEnabled = isMsaaEnabled();
     Image& sceneColorTarget = sceneMsaaEnabled ? m_msaaHdrTarget : m_resolvedHdrTarget;

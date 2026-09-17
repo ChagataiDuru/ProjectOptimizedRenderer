@@ -1,4 +1,5 @@
 #version 460 core
+#extension GL_GOOGLE_include_directive : require
 
 // ── Inputs from vertex shader ─────────────────────────────────────────────────
 // POR_PER_SAMPLE_SHADING builds the sample-shading variant (pbr_sample.frag.spv):
@@ -34,6 +35,10 @@ layout(binding = 1, set = 0) uniform LightData {
     uint  shadowFilterMode; // 0=None, 1=PCF, 2=VSM
     float pcfSpreadRadius;  // PCF kernel spread in texels
     float vsmBleedReduction; // VSM light-bleeding reduction
+    uint  iblEnabled;        // 0 = flat ambient, 1 = image-based ambient
+    float iblIntensity;
+    float iblPrefilteredMaxLod;
+    float _pad0;
 } light;
 
 layout(binding = 2, set = 0) uniform ShadowData {
@@ -74,6 +79,13 @@ layout(binding = 8, set = 0) uniform ClusterMetadata {
     uvec4 lightCounts;
     vec4 screenSizeDepth;
 } clusterMeta;
+
+// ── Image-based lighting (IblPass, equirectangular) ──────────────────────────
+layout(binding = 9, set = 0)  uniform sampler2D iblIrradiance;   // diffuse = albedo * sample
+layout(binding = 10, set = 0) uniform sampler2D iblPrefiltered;  // GGX, roughness = lod / maxLod
+layout(binding = 11, set = 0) uniform sampler2D iblBrdfLut;      // (scale, bias) by (NdotV, roughness)
+
+#include "equirect.glsl"
 
 // ── Material textures (set 1) ─────────────────────────────────────────────────
 // ShaderInterface.h: material set owns material texture descriptors.
@@ -358,6 +370,27 @@ float computeShadow(vec3 worldPos, out int cascadeIdx) {
     return shadow0;
 }
 
+// ── Image-based ambient ───────────────────────────────────────────────────────
+vec3 evaluateIbl(vec3 N, vec3 V, vec3 baseColor, float metallic, float roughness)
+{
+    float NdotV = clamp(dot(N, V), 1e-4, 1.0);
+    vec3 F0 = mix(vec3(0.04), baseColor, metallic);
+    // Roughness-aware Fresnel for the diffuse/specular split (Lagarde).
+    vec3 F = F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(1.0 - NdotV, 5.0);
+    vec3 kD = (1.0 - F) * (1.0 - metallic);
+
+    vec3 irradiance = textureLod(iblIrradiance, dirToEquirect(N), 0.0).rgb;
+    vec3 diffuse = kD * baseColor * irradiance;
+
+    vec3 R = reflect(-V, N);
+    vec3 prefiltered = textureLod(iblPrefiltered, dirToEquirect(R),
+                                  roughness * light.iblPrefilteredMaxLod).rgb;
+    vec2 brdf = textureLod(iblBrdfLut, vec2(NdotV, roughness), 0.0).rg;
+    vec3 specular = prefiltered * (F0 * brdf.x + brdf.y);
+
+    return diffuse + specular;
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 void main() {
     // ── Sample material textures ─────────────────────────────────────────
@@ -453,7 +486,15 @@ void main() {
     }
 
     // ── Ambient ──────────────────────────────────────────────────────────
-    vec3 ambient = baseColor * light.ambientIntensity;
+    // Split-sum image-based lighting from the current sky, scaled by the ambient slider.
+    // The flat baseColor * ambient term remains the fallback when IBL is off.
+    vec3 ambient;
+    if (light.iblEnabled != 0u) {
+        ambient = evaluateIbl(N, V, baseColor, metallic, roughness) *
+                  (light.ambientIntensity * light.iblIntensity);
+    } else {
+        ambient = baseColor * light.ambientIntensity;
+    }
 
     vec3 color = ambient + Lo;
 

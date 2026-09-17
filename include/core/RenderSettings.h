@@ -49,6 +49,13 @@ struct SkySettings {
     int32_t mode = 0;
 };
 
+// Image-based ambient lighting from the current sky (procedural or HDR panorama).
+// When disabled the renderer falls back to the flat baseColor * ambient term.
+struct IblSettings {
+    bool enabled = true;
+    float intensity = 1.0f;
+};
+
 // Main scene pass visibility and ordering. Neither option changes the image; both
 // exist so captures can prove that (must-match presets) and measure the savings.
 struct CullingSettings {

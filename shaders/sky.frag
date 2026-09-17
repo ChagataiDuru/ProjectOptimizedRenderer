@@ -23,18 +23,25 @@ layout(binding = 1, set = 0) uniform LightData {
 layout(binding = 0, set = 1) uniform sampler2D panorama;
 
 #include "atmosphere.glsl"
+#include "equirect.glsl"
 
 // ── Equirectangular panorama sampling ─────────────────────────────────────────
-// Standard equirectangular (latitude-longitude) layout:
-//   u ∈ [0,1] → azimuth [-π, π],   u=0 → west,  u=0.5 → east
-//   v ∈ [0,1] → elevation [+π/2, -π/2],  v=0 → zenith, v=1 → nadir
+// The panorama has a mip chain, so the u = 0/1 seam needs care: implicit derivatives
+// jump there and would select the smallest mip along a visible line. Use whichever of
+// u and fract(u + 0.5) is continuous at this pixel to form the gradients (Tarini).
 vec3 samplePanorama(vec3 rd)
 {
-    float azimuth   = atan(rd.z, rd.x);                // [-π, π]
-    float elevation = asin(clamp(rd.y, -1.0, 1.0));   // [-π/2, π/2]
-    vec2  uv = vec2(azimuth / (2.0 * PI) + 0.5,
-                    0.5 - elevation / PI);
-    return texture(panorama, uv).rgb;
+    vec2 uv = dirToEquirect(rd);
+    vec2 uvShifted = vec2(fract(uv.x + 0.5), uv.y);
+    vec2 dx = dFdx(uv);
+    vec2 dy = dFdy(uv);
+    vec2 dxShifted = dFdx(uvShifted);
+    vec2 dyShifted = dFdy(uvShifted);
+    if (abs(dxShifted.x) + abs(dyShifted.x) < abs(dx.x) + abs(dy.x)) {
+        dx = dxShifted;
+        dy = dyShifted;
+    }
+    return textureGrad(panorama, uv, dx, dy).rgb;
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────

@@ -330,6 +330,20 @@ VkImageView Image::createSingleLayerView(uint32_t layer,
     return view;
 }
 
+VkImageView Image::createMipView(uint32_t level) const
+{
+    const VkImageViewCreateInfo viewCI{
+        .sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image    = m_image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format   = m_format,
+        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, level, 1, 0, 1 },
+    };
+    VkImageView view = VK_NULL_HANDLE;
+    VK_CHECK(vkCreateImageView(m_ctx.getDevice(), &viewCI, nullptr, &view));
+    return view;
+}
+
 // ── Barriers ─────────────────────────────────────────────────────────────────
 
 void Image::transitionLayout(VkCommandBuffer cmd,

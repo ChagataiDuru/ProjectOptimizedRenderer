@@ -3,15 +3,31 @@
 #include "core/ShaderInterface.h"
 #include "core/VulkanUtil.h"
 
+#include <glm/gtc/packing.hpp>
 #include <spdlog/spdlog.h>
 #include <stb_image.h>
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <fstream>
 #include <stdexcept>
 #include <vector>
 
 namespace {
+
+constexpr VkFormat kPanoramaFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+
+// RGBA float32 -> RGBA float16 (values beyond the half-float range are clamped).
+std::vector<uint16_t> toHalfFloat(const float* rgba, size_t pixelCount)
+{
+    std::vector<uint16_t> out(pixelCount * 4);
+    for (size_t i = 0; i < pixelCount * 4; ++i) {
+        const float value = std::isfinite(rgba[i]) ? std::clamp(rgba[i], -65504.0f, 65504.0f) : 0.0f;
+        out[i] = glm::packHalf1x16(value);
+    }
+    return out;
+}
 
 std::vector<uint32_t> loadSpv(const std::string& path)
 {
@@ -211,16 +227,17 @@ void SkyPass::init(VulkanContext& ctx,
         .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
         .maxAnisotropy = 1.0f,
         .minLod = 0.0f,
-        .maxLod = 1.0f,
+        .maxLod = VK_LOD_CLAMP_NONE,
     };
     VK_CHECK(vkCreateSampler(dev, &samplerCI, nullptr, &m_panoramaSampler));
 
-    const std::array<float, 4> whitePanorama = { 1.0f, 1.0f, 1.0f, 1.0f };
+    const float whitePixel[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    const std::vector<uint16_t> whitePanorama = toHalfFloat(whitePixel, 1);
     VkCommandPool uploadPool = VK_NULL_HANDLE;
     VkCommandBuffer cmd = vkutil::beginSingleUseCommands(ctx, uploadPool);
-    m_panorama.createFromData(1, 1, VK_FORMAT_R32G32B32A32_SFLOAT,
+    m_panorama.createFromData(1, 1, kPanoramaFormat,
                               whitePanorama.data(),
-                              static_cast<VkDeviceSize>(whitePanorama.size() * sizeof(float)),
+                              static_cast<VkDeviceSize>(whitePanorama.size() * sizeof(uint16_t)),
                               cmd);
     vkutil::endSingleUseCommands(ctx, uploadPool, cmd);
     m_panorama.releaseStaging();
@@ -338,16 +355,20 @@ void SkyPass::loadHdrPanorama(VulkanContext& ctx, const std::string& path)
         return;
     }
 
-    const VkDeviceSize dataSize = static_cast<VkDeviceSize>(w) * h * 4 * sizeof(float);
+    // Half-float storage with a full mip chain: the sky and the IBL capture sample it
+    // minified, and RGBA16F is linearly filterable and blittable on every target.
+    const std::vector<uint16_t> halfPixels =
+        toHalfFloat(pixels, static_cast<size_t>(w) * static_cast<size_t>(h));
+    stbi_image_free(pixels);
+    const VkDeviceSize dataSize = static_cast<VkDeviceSize>(halfPixels.size() * sizeof(uint16_t));
 
     VkCommandPool uploadPool = VK_NULL_HANDLE;
     VkCommandBuffer cmd = vkutil::beginSingleUseCommands(ctx, uploadPool);
 
     m_panorama.destroy();
     m_panorama.createFromData(static_cast<uint32_t>(w), static_cast<uint32_t>(h),
-                              VK_FORMAT_R32G32B32A32_SFLOAT, pixels, dataSize, cmd);
-
-    stbi_image_free(pixels);
+                              kPanoramaFormat, halfPixels.data(), dataSize, cmd,
+                              /*generateMips=*/true);
 
     vkutil::endSingleUseCommands(ctx, uploadPool, cmd);
 
@@ -355,7 +376,8 @@ void SkyPass::loadHdrPanorama(VulkanContext& ctx, const std::string& path)
     writePanoramaDescriptor(ctx.getDevice(), m_panoramaSet,
                             m_panoramaSampler, m_panorama.getImageView());
 
-    spdlog::info("HDR panorama loaded: {}x{} from '{}'", w, h, path);
+    ++m_panoramaGeneration;
+    spdlog::info("HDR panorama loaded: {}x{} ({} mips) from '{}'", w, h, m_panorama.getMipLevels(), path);
 }
 
 void SkyPass::shutdown(VkDevice device)
