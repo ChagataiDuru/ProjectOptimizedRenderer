@@ -9,6 +9,7 @@ struct SceneInfo {
     glm::vec3 center;           // AABB center in model space
     float     scaleFactor;      // multiply model-space positions by this to reach world scale
     float     normalizedRadius; // bounding sphere radius after normalization (~targetSize / 2)
+    glm::vec3 normalizedHalfExtent; // AABB half-extent after normalization (world units)
     glm::mat4 modelMatrix;      // Scale(scaleFactor) * Translate(-center)
 };
 

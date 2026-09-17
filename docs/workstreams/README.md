@@ -20,8 +20,9 @@ artifacts in the demo scene, plus the live inventory of what was found.
 Each brief is self-contained: scope, owned files, required capture presets, method,
 and acceptance criteria. They are designed to be handed to one agent session each.
 
-1. Run one workstream at a time, on the branch `chore/spring-cleanup-2026-09`. Do not
-   create parallel branches or rebase mid-run; commit on top of the previous workstream.
+1. Run one workstream at a time, on one topic branch cut from `main` (the original
+   `chore/spring-cleanup-2026-09` branch is merged). Do not create parallel branches or
+   rebase mid-run; commit on top of the previous workstream.
 2. One commit per finding group, with the `ART-*` id in the commit message.
 3. Record every finding in `inventory.md` before fixing it, and keep the row updated
    afterwards (status + evidence path).
@@ -41,22 +42,23 @@ cmake --build --preset debug
 
 * One PNG per preset at `screenshots/<run>/<preset>.png`; `screenshots/` is gitignored.
 * Preset definitions: `include/viewer/CapturePresets.h`, `src/viewer/CapturePresets.cpp`.
-  Add new presets there (never in `main.cpp`).
+  Add new presets there (never in `main.cpp`). Framings that must stay inside the scene set
+  `camera.boundsRelative`, which scales the offset by the scene's AABB half-extent instead
+  of its bounding radius; the capture log prints both at startup.
 * Presets are deterministic: fixed `deltaTime`, no input, camera set once per preset,
   and the ImGui overlay is not attached.
-* Compare runs numerically rather than by eye where possible:
+* Output directories must exist before capturing (`mkdir -p screenshots/<run>`).
+* Compare runs numerically rather than by eye, using `tools/compare_captures.py`:
 
 ```bash
-python3 - <<'PY'
-import numpy as np; from PIL import Image
-a = np.asarray(Image.open('screenshots/before/x.png').convert('RGB')).astype(np.int16)
-b = np.asarray(Image.open('screenshots/after/x.png').convert('RGB')).astype(np.int16)
-d = np.abs(a - b); print('max', d.max(), 'mean', d.mean(), 'changed %', 100.0*np.any(d>0,axis=2).mean())
-PY
+python3 tools/compare_captures.py screenshots/<run>              # must-differ gate (exit 1 on identical pairs)
+python3 tools/compare_captures.py screenshots/<run> screenshots/<baseline>   # per-preset diff between runs
 ```
 
 A byte-identical PNG between two presets that should differ is itself a finding: it means
 a setting is not reaching the shader.
+Conversely, an optimization (caster culling) that changes a must-match pair is a
+finding too: it means the optimization is not conservative.
 
 ## Preset index
 
@@ -64,9 +66,9 @@ a setting is not reaching the shader.
 |---|---|
 | Framing | `scene-overview`, `scene-floor-close`, `scene-wall-close` |
 | Shadow filtering | `shadow-hard`, `shadow-pcf`, `shadow-vsm`, `shadow-bias-zero` |
-| Shadow parameters | `shadow-distance-short`, `shadow-cull-off`, `cascades-debug` |
-| Shadow visibility | `shadow-interior`, `shadow-interior-grazing-sun`, `shadow-interior-grazing-sun-pcf`, `shadow-interior-grazing-sun-bias-zero` |
-| Anti-aliasing | `msaa-4x`, `msaa-4x-a2c`, `msaa-sample-shading` |
+| Shadow parameters | `shadow-distance-short`, `shadow-cull-off`, `cascades-debug`, `shadow-cull-side-sun` / `shadow-cull-side-sun-off` (must be byte-identical) |
+| Shadow visibility (inside the atrium) | `shadow-interior`, `shadow-interior-grazing-sun`, `shadow-interior-grazing-sun-hard`, `shadow-interior-grazing-sun-pcf`, `shadow-interior-grazing-sun-vsm`, `shadow-interior-grazing-sun-bias-zero` |
+| Anti-aliasing | `msaa-4x`, `msaa-4x-a2c`, `msaa-sample-shading` (exterior); `msaa-4x-interior`, `msaa-4x-a2c-interior`, `msaa-sample-shading-interior` (masked foliage in view) |
 | Tone mapping | `tonemap-reinhard`, `tonemap-agx`, `tonemap-pbr-neutral`, `tonemap-split` |
 | Sky / lighting isolation | `sky-procedural`, `sky-off`, `clusters-off` |
 | Debug views | `normals-debug` |

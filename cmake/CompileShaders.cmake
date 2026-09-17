@@ -56,9 +56,10 @@ set(SHADER_OUTPUT_DIR "${CMAKE_BINARY_DIR}/shaders")
 #   TARGET      <cmake-target>       # target that depends on this shader
 #   SOURCE      <path/to/shader.vert|.frag|.comp|...>
 #   OUTPUT      <name.spv>           # filename only; placed in SHADER_OUTPUT_DIR
+#   DEFINES     <NAME[=VALUE]>...    # optional preprocessor defines (shader variants)
 # )
 function(shader_compile_glsl)
-    cmake_parse_arguments(SHADER "" "TARGET;SOURCE;OUTPUT" "" ${ARGN})
+    cmake_parse_arguments(SHADER "" "TARGET;SOURCE;OUTPUT" "DEFINES" ${ARGN})
 
     if(NOT SHADER_TARGET)
         message(FATAL_ERROR "shader_compile_glsl: TARGET is required")
@@ -74,11 +75,17 @@ function(shader_compile_glsl)
 
     file(MAKE_DIRECTORY "${SHADER_OUTPUT_DIR}")
 
+    set(define_args "")
+    foreach(define IN LISTS SHADER_DEFINES)
+        list(APPEND define_args "-D${define}")
+    endforeach()
+
     if(GLSLC_EXECUTABLE)
         set(compile_cmd
             "${GLSLC_EXECUTABLE}"
             --target-env=vulkan1.4
             -O
+            ${define_args}
             -o "${output_path}"
             "${SHADER_SOURCE}"
         )
@@ -89,6 +96,7 @@ function(shader_compile_glsl)
             --target-env vulkan1.4
             --spirv-val
             -V
+            ${define_args}
             -o "${output_path}"
             "${SHADER_SOURCE}"
         )

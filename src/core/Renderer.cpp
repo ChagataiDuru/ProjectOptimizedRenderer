@@ -346,6 +346,14 @@ bool Renderer::isAlphaToCoverageActive() const
     return isMsaaEnabled() && m_antiAliasingStatus.alphaToCoverageEnabled;
 }
 
+const char* Renderer::pbrFragmentShaderName() const
+{
+    // MoltenVK accepts sampleShadingEnable but still shades once per pixel, so the
+    // sample-shading path uses a variant with sample-qualified inputs (ART-VPW-005).
+    // Metal has no fractional mode: every sample is shaded regardless of minSampleShading.
+    return m_antiAliasingStatus.sampleShadingEnabled ? "pbr_sample.frag.spv" : "pbr.frag.spv";
+}
+
 VkSampleCountFlagBits Renderer::getActiveSceneSampleCount() const
 {
     return toVkSampleCount(m_antiAliasingStatus.activeSampleCount);
@@ -493,7 +501,7 @@ void Renderer::createPbrPipeline()
 {
     const std::string dir = SHADER_DIR;
     m_vertModule        = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/pbr.vert.spv"));
-    m_fragModule        = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/pbr.frag.spv"));
+    m_fragModule        = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/" + pbrFragmentShaderName()));
     m_normalsFragModule = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/pbr_normals.frag.spv"));
 
     const std::array<VkPipelineShaderStageCreateInfo, 2> stages{{
@@ -552,9 +560,11 @@ void Renderer::createPbrPipeline()
     VkPipelineRasterizationStateCreateInfo rasterization{
         .sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
         .polygonMode = VK_POLYGON_MODE_FILL,
-        // Back-face culling enabled: cube normals are outward-facing CCW, so back faces are CW.
+        // glTF front faces are CCW. The camera projection flips Y, which keeps them CCW in
+        // framebuffer space, so gl_FrontFacing is only correct with COUNTER_CLOCKWISE here
+        // (pbr.frag negates N for back faces).
         .cullMode    = VK_CULL_MODE_NONE,
-        .frontFace   = VK_FRONT_FACE_CLOCKWISE,
+        .frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE,
         .lineWidth   = 1.0f,
     };
 
@@ -807,7 +817,7 @@ void Renderer::createPbrGraphicsPipelines()
 
     const std::string dir = SHADER_DIR;
     m_vertModule        = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/pbr.vert.spv"));
-    m_fragModule        = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/pbr.frag.spv"));
+    m_fragModule        = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/" + pbrFragmentShaderName()));
     m_normalsFragModule = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/pbr_normals.frag.spv"));
 
     const std::array<VkPipelineShaderStageCreateInfo, 2> stages{{
@@ -865,7 +875,7 @@ void Renderer::createPbrGraphicsPipelines()
         .sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
         .polygonMode = VK_POLYGON_MODE_FILL,
         .cullMode    = VK_CULL_MODE_NONE,
-        .frontFace   = VK_FRONT_FACE_CLOCKWISE,
+        .frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE, // see createPbrPipeline()
         .lineWidth   = 1.0f,
     };
 

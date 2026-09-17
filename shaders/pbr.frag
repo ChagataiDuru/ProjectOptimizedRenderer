@@ -1,10 +1,19 @@
 #version 460 core
 
 // ── Inputs from vertex shader ─────────────────────────────────────────────────
+// POR_PER_SAMPLE_SHADING builds the sample-shading variant (pbr_sample.frag.spv):
+// sample-qualified inputs make the fragment shader run once per sample, which is
+// how sample-rate shading actually reaches Metal under MoltenVK.
+#ifdef POR_PER_SAMPLE_SHADING
+#define POR_INTERPOLATION sample
+#else
+#define POR_INTERPOLATION
+#endif
+
 layout(location = 0) in VS_OUT {
-    vec3 worldPos;
-    vec3 normal;
-    vec2 uv;
+    POR_INTERPOLATION vec3 worldPos;
+    POR_INTERPOLATION vec3 normal;
+    POR_INTERPOLATION vec2 uv;
 } fs_in;
 
 // ── Per-frame uniform bindings (set 0) ───────────────────────────────────────
