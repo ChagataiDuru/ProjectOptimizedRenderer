@@ -323,8 +323,12 @@ int runCaptureMode(const CaptureOptions& options)
 
     const float radius = std::max(activeSceneInfo.normalizedRadius, 0.001f);
 
+    const glm::vec3 halfExtent = activeSceneInfo.normalizedHalfExtent;
+
     spdlog::info("Capture mode: {} preset(s) -> '{}' ({} warmup frames)",
                  selected.size(), options.outputDir, options.frameCount);
+    spdlog::info("Capture scene bounds: radius {:.3f}, half-extent ({:.3f}, {:.3f}, {:.3f})",
+                 radius, halfExtent.x, halfExtent.y, halfExtent.z);
 
     for (const CapturePreset* preset : selected) {
         if (renderer.setAntiAliasingSettings(preset->antiAliasing) != RendererResult::Success) {
@@ -351,7 +355,10 @@ int runCaptureMode(const CaptureOptions& options)
         state.debugView   = preset->debug;
         state.antiAliasing = preset->antiAliasing;
 
-        camera.setView(preset->camera.positionOffset * radius,
+        const glm::vec3 cameraPosition = preset->camera.boundsRelative
+            ? preset->camera.positionOffset * halfExtent
+            : preset->camera.positionOffset * radius;
+        camera.setView(cameraPosition,
                        preset->camera.yawDegrees,
                        preset->camera.pitchDegrees);
 

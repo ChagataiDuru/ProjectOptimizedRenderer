@@ -15,7 +15,11 @@
 struct CaptureCamera {
     // Camera position in scene-normalized units: this offset is scaled by the
     // imported scene radius, then applied as the camera world position.
+    // When boundsRelative is set, each axis is instead a fraction (-1..1) of the
+    // normalized AABB half-extent, which keeps "inside the scene" framings inside
+    // regardless of the model's aspect ratio.
     glm::vec3 positionOffset{ 0.0f, 0.5f, 2.0f };
+    bool boundsRelative = false;
     float yawDegrees = 0.0f;
     float pitchDegrees = -10.0f;
 };

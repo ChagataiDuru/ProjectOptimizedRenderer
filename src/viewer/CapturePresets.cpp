@@ -12,6 +12,19 @@ CapturePreset makeBase(const char* id, const char* description)
     return preset;
 }
 
+// Inside the atrium, eye height above the floor, looking along +X down the colonnade.
+// Bounds-relative so the camera stays inside the building for any scene scale.
+void setInteriorCamera(CapturePreset& preset)
+{
+    preset.camera.boundsRelative = true;
+    preset.camera.positionOffset = glm::vec3(-0.55f, -0.75f, 0.0f);
+    preset.camera.yawDegrees = -90.0f;
+    preset.camera.pitchDegrees = -12.0f;
+}
+
+// Sun high enough to clear the open atrium roof but low enough to cast long shadows.
+const glm::vec3 kGrazingSunDirection = glm::normalize(glm::vec3(0.6f, 0.75f, 0.25f));
+
 std::vector<CapturePreset> buildCapturePresets()
 {
     std::vector<CapturePreset> presets;
@@ -61,30 +74,26 @@ std::vector<CapturePreset> buildCapturePresets()
 
     // ── Shadow visibility validation ─────────────────────────────────────────
     // Exterior views of Sponza contain almost no shadowed receivers, so these presets
-    // look down an interior corridor with a grazing sun to make shadows observable.
+    // stand inside the atrium, where the open roof lets the sun cast column shadows.
     presets.push_back(makeBase("shadow-interior",
-                               "Interior corridor looking down at the floor"));
-    presets.back().camera.positionOffset = glm::vec3(0.0f, 0.30f, 0.85f);
-    presets.back().camera.pitchDegrees = -42.0f;
+                               "Interior atrium view down the colonnade"));
+    setInteriorCamera(presets.back());
 
     presets.push_back(makeBase("shadow-interior-grazing-sun",
-                               "Interior corridor with a low grazing sun (long shadows)"));
-    presets.back().camera.positionOffset = glm::vec3(0.0f, 0.30f, 0.85f);
-    presets.back().camera.pitchDegrees = -42.0f;
-    presets.back().light.direction = glm::normalize(glm::vec3(1.0f, 0.22f, 0.35f));
+                               "Interior atrium with a low sun (long shadows)"));
+    setInteriorCamera(presets.back());
+    presets.back().light.direction = kGrazingSunDirection;
 
     presets.push_back(makeBase("shadow-interior-grazing-sun-pcf",
-                               "Grazing-sun interior with 16-tap PCF"));
-    presets.back().camera.positionOffset = glm::vec3(0.0f, 0.30f, 0.85f);
-    presets.back().camera.pitchDegrees = -42.0f;
-    presets.back().light.direction = glm::normalize(glm::vec3(1.0f, 0.22f, 0.35f));
+                               "Low-sun interior with 16-tap PCF"));
+    setInteriorCamera(presets.back());
+    presets.back().light.direction = kGrazingSunDirection;
     presets.back().shadow.filterMode = 1;
 
     presets.push_back(makeBase("shadow-interior-grazing-sun-bias-zero",
-                               "Grazing-sun interior with PCF and zero depth bias (acne check)"));
-    presets.back().camera.positionOffset = glm::vec3(0.0f, 0.30f, 0.85f);
-    presets.back().camera.pitchDegrees = -42.0f;
-    presets.back().light.direction = glm::normalize(glm::vec3(1.0f, 0.22f, 0.35f));
+                               "Low-sun interior with PCF and zero depth bias (acne check)"));
+    setInteriorCamera(presets.back());
+    presets.back().light.direction = kGrazingSunDirection;
     presets.back().shadow.filterMode = 1;
     presets.back().shadow.depthBiasConstant = 0.0f;
     presets.back().shadow.depthBiasSlope = 0.0f;
@@ -133,6 +142,40 @@ std::vector<CapturePreset> buildCapturePresets()
 
     presets.push_back(makeBase("normals-debug", "Normals debug view (normal map / TBN artifacts)"));
     presets.back().debug.showNormals = true;
+
+    // ── Interior comparisons (appended so existing ids keep their order) ─────
+    presets.push_back(makeBase("shadow-interior-grazing-sun-hard",
+                               "Low-sun interior with hard single-tap shadows"));
+    setInteriorCamera(presets.back());
+    presets.back().light.direction = kGrazingSunDirection;
+    presets.back().shadow.filterMode = 0;
+
+    presets.push_back(makeBase("shadow-interior-grazing-sun-vsm",
+                               "Low-sun interior with VSM shadows"));
+    setInteriorCamera(presets.back());
+    presets.back().light.direction = kGrazingSunDirection;
+    presets.back().shadow.filterMode = 2;
+
+    presets.push_back(makeBase("msaa-4x-interior",
+                               "Interior MSAA 4x (masked foliage in view)"));
+    setInteriorCamera(presets.back());
+    presets.back().antiAliasing.mode = AntiAliasingMode::MSAA;
+    presets.back().antiAliasing.requestedSampleCount = MsaaSampleCount::X4;
+
+    presets.push_back(makeBase("msaa-4x-a2c-interior",
+                               "Interior MSAA 4x with alpha-to-coverage"));
+    setInteriorCamera(presets.back());
+    presets.back().antiAliasing.mode = AntiAliasingMode::MSAA;
+    presets.back().antiAliasing.requestedSampleCount = MsaaSampleCount::X4;
+    presets.back().antiAliasing.alphaToCoverageEnabled = true;
+
+    presets.push_back(makeBase("msaa-sample-shading-interior",
+                               "Interior MSAA 4x with sample shading at 0.5"));
+    setInteriorCamera(presets.back());
+    presets.back().antiAliasing.mode = AntiAliasingMode::MSAA;
+    presets.back().antiAliasing.requestedSampleCount = MsaaSampleCount::X4;
+    presets.back().antiAliasing.sampleShadingEnabled = true;
+    presets.back().antiAliasing.minSampleShading = 0.5f;
 
     return presets;
 }

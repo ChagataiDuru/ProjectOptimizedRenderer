@@ -22,6 +22,7 @@ SceneInfo computeSceneInfo(const glm::vec3& boundsMin,
         .center           = center,
         .scaleFactor      = scale,
         .normalizedRadius = glm::length(extent) * 0.5f * scale,
+        .normalizedHalfExtent = extent * 0.5f * scale,
         .modelMatrix      = m,
     };
 }
