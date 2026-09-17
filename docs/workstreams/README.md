@@ -69,6 +69,9 @@ finding too: it means the optimization is not conservative.
 | Shadow parameters | `shadow-distance-short`, `shadow-cull-off`, `cascades-debug`, `shadow-cull-side-sun` / `shadow-cull-side-sun-off` (must be byte-identical) |
 | Shadow visibility (inside the atrium) | `shadow-interior`, `shadow-interior-grazing-sun`, `shadow-interior-grazing-sun-hard`, `shadow-interior-grazing-sun-pcf`, `shadow-interior-grazing-sun-vsm`, `shadow-interior-grazing-sun-bias-zero` |
 | Anti-aliasing | `msaa-4x`, `msaa-4x-a2c`, `msaa-sample-shading` (exterior); `msaa-4x-interior`, `msaa-4x-a2c-interior`, `msaa-sample-shading-interior` (masked foliage in view) |
+| Ambient / occlusion | `ibl-off`, `ibl-off-interior`, `ibl-panorama-interior`, `ao-off-interior`, `ao-debug-interior`, `ao-on-exterior` |
+| Depth prepass | `perf-prepass-on-noao` / `perf-prepass-off-noao` and the `-interior` pair (must be byte-identical) |
+| Main-pass visibility | `perf-culling-off`, `perf-culling-off-interior` (must match the defaults), `perf-sort-off`, `perf-sort-off-interior` (report only) |
 | Tone mapping | `tonemap-reinhard`, `tonemap-agx`, `tonemap-pbr-neutral`, `tonemap-split` |
 | Sky / lighting isolation | `sky-procedural`, `sky-off`, `clusters-off` |
 | Debug views | `normals-debug` |

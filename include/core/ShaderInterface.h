@@ -24,6 +24,10 @@ inline constexpr uint32_t kPointLights = 5;
 inline constexpr uint32_t kClusterGrid = 6;
 inline constexpr uint32_t kClusterLightIndices = 7;
 inline constexpr uint32_t kClusterMetadata = 8;
+inline constexpr uint32_t kIblIrradiance = 9;
+inline constexpr uint32_t kIblPrefiltered = 10;
+inline constexpr uint32_t kIblBrdfLut = 11;
+inline constexpr uint32_t kAmbientOcclusion = 12;
 }
 
 namespace material_binding {
@@ -104,6 +108,14 @@ struct LightUBO {
     uint32_t  shadowFilterMode;
     float     pcfSpreadRadius;
     float     vsmBleedReduction;
+    uint32_t  iblEnabled;
+    float     iblIntensity;
+    float     iblPrefilteredMaxLod;
+    uint32_t  aoEnabled;
+    float     aoIntensity;
+    uint32_t  aoDebugView;
+    float     _pad0;
+    float     _pad1;
 };
 
 struct ShadowCascadeUBO {
@@ -134,7 +146,7 @@ static_assert(sizeof(GpuSpotLight) == 48);
 static_assert(sizeof(ClusterLightRange) == 8);
 static_assert(sizeof(ClusterMetadataUBO) == 48);
 static_assert(sizeof(CameraUBO) == 208);
-static_assert(sizeof(LightUBO) == 48);
+static_assert(sizeof(LightUBO) == 80);
 static_assert(sizeof(ShadowCascadeUBO) == 272);
 static_assert(sizeof(TonemapPC) == 16);
 
@@ -157,6 +169,12 @@ static_assert(offsetof(LightUBO, debugCascades) == 32);
 static_assert(offsetof(LightUBO, shadowFilterMode) == 36);
 static_assert(offsetof(LightUBO, pcfSpreadRadius) == 40);
 static_assert(offsetof(LightUBO, vsmBleedReduction) == 44);
+static_assert(offsetof(LightUBO, iblEnabled) == 48);
+static_assert(offsetof(LightUBO, iblIntensity) == 52);
+static_assert(offsetof(LightUBO, iblPrefilteredMaxLod) == 56);
+static_assert(offsetof(LightUBO, aoEnabled) == 60);
+static_assert(offsetof(LightUBO, aoIntensity) == 64);
+static_assert(offsetof(LightUBO, aoDebugView) == 68);
 
 static_assert(offsetof(ShadowCascadeUBO, lightViewProj) == 0);
 static_assert(offsetof(ShadowCascadeUBO, splitDepths) == 256);

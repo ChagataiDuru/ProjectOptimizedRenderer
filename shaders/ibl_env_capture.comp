@@ -1,0 +1,40 @@
+#version 460 core
+#extension GL_GOOGLE_include_directive : require
+
+// Captures the current sky (procedural atmosphere or HDR panorama) into a small
+// equirectangular RGBA16F environment map that the IBL filters read from.
+
+#include "atmosphere.glsl"
+#include "equirect.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0, set = 0, rgba16f) uniform writeonly image2D outEnvironment;
+layout(binding = 1, set = 0) uniform sampler2D panorama;
+
+layout(push_constant) uniform CapturePC {
+    vec4  sunDirIntensity;  // xyz = direction toward the sun, w = intensity
+    uint  mode;             // 0 = procedural, 1 = HDR panorama
+    float panoramaLod;      // panorama mip whose texel density matches the output
+} pc;
+
+void main()
+{
+    ivec2 size  = imageSize(outEnvironment);
+    ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(texel, size))) return;
+
+    vec2 uv = (vec2(texel) + 0.5) / vec2(size);
+    vec3 radiance;
+    if (pc.mode == 1u) {
+        radiance = textureLod(panorama, uv, pc.panoramaLod).rgb;
+    } else {
+        // The sun disc is left out: the directional light already carries the sun,
+        // and a tiny, very bright disc would only add noise to the filtered maps.
+        radiance = atmosphericScattering(equirectToDir(uv), normalize(pc.sunDirIntensity.xyz),
+                                         pc.sunDirIntensity.w, false);
+    }
+    radiance = clamp(radiance, vec3(0.0), vec3(1.0e4));
+    if (any(isnan(radiance))) radiance = vec3(0.0);
+    imageStore(outEnvironment, texel, vec4(radiance, 1.0));
+}

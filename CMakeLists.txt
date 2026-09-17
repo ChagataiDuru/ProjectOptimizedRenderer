@@ -87,11 +87,14 @@ set(POR_RENDERER_CORE_SOURCES
     src/core/FrameSync.cpp
     src/core/Renderer.cpp
     src/core/RendererInstance.cpp
+    src/core/FrustumCulling.cpp
     src/core/VulkanUtil.cpp
     src/renderpasses/SkyPass.cpp
     src/renderpasses/TonemapPass.cpp
     src/renderpasses/ShadowPass.cpp
     src/renderpasses/ClusteredLightCullingPass.cpp
+    src/renderpasses/IblPass.cpp
+    src/renderpasses/GtaoPass.cpp
     src/resource/VmaImpl.cpp
     src/resource/Buffer.cpp
     src/resource/Image.cpp
@@ -356,6 +359,43 @@ shader_compile_glsl(
     TARGET por_shaders
     SOURCE "${CMAKE_SOURCE_DIR}/shaders/sky.frag"
     OUTPUT "sky.frag.spv"
+)
+
+shader_compile_glsl(
+    TARGET por_shaders
+    SOURCE "${CMAKE_SOURCE_DIR}/shaders/ibl_env_capture.comp"
+    OUTPUT "ibl_env_capture.comp.spv"
+)
+shader_compile_glsl(
+    TARGET por_shaders
+    SOURCE "${CMAKE_SOURCE_DIR}/shaders/ibl_irradiance.comp"
+    OUTPUT "ibl_irradiance.comp.spv"
+)
+shader_compile_glsl(
+    TARGET por_shaders
+    SOURCE "${CMAKE_SOURCE_DIR}/shaders/ibl_prefilter.comp"
+    OUTPUT "ibl_prefilter.comp.spv"
+)
+shader_compile_glsl(
+    TARGET por_shaders
+    SOURCE "${CMAKE_SOURCE_DIR}/shaders/ibl_brdf_lut.comp"
+    OUTPUT "ibl_brdf_lut.comp.spv"
+)
+
+shader_compile_glsl(
+    TARGET por_shaders
+    SOURCE "${CMAKE_SOURCE_DIR}/shaders/pbr_prepass_alpha.frag"
+    OUTPUT "pbr_prepass_alpha.frag.spv"
+)
+shader_compile_glsl(
+    TARGET por_shaders
+    SOURCE "${CMAKE_SOURCE_DIR}/shaders/gtao.comp"
+    OUTPUT "gtao.comp.spv"
+)
+shader_compile_glsl(
+    TARGET por_shaders
+    SOURCE "${CMAKE_SOURCE_DIR}/shaders/gtao_blur.comp"
+    OUTPUT "gtao_blur.comp.spv"
 )
 
 add_dependencies(por_viewer por_shaders)

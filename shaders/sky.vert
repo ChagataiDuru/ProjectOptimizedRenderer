@@ -25,8 +25,11 @@ void main()
     // Unproject: inverse(P*V) maps homogeneous clip-space → world-space.
     vec4 worldPos = camera.inverseVP * clipPos;
 
-    // Perspective-correct world position, then subtract camera origin for ray direction.
-    outRayDir = normalize(worldPos.xyz / worldPos.w - camera.cameraPos);
+    // Far-plane positions are affine in screen space, so the unnormalized direction
+    // interpolates exactly; sky.frag normalizes per fragment. Normalizing here made the
+    // interpolation non-linear across the oversized fullscreen triangle and tilted the
+    // horizon (ART-SKY-004).
+    outRayDir = worldPos.xyz / worldPos.w - camera.cameraPos;
 
     // z = 0.0 → reverse-Z far plane (depth buffer cleared to 0.0).
     // depthCompareOp = GREATER_OR_EQUAL passes where stored depth == 0.0 (no geometry).

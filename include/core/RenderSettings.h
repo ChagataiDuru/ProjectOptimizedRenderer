@@ -49,6 +49,31 @@ struct SkySettings {
     int32_t mode = 0;
 };
 
+// Image-based ambient lighting from the current sky (procedural or HDR panorama).
+// When disabled the renderer falls back to the flat baseColor * ambient term.
+struct IblSettings {
+    bool enabled = true;
+    float intensity = 1.0f;
+};
+
+// Main scene pass visibility and ordering. Neither option changes the image; both
+// exist so captures can prove that (must-match presets) and measure the savings.
+struct CullingSettings {
+    bool enableFrustumCulling = true;
+    bool sortDraws = true;
+    // Depth-only pass before the scene pass: lets the main pass reject hidden
+    // fragments with an EQUAL test, and produces the depth that AO reads.
+    bool enableDepthPrepass = true;
+};
+
+// Screen-space ambient occlusion (needs the depth prepass; forced on when enabled).
+struct AmbientOcclusionSettings {
+    bool enabled = true;
+    float radius = 0.8f;     // world units (scene-normalized: Sponza is 10 wide)
+    float intensity = 1.0f;
+    bool debugView = false;   // show the AO buffer instead of shading
+};
+
 struct DebugViewSettings {
     bool wireframe   = false;
     bool showNormals = false;

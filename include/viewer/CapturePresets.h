@@ -33,12 +33,20 @@ struct CapturePreset {
     TonemapSettings tonemap{};
     SkySettings sky{};
     DebugViewSettings debug{};
+    CullingSettings culling{};
+    IblSettings ibl{};
+    AmbientOcclusionSettings ao{};
     AntiAliasingSettings antiAliasing{};
     CaptureCamera camera{};
 
     // When false the scene packet is submitted with no point lights, which isolates
     // clustered-forward lighting from the directional/shadow path.
     bool pointLightsEnabled = true;
+
+    // When true the capture runner writes a small synthetic HDR panorama (sky gradient
+    // plus a warm "sun" band) and loads it before this preset, so the panorama IBL
+    // path can be exercised without shipping an HDR asset.
+    bool syntheticPanorama = false;
 };
 
 // Stable, ordered preset table. New presets are appended so existing capture

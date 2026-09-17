@@ -1,0 +1,92 @@
+#version 460 core
+
+// Screen-space ambient occlusion from the depth prepass (half resolution).
+// View-space positions and normals are reconstructed from depth, then a horizon-style
+// hemisphere estimate is accumulated over a spiral of samples.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0, set = 0, r8) uniform writeonly image2D outAo;
+layout(binding = 1, set = 0) uniform sampler2D sceneDepth;
+
+layout(push_constant) uniform GtaoPC {
+    mat4  inverseProjection;
+    vec4  outputSizeAndInvFull;  // xy = AO size, zw = 1 / full-resolution size
+    vec4  params;                // x = world radius, y = intensity, zw = projection scale (P00, |P11|)
+} pc;
+
+const uint kSampleCount = 12u;
+
+vec3 viewPositionFromDepth(vec2 uv, float depth)
+{
+    // Reverse-Z: depth is in [0, 1] with 1 at the near plane.
+    vec4 ndc = vec4(uv * 2.0 - 1.0, depth, 1.0);
+    vec4 view = pc.inverseProjection * ndc;
+    return view.xyz / view.w;
+}
+
+void main()
+{
+    ivec2 size = ivec2(pc.outputSizeAndInvFull.xy);
+    ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(texel, size))) return;
+
+    vec2 uv = (vec2(texel) + 0.5) / vec2(size);
+    float depth = textureLod(sceneDepth, uv, 0.0).r;
+    if (depth <= 0.0) {                 // reverse-Z far plane: sky, no occlusion
+        imageStore(outAo, texel, vec4(1.0));
+        return;
+    }
+
+    vec3 P = viewPositionFromDepth(uv, depth);
+
+    // Normal from the closest depth neighbours (keeps edges from bleeding).
+    vec2 texelStep = pc.outputSizeAndInvFull.zw;
+    float depthR = textureLod(sceneDepth, uv + vec2(texelStep.x, 0.0), 0.0).r;
+    float depthL = textureLod(sceneDepth, uv - vec2(texelStep.x, 0.0), 0.0).r;
+    float depthD = textureLod(sceneDepth, uv + vec2(0.0, texelStep.y), 0.0).r;
+    float depthU = textureLod(sceneDepth, uv - vec2(0.0, texelStep.y), 0.0).r;
+    vec3 right = viewPositionFromDepth(uv + vec2(texelStep.x, 0.0), depthR) - P;
+    vec3 left  = P - viewPositionFromDepth(uv - vec2(texelStep.x, 0.0), depthL);
+    vec3 down  = viewPositionFromDepth(uv + vec2(0.0, texelStep.y), depthD) - P;
+    vec3 up    = P - viewPositionFromDepth(uv - vec2(0.0, texelStep.y), depthU);
+    vec3 dx = abs(right.z) < abs(left.z) ? right : left;
+    vec3 dy = abs(down.z) < abs(up.z) ? down : up;
+    vec3 N = normalize(cross(dx, dy));
+    if (dot(N, -P) < 0.0) N = -N;
+
+    float radius = pc.params.x;
+    float viewDepth = -P.z;
+    // UV radius of the world-space sampling sphere: a length r at view depth d covers
+    // r * P / d in NDC, i.e. half that in UV.
+    vec2 screenRadius = radius * pc.params.zw / (2.0 * max(viewDepth, 1e-3));
+    screenRadius = min(screenRadius, vec2(0.1));   // keep the sample footprint cache-friendly
+
+    // 4x4 interleaved rotation keeps the sample pattern deterministic.
+    float angleOffset = float((texel.x & 3) + (texel.y & 3) * 4) * (6.2831853 / 16.0);
+
+    float occlusion = 0.0;
+    for (uint i = 0u; i < kSampleCount; ++i) {
+        float t = (float(i) + 0.5) / float(kSampleCount);
+        float angle = angleOffset + t * 6.2831853 * 3.0;
+        vec2 offset = vec2(cos(angle), sin(angle)) * screenRadius * sqrt(t);
+
+        vec2 sampleUv = uv + offset;
+        if (any(lessThan(sampleUv, vec2(0.0))) || any(greaterThan(sampleUv, vec2(1.0)))) continue;
+        float sampleDepth = textureLod(sceneDepth, sampleUv, 0.0).r;
+        if (sampleDepth <= 0.0) continue;
+
+        vec3 S = viewPositionFromDepth(sampleUv, sampleDepth);
+        vec3 toSample = S - P;
+        float dist = length(toSample);
+        if (dist < 1e-4 || dist > radius) continue;
+
+        float cosAngle = max(dot(N, toSample / dist), 0.0);
+        // Range check keeps distant geometry from darkening the surface.
+        float falloff = 1.0 - clamp(dist / radius, 0.0, 1.0);
+        occlusion += cosAngle * falloff;
+    }
+
+    float ao = 1.0 - clamp(occlusion / float(kSampleCount) * 2.0 * pc.params.y, 0.0, 1.0);
+    imageStore(outAo, texel, vec4(ao));
+}

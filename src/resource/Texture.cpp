@@ -60,13 +60,14 @@ void Texture::loadFromFile(const std::string& filepath,
     const VkDeviceSize dataSize = static_cast<VkDeviceSize>(w) * h * 4;
     m_image.createFromData(static_cast<uint32_t>(w), static_cast<uint32_t>(h),
                            format,
-                           pixels, dataSize, transferCmd);
+                           pixels, dataSize, transferCmd,
+                           /*generateMips=*/true);
     stbi_image_free(pixels);
 
     m_sampler  = samplerCache.getDefaultSampler();
     m_filepath = filepath;
 
-    spdlog::info("Texture loaded: {}x{} {}", w, h, filepath);
+    spdlog::info("Texture loaded: {}x{} ({} mips) {}", w, h, m_image.getMipLevels(), filepath);
 }
 
 void Texture::loadFromMemory(const void* rgbaData,
@@ -76,7 +77,8 @@ void Texture::loadFromMemory(const void* rgbaData,
 {
     const VkDeviceSize dataSize = static_cast<VkDeviceSize>(width) * height * 4;
     m_image.createFromData(width, height, VK_FORMAT_R8G8B8A8_SRGB,
-                           rgbaData, dataSize, transferCmd);
+                           rgbaData, dataSize, transferCmd,
+                           /*generateMips=*/true);
 
     m_sampler = samplerCache.getDefaultSampler();
 }

@@ -52,6 +52,11 @@ endif()
 
 set(SHADER_OUTPUT_DIR "${CMAKE_BINARY_DIR}/shaders")
 
+# Shared GLSL headers (#include "x.glsl" with GL_GOOGLE_include_directive). Every
+# shader depends on all of them so an edited header always triggers a rebuild.
+set(SHADER_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/shaders/include")
+file(GLOB SHADER_INCLUDE_FILES CONFIGURE_DEPENDS "${SHADER_INCLUDE_DIR}/*.glsl")
+
 # shader_compile_glsl(
 #   TARGET      <cmake-target>       # target that depends on this shader
 #   SOURCE      <path/to/shader.vert|.frag|.comp|...>
@@ -85,6 +90,7 @@ function(shader_compile_glsl)
             "${GLSLC_EXECUTABLE}"
             --target-env=vulkan1.4
             -O
+            -I "${SHADER_INCLUDE_DIR}"
             ${define_args}
             -o "${output_path}"
             "${SHADER_SOURCE}"
@@ -96,6 +102,7 @@ function(shader_compile_glsl)
             --target-env vulkan1.4
             --spirv-val
             -V
+            -I"${SHADER_INCLUDE_DIR}"
             ${define_args}
             -o "${output_path}"
             "${SHADER_SOURCE}"
@@ -108,7 +115,7 @@ function(shader_compile_glsl)
     add_custom_command(
         OUTPUT  "${output_path}"
         COMMAND ${compile_cmd}
-        DEPENDS "${SHADER_SOURCE}"
+        DEPENDS "${SHADER_SOURCE}" ${SHADER_INCLUDE_FILES}
         COMMENT "[${compiler_name}] Compiling ${SHADER_SOURCE} -> ${SHADER_OUTPUT}"
         VERBATIM
     )

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/FrustumCulling.h"
+
 #include "core/DrawCommand.h"
 #include "core/MeshRenderData.h"
 #include "core/RenderSettings.h"
@@ -18,10 +20,7 @@ class ShadowPass {
 public:
     static constexpr uint32_t CASCADE_COUNT = shader_interface::kCascadeCount;
 
-    struct CullingPlane {
-        glm::vec3 normal = glm::vec3(0.0f);
-        float d = 0.0f;
-    };
+    using CullingPlane = culling::Plane;
 
     explicit ShadowPass(VulkanContext& ctx);
     ~ShadowPass();

@@ -73,33 +73,6 @@ std::pair<glm::vec3, float> boundingSphere(const std::array<glm::vec3, 8>& pts)
     return { center, radius };
 }
 
-struct FrustumPlane {
-    glm::vec3 normal = glm::vec3(0.0f);
-    float d = 0.0f;
-};
-
-std::array<FrustumPlane, 6> extractFrustumPlanes(const glm::mat4& vp)
-{
-    auto row = [&](int i) -> glm::vec4 {
-        return { vp[0][i], vp[1][i], vp[2][i], vp[3][i] };
-    };
-    const glm::vec4 r0 = row(0), r1 = row(1), r2 = row(2), r3 = row(3);
-
-    std::array<FrustumPlane, 6> planes{};
-    auto set = [&](int idx, glm::vec4 v) {
-        const float len = glm::length(glm::vec3(v));
-        if (len > 1e-8f) v /= len;
-        planes[idx] = { glm::vec3(v), v.w };
-    };
-    set(0, r3 + r0);
-    set(1, r3 - r0);
-    set(2, r3 + r1);
-    set(3, r3 - r1);
-    set(4, r3 + r2);
-    set(5, r3 - r2);
-    return planes;
-}
-
 constexpr std::array<std::pair<int, int>, 12> kFrustumEdges{{
     {0, 2}, {0, 3}, {0, 4}, {0, 5},
     {1, 2}, {1, 3}, {1, 4}, {1, 5},
@@ -114,7 +87,7 @@ std::vector<ShadowPass::CullingPlane> computeShadowCullPlanes(
     const glm::mat4& cascadeVP,
     const glm::vec3& lightDir)
 {
-    const auto frustum = extractFrustumPlanes(cascadeVP);
+    const auto frustum = culling::extractFrustumPlanesNO(cascadeVP);
 
     // Frustum centroid (NO depth range): every extrusion plane passes through a frustum
     // edge and bounds the swept volume, so the centroid must lie on its inner side.
@@ -191,23 +164,10 @@ std::vector<ShadowPass::CullingPlane> computeShadowCullPlanes(
     return planes;
 }
 
-bool aabbOutsidePlane(const glm::vec3& bmin, const glm::vec3& bmax,
-                      const glm::vec3& normal, float d)
-{
-    const glm::vec3 pVertex(
-        (normal.x >= 0.0f) ? bmax.x : bmin.x,
-        (normal.y >= 0.0f) ? bmax.y : bmin.y,
-        (normal.z >= 0.0f) ? bmax.z : bmin.z);
-    return (glm::dot(normal, pVertex) + d) < 0.0f;
-}
-
 bool aabbSurvivesCulling(const glm::vec3& bmin, const glm::vec3& bmax,
                          const std::vector<ShadowPass::CullingPlane>& planes)
 {
-    for (const auto& p : planes) {
-        if (aabbOutsidePlane(bmin, bmax, p.normal, p.d)) return false;
-    }
-    return true;
+    return !culling::aabbOutsideAny(bmin, bmax, planes.data(), planes.size());
 }
 
 VkCullModeFlags toVkCullMode(int32_t mode)
@@ -1034,7 +994,6 @@ void ShadowPass::record(VkCommandBuffer cmd,
                 bounds != nullptr &&
                 !m_shadowCullPlanes[c].empty() &&
                 !aabbSurvivesCulling(bounds->worldMin, bounds->worldMax, m_shadowCullPlanes[c])) {
-                        bounds->worldMin.x, bounds->worldMin.y, bounds->worldMin.z,
                 ++culled;
                 continue;
             }

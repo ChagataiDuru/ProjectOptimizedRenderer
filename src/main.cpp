@@ -14,6 +14,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <fstream>
+#include <stb_image_write.h>
 #include <glm/glm.hpp>
 #include <imgui.h>
 #include <memory>
@@ -43,6 +45,9 @@ RenderFramePacket buildRenderFramePacket(const Camera& camera, const ViewerState
     packet.tonemap           = state.tonemap;
     packet.sky               = state.sky;
     packet.debug             = state.debugView;
+    packet.culling           = state.culling;
+    packet.ibl               = state.ibl;
+    packet.ao                = state.ao;
     return packet;
 }
 
@@ -279,6 +284,94 @@ std::vector<const CapturePreset*> resolveCapturePresets(const std::vector<std::s
     return selected;
 }
 
+// Averages the per-pass GPU timings over the second half of the warmup frames and
+// writes them next to the PNG, so capture runs can be compared for performance too.
+struct CaptureTimingAccumulator {
+    uint32_t samples = 0;
+    double shadowMs = 0.0;
+    double blurMs = 0.0;
+    double clusterMs = 0.0;
+    double sceneMs = 0.0;
+    double tonemapMs = 0.0;
+    double prepassMs = 0.0;
+    double aoMs = 0.0;
+    double totalMs = 0.0;
+
+    void add(const Renderer::RenderStats& stats)
+    {
+        ++samples;
+        shadowMs += stats.shadowGpuMs;
+        blurMs += stats.blurGpuMs;
+        clusterMs += stats.clusterGpuMs;
+        sceneMs += stats.sceneGpuMs;
+        tonemapMs += stats.tonemapGpuMs;
+        prepassMs += stats.prepassGpuMs;
+        aoMs += stats.aoGpuMs;
+        totalMs += stats.totalGpuFrameMs;
+    }
+};
+
+bool writeCaptureStats(const std::string& path,
+                       const CaptureTimingAccumulator& timing,
+                       const Renderer::RenderStats& last)
+{
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    const double n = timing.samples > 0 ? static_cast<double>(timing.samples) : 1.0;
+    out << "{\n"
+        << "  \"timing_samples\": " << timing.samples << ",\n"
+        << "  \"gpu_ms\": {\n"
+        << "    \"shadow\": " << timing.shadowMs / n << ",\n"
+        << "    \"blur\": " << timing.blurMs / n << ",\n"
+        << "    \"cluster\": " << timing.clusterMs / n << ",\n"
+        << "    \"scene\": " << timing.sceneMs / n << ",\n"
+        << "    \"tonemap\": " << timing.tonemapMs / n << ",\n"
+        << "    \"prepass\": " << timing.prepassMs / n << ",\n"
+        << "    \"ao\": " << timing.aoMs / n << ",\n"
+        << "    \"total\": " << timing.totalMs / n << "\n"
+        << "  },\n"
+        << "  \"draw_calls\": " << last.drawCalls << ",\n"
+        << "  \"culled_draw_calls\": " << last.culledDrawCalls << ",\n"
+        << "  \"triangles\": " << last.triangles << ",\n"
+        << "  \"texture_memory_bytes\": " << last.textureMemoryBytes << "\n"
+        << "}\n";
+    return static_cast<bool>(out);
+}
+
+// Writes a small equirectangular HDR panorama (sky gradient plus one warm, bright
+// band) so the panorama IBL path can be captured without shipping an HDR asset.
+bool writeSyntheticPanorama(const std::string& path)
+{
+    constexpr int kWidth = 256;
+    constexpr int kHeight = 128;
+    std::vector<float> pixels(static_cast<size_t>(kWidth) * kHeight * 3);
+    for (int y = 0; y < kHeight; ++y) {
+        const float v = (static_cast<float>(y) + 0.5f) / kHeight;
+        const float elevation = (0.5f - v) * 3.14159265f;      // +pi/2 at the zenith
+        for (int x = 0; x < kWidth; ++x) {
+            const float u = (static_cast<float>(x) + 0.5f) / kWidth;
+            const float azimuth = (u - 0.5f) * 2.0f * 3.14159265f;
+            const float up = std::max(std::sin(elevation), 0.0f);
+            glm::vec3 color = glm::mix(glm::vec3(1.6f, 1.2f, 0.7f),   // warm horizon
+                                       glm::vec3(0.25f, 0.5f, 1.4f),  // blue zenith
+                                       up);
+            // A bright band toward +X so the IBL result is clearly directional.
+            const float band = std::exp(-8.0f * (azimuth * azimuth)) * std::max(0.0f, 1.0f - up * 2.0f);
+            color += glm::vec3(18.0f, 14.0f, 9.0f) * band;
+            if (elevation < 0.0f) {
+                color *= 0.05f;                                 // dark ground
+            }
+            const size_t index = (static_cast<size_t>(y) * kWidth + x) * 3;
+            pixels[index + 0] = color.r;
+            pixels[index + 1] = color.g;
+            pixels[index + 2] = color.b;
+        }
+    }
+    return stbi_write_hdr(path.c_str(), kWidth, kHeight, 3, pixels.data()) != 0;
+}
+
 int runCaptureMode(const CaptureOptions& options)
 {
     std::string presetError;
@@ -347,12 +440,27 @@ int runCaptureMode(const CaptureOptions& options)
             return 1;
         }
 
+        if (preset->syntheticPanorama) {
+            const std::string panoramaPath = options.outputDir + "/synthetic-panorama.hdr";
+            if (!writeSyntheticPanorama(panoramaPath)) {
+                spdlog::error("Could not write synthetic panorama '{}'", panoramaPath);
+                return 1;
+            }
+            if (renderer.loadHdrPanorama(panoramaPath) != RendererResult::Success) {
+                spdlog::error("Could not load synthetic panorama: {}", renderer.getLastError());
+                return 1;
+            }
+        }
+
         ViewerState state;
         state.light       = preset->light;
         state.shadow      = preset->shadow;
         state.tonemap     = preset->tonemap;
         state.sky         = preset->sky;
         state.debugView   = preset->debug;
+        state.culling     = preset->culling;
+        state.ibl         = preset->ibl;
+        state.ao          = preset->ao;
         state.antiAliasing = preset->antiAliasing;
 
         const glm::vec3 cameraPosition = preset->camera.boundsRelative
@@ -364,11 +472,16 @@ int runCaptureMode(const CaptureOptions& options)
 
         const RenderFramePacket packet = buildRenderFramePacket(camera, state);
 
+        CaptureTimingAccumulator timing;
         for (uint32_t frame = 0; frame < options.frameCount; ++frame) {
             if (renderer.renderFrame(packet) == RendererResult::Error) {
                 spdlog::error("Renderer frame failed for preset '{}': {}",
                               preset->id, renderer.getLastError());
                 return 1;
+            }
+            // GPU timings lag one frame and the first frames include pipeline warmup.
+            if (frame >= options.frameCount / 2) {
+                timing.add(renderer.getRenderStats());
             }
         }
 
@@ -378,6 +491,11 @@ int runCaptureMode(const CaptureOptions& options)
             spdlog::error("Renderer frame failed while capturing preset '{}': {}",
                           preset->id, renderer.getLastError());
             return 1;
+        }
+
+        const std::string statsPath = options.outputDir + "/" + preset->id + ".json";
+        if (!writeCaptureStats(statsPath, timing, renderer.getRenderStats())) {
+            spdlog::warn("Could not write capture stats '{}'", statsPath);
         }
 
         spdlog::info("Captured preset '{}' -> {}", preset->id, outputPath);

@@ -1,0 +1,41 @@
+#version 460 core
+#extension GL_GOOGLE_include_directive : require
+
+// Diffuse irradiance: cosine-weighted integral of the environment over the hemisphere
+// around each output direction, divided by pi, so that diffuse = albedo * sample.
+// The integral runs over every texel of a low environment mip (solid-angle weighted).
+
+#include "equirect.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0, set = 0, rgba16f) uniform writeonly image2D outIrradiance;
+layout(binding = 1, set = 0) uniform sampler2D environment;
+
+layout(push_constant) uniform IrradiancePC {
+    int sourceLod;
+} pc;
+
+void main()
+{
+    ivec2 size  = imageSize(outIrradiance);
+    ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(texel, size))) return;
+
+    vec3 normal = equirectToDir((vec2(texel) + 0.5) / vec2(size));
+
+    ivec2 srcSize = textureSize(environment, pc.sourceLod);
+    float texelArea = (2.0 * POR_PI / float(srcSize.x)) * (POR_PI / float(srcSize.y));
+    vec3 sum = vec3(0.0);
+    for (int y = 0; y < srcSize.y; ++y) {
+        for (int x = 0; x < srcSize.x; ++x) {
+            vec2 uv = (vec2(x, y) + 0.5) / vec2(srcSize);
+            vec3 dir = equirectToDir(uv);
+            float cosTheta = dot(normal, dir);
+            if (cosTheta <= 0.0) continue;
+            float solidAngle = texelArea * cos((0.5 - uv.y) * POR_PI);
+            sum += texelFetch(environment, ivec2(x, y), pc.sourceLod).rgb * cosTheta * solidAngle;
+        }
+    }
+    imageStore(outIrradiance, texel, vec4(sum / POR_PI, 1.0));
+}

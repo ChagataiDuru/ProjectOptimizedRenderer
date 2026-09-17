@@ -34,6 +34,12 @@ public:
 
     void shutdown(VkDevice device);
 
+    // Panorama access for the IBL bake. The generation increments on every load.
+    VkImageView panoramaView() const { return m_panorama.getImageView(); }
+    VkSampler   panoramaSampler() const { return m_panoramaSampler; }
+    uint32_t    panoramaWidth() const { return m_panorama.getExtent().width; }
+    uint64_t    panoramaGeneration() const { return m_panoramaGeneration; }
+
 private:
     Image                 m_panorama;
     VkSampler             m_panoramaSampler = VK_NULL_HANDLE;
@@ -48,4 +54,5 @@ private:
     bool                  m_sampleShadingEnabled = false;
     float                 m_minSampleShading = 0.0f;
     std::string           m_shaderDir;
+    uint64_t              m_panoramaGeneration = 0;
 };

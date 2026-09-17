@@ -1,0 +1,55 @@
+#version 460 core
+#extension GL_GOOGLE_include_directive : require
+
+// Split-sum specular prefilter (N = V = R) for one output mip. Filtered importance
+// sampling picks the environment LOD from the sample's pdf to avoid fireflies.
+
+#include "equirect.glsl"
+#include "ibl_sampling.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0, set = 0, rgba16f) uniform writeonly image2D outPrefiltered;
+layout(binding = 1, set = 0) uniform sampler2D environment;
+
+layout(push_constant) uniform PrefilterPC {
+    float roughness;
+    uint  sampleCount;
+    float environmentWidth;
+    float environmentHeight;
+} pc;
+
+void main()
+{
+    ivec2 size  = imageSize(outPrefiltered);
+    ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(texel, size))) return;
+
+    vec3 N = equirectToDir((vec2(texel) + 0.5) / vec2(size));
+
+    if (pc.roughness <= 0.0) {
+        imageStore(outPrefiltered, texel, vec4(textureLod(environment, dirToEquirect(N), 0.0).rgb, 1.0));
+        return;
+    }
+
+    // Average solid angle of one level-0 environment texel.
+    float texelSolidAngle = 4.0 * POR_PI / (pc.environmentWidth * pc.environmentHeight);
+
+    vec3 sum = vec3(0.0);
+    float weight = 0.0;
+    for (uint i = 0u; i < pc.sampleCount; ++i) {
+        vec3 H = importanceSampleGGX(hammersley(i, pc.sampleCount), N, pc.roughness);
+        vec3 L = normalize(2.0 * dot(N, H) * H - N);
+        float NdotL = dot(N, L);
+        if (NdotL <= 0.0) continue;
+
+        float NdotH = max(dot(N, H), 0.0);
+        float pdf = ggxDistribution(NdotH, pc.roughness) * 0.25;   // N = V
+        float sampleSolidAngle = 1.0 / (float(pc.sampleCount) * pdf + 1e-6);
+        float lod = max(0.5 * log2(sampleSolidAngle / texelSolidAngle) + 1.0, 0.0);
+
+        sum += textureLod(environment, dirToEquirect(L), lod).rgb * NdotL;
+        weight += NdotL;
+    }
+    imageStore(outPrefiltered, texel, vec4(sum / max(weight, 1e-4), 1.0));
+}

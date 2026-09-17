@@ -194,6 +194,64 @@ std::vector<CapturePreset> buildCapturePresets()
         presets.back().shadow.enableCasterCulling = culling;
     }
 
+    // Image-based ambient lighting (ART-LGT-004).
+    presets.push_back(makeBase("ibl-off", "Default framing with flat ambient instead of IBL"));
+    presets.back().ibl.enabled = false;
+
+    presets.push_back(makeBase("ibl-off-interior", "Interior framing with flat ambient instead of IBL"));
+    setInteriorCamera(presets.back());
+    presets.back().ibl.enabled = false;
+
+    presets.push_back(makeBase("ibl-panorama-interior",
+                               "Interior framing lit by a synthetic HDR panorama"));
+    setInteriorCamera(presets.back());
+    presets.back().sky.mode = 1;
+    presets.back().syntheticPanorama = true;
+
+    // Screen-space ambient occlusion (ART-LGT-005).
+    presets.push_back(makeBase("ao-off-interior", "Interior framing with AO disabled"));
+    setInteriorCamera(presets.back());
+    presets.back().ao.enabled = false;
+
+    presets.push_back(makeBase("ao-debug-interior", "Interior framing showing the AO buffer"));
+    setInteriorCamera(presets.back());
+    presets.back().ao.debugView = true;
+
+    presets.push_back(makeBase("ao-on-exterior", "Default framing with AO enabled"));
+
+    // The depth prepass must not change the image (compared with AO off, since AO
+    // requires the prepass).
+    presets.push_back(makeBase("perf-prepass-on-noao", "Default framing, prepass on, AO off"));
+    presets.back().ao.enabled = false;
+
+    presets.push_back(makeBase("perf-prepass-off-noao", "Default framing, prepass off, AO off"));
+    presets.back().ao.enabled = false;
+    presets.back().culling.enableDepthPrepass = false;
+
+    presets.push_back(makeBase("perf-prepass-on-noao-interior", "Interior, prepass on, AO off"));
+    setInteriorCamera(presets.back());
+    presets.back().ao.enabled = false;
+
+    presets.push_back(makeBase("perf-prepass-off-noao-interior", "Interior, prepass off, AO off"));
+    setInteriorCamera(presets.back());
+    presets.back().ao.enabled = false;
+    presets.back().culling.enableDepthPrepass = false;
+
+    // Main-pass visibility must not change the image (must-match against the defaults).
+    presets.push_back(makeBase("perf-culling-off", "Default framing, main-pass frustum culling off"));
+    presets.back().culling.enableFrustumCulling = false;
+
+    presets.push_back(makeBase("perf-culling-off-interior", "Interior framing, main-pass frustum culling off"));
+    setInteriorCamera(presets.back());
+    presets.back().culling.enableFrustumCulling = false;
+
+    presets.push_back(makeBase("perf-sort-off", "Default framing, draw sorting off"));
+    presets.back().culling.sortDraws = false;
+
+    presets.push_back(makeBase("perf-sort-off-interior", "Interior framing, draw sorting off"));
+    setInteriorCamera(presets.back());
+    presets.back().culling.sortDraws = false;
+
     return presets;
 }
 

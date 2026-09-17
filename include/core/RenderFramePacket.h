@@ -11,4 +11,7 @@ struct RenderFramePacket {
     TonemapSettings tonemap;
     SkySettings sky;
     DebugViewSettings debug;
+    CullingSettings culling;
+    IblSettings ibl;
+    AmbientOcclusionSettings ao;
 };

@@ -330,6 +330,15 @@ RendererDeviceFeatures VulkanContext::queryRendererDeviceFeatures(VkPhysicalDevi
     result.descriptorIndexing = vk12.descriptorIndexing == VK_TRUE;
     result.timelineSemaphore = vk12.timelineSemaphore == VK_TRUE;
     result.sampleRateShading = features.features.sampleRateShading == VK_TRUE;
+
+    VkPhysicalDeviceDepthStencilResolveProperties depthResolveProps{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES
+    };
+    VkPhysicalDeviceProperties2 deviceProps2{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &depthResolveProps
+    };
+    vkGetPhysicalDeviceProperties2(device, &deviceProps2);
+    result.supportedDepthResolveModes = depthResolveProps.supportedDepthResolveModes;
     result.supportedSceneSampleCounts = sampleCountFlagsToArray(sceneCounts);
     return result;
 }

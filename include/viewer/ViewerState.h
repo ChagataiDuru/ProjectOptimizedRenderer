@@ -11,6 +11,9 @@ struct ViewerState {
     TonemapSettings tonemap;
     SkySettings sky;
     DebugViewSettings debugView;
+    CullingSettings culling;
+    IblSettings ibl;
+    AmbientOcclusionSettings ao;
     AntiAliasingSettings antiAliasing;
 
     int selectedMeshIndex = -1;

@@ -33,6 +33,10 @@ struct RendererDeviceFeatures {
     bool timelineSemaphore = false;
     bool sampleRateShading = false;
 
+    // Depth resolve modes usable for MSAA depth (Vulkan 1.2 core). Reverse-Z wants MAX
+    // (the largest value is the closest sample); SAMPLE_ZERO is the fallback.
+    VkResolveModeFlags supportedDepthResolveModes = 0;
+
     // Scene sample support for 1x, 2x, 4x, and 8x in that order.
     std::array<bool, 4> supportedSceneSampleCounts = { true, false, false, false };
 };
