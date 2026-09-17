@@ -130,6 +130,14 @@ void registerViewerPanels(ImGuiManager& imguiManager,
         ImGui::SliderFloat("Ambient", &state.light.ambient, 0.0f, 1.0f);
 
         ImGui::Separator();
+        ImGui::Checkbox("Ambient occlusion (SSAO)", &state.ao.enabled);
+        if (state.ao.enabled) {
+            ImGui::SliderFloat("AO Radius", &state.ao.radius, 0.05f, 2.0f, "%.2f");
+            ImGui::SliderFloat("AO Strength", &state.ao.intensity, 0.0f, 1.0f, "%.2f");
+            ImGui::Checkbox("AO Debug View", &state.ao.debugView);
+        }
+
+        ImGui::Separator();
         ImGui::Checkbox("Image-based ambient (IBL)", &state.ibl.enabled);
         if (state.ibl.enabled) {
             ImGui::SliderFloat("IBL Intensity", &state.ibl.intensity, 0.0f, 4.0f, "%.2f");
@@ -349,6 +357,8 @@ void registerViewerPanels(ImGuiManager& imguiManager,
                     stats.estimatedMsaaAttachmentMemoryBytes / (1024.0f * 1024.0f));
         ImGui::Text("Culled draws: %u", stats.culledDrawCalls);
         ImGui::Text("IBL bakes: %u (%.3f ms)", stats.iblBakeCount, stats.iblBakeGpuMs);
+        ImGui::Checkbox("Depth prepass", &state.culling.enableDepthPrepass);
+        ImGui::Text("Prepass GPU: %.3f ms   AO GPU: %.3f ms", stats.prepassGpuMs, stats.aoGpuMs);
         ImGui::Checkbox("Frustum culling", &state.culling.enableFrustumCulling);
         ImGui::SameLine();
         ImGui::Checkbox("Sort draws", &state.culling.sortDraws);

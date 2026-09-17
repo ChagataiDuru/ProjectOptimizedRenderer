@@ -13,6 +13,7 @@ struct ViewerState {
     DebugViewSettings debugView;
     CullingSettings culling;
     IblSettings ibl;
+    AmbientOcclusionSettings ao;
     AntiAliasingSettings antiAliasing;
 
     int selectedMeshIndex = -1;

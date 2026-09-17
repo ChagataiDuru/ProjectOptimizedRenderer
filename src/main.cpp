@@ -47,6 +47,7 @@ RenderFramePacket buildRenderFramePacket(const Camera& camera, const ViewerState
     packet.debug             = state.debugView;
     packet.culling           = state.culling;
     packet.ibl               = state.ibl;
+    packet.ao                = state.ao;
     return packet;
 }
 
@@ -292,6 +293,8 @@ struct CaptureTimingAccumulator {
     double clusterMs = 0.0;
     double sceneMs = 0.0;
     double tonemapMs = 0.0;
+    double prepassMs = 0.0;
+    double aoMs = 0.0;
     double totalMs = 0.0;
 
     void add(const Renderer::RenderStats& stats)
@@ -302,6 +305,8 @@ struct CaptureTimingAccumulator {
         clusterMs += stats.clusterGpuMs;
         sceneMs += stats.sceneGpuMs;
         tonemapMs += stats.tonemapGpuMs;
+        prepassMs += stats.prepassGpuMs;
+        aoMs += stats.aoGpuMs;
         totalMs += stats.totalGpuFrameMs;
     }
 };
@@ -323,6 +328,8 @@ bool writeCaptureStats(const std::string& path,
         << "    \"cluster\": " << timing.clusterMs / n << ",\n"
         << "    \"scene\": " << timing.sceneMs / n << ",\n"
         << "    \"tonemap\": " << timing.tonemapMs / n << ",\n"
+        << "    \"prepass\": " << timing.prepassMs / n << ",\n"
+        << "    \"ao\": " << timing.aoMs / n << ",\n"
         << "    \"total\": " << timing.totalMs / n << "\n"
         << "  },\n"
         << "  \"draw_calls\": " << last.drawCalls << ",\n"
@@ -453,6 +460,7 @@ int runCaptureMode(const CaptureOptions& options)
         state.debugView   = preset->debug;
         state.culling     = preset->culling;
         state.ibl         = preset->ibl;
+        state.ao          = preset->ao;
         state.antiAliasing = preset->antiAliasing;
 
         const glm::vec3 cameraPosition = preset->camera.boundsRelative

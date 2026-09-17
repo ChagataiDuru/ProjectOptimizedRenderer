@@ -180,6 +180,8 @@ Renderer::Renderer(VulkanContext& ctx, Swapchain& swapchain)
     , m_clusteredLightCullingPass(ctx)
     , m_skyPass(ctx)
     , m_iblPass(ctx)
+    , m_gtaoPass(ctx)
+    , m_resolvedDepthTarget(ctx)
     , m_gpuTimer(ctx)
     , m_screenshot(ctx)
 {
@@ -209,6 +211,7 @@ void Renderer::init()
                    SHADER_DIR);
     m_iblPass.init(SHADER_DIR, m_skyPass.panoramaView(), m_skyPass.panoramaSampler(),
                    m_skyPass.panoramaWidth());
+    m_gtaoPass.init(SHADER_DIR);
     createFrameResources();
     createClusteredLightResources();
     m_shadowPass.init(m_pipelineLayout, kFramesInFlight, SHADER_DIR);
@@ -270,7 +273,12 @@ void Renderer::shutdown()
         m_hdrSampler = VK_NULL_HANDLE;
     }
 
+    m_gtaoPass.shutdown(m_ctx.getDevice());
     m_iblPass.shutdown(m_ctx.getDevice());
+    if (m_depthSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(m_ctx.getDevice(), m_depthSampler, nullptr);
+        m_depthSampler = VK_NULL_HANDLE;
+    }
     m_skyPass.shutdown(m_ctx.getDevice());
     m_clusteredLightCullingPass.shutdown(m_ctx.getDevice());
     m_shadowPass.shutdown(m_ctx.getDevice());
@@ -425,6 +433,8 @@ void Renderer::refreshTimingStats()
         m_renderStats.iblBakeGpuMs = iblBakeMs;
     }
     m_renderStats.iblBakeCount = m_iblPass.bakeCount();
+    m_renderStats.prepassGpuMs = m_gpuTimer.getElapsedMs("DepthPrepass_Begin", "DepthPrepass_End");
+    m_renderStats.aoGpuMs = m_gpuTimer.getElapsedMs("Gtao_Begin", "Gtao_End");
     const float imguiMs = m_gpuTimer.getElapsedMs("TonemapPass_End", "ImGuiPass_End");
     m_renderStats.totalGpuFrameMs =
         m_renderStats.shadowGpuMs + m_renderStats.blurGpuMs + m_renderStats.clusterGpuMs +
@@ -510,7 +520,7 @@ void Renderer::setAntiAliasingSettings(const AntiAliasingSettings& settings)
 void Renderer::createPbrPipeline()
 {
     // Descriptor set layout: set 0 — camera(b0), light(b1), shadowUBO(b2), depth array(b3), moments(b4).
-    const std::array<VkDescriptorSetLayoutBinding, 12> setBindings{{
+    const std::array<VkDescriptorSetLayoutBinding, 13> setBindings{{
         {   // binding 0: camera matrices — read in vertex + fragment shaders
             .binding         = shader_interface::scene_binding::kCamera,
             .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -581,6 +591,12 @@ void Renderer::createPbrPipeline()
         },
         {
             .binding         = shader_interface::scene_binding::kIblBrdfLut,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
+        },
+        {   // binding 12: screen-space ambient occlusion (GtaoPass)
+            .binding         = shader_interface::scene_binding::kAmbientOcclusion,
             .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
             .descriptorCount = 1,
             .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -760,10 +776,14 @@ void Renderer::createPbrGraphicsPipelines()
         .pAttachments    = &blendAttachment,
     };
 
-    const std::array<VkDynamicState, 3> dynamicStates = {
+    const std::array<VkDynamicState, 5> dynamicStates = {
         VK_DYNAMIC_STATE_VIEWPORT,
         VK_DYNAMIC_STATE_SCISSOR,
         VK_DYNAMIC_STATE_CULL_MODE,
+        // Set per draw: EQUAL without depth writes for draws the prepass already
+        // covered, GREATER with writes otherwise (ART-PRF-002).
+        VK_DYNAMIC_STATE_DEPTH_COMPARE_OP,
+        VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE,
     };
     const VkPipelineDynamicStateCreateInfo dynamicState{
         .sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
@@ -834,6 +854,77 @@ void Renderer::createPbrGraphicsPipelines()
     m_wireframePipeline = pipelines[pipelineIndex++];
     m_normalsPipeline   = pipelines[pipelineIndex++];
 
+    // ── Depth prepass pipelines (depth only, no colour attachment) ───────────
+    // Same vertex shader and vertex layout as the scene pass so the depth values
+    // match exactly; the masked variant repeats pbr.frag's alpha cutout.
+    {
+        VkShaderModule prepassVert = makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/pbr.vert.spv"));
+        VkShaderModule prepassAlphaFrag =
+            makeShaderModule(m_ctx.getDevice(), loadSpv(dir + "/pbr_prepass_alpha.frag.spv"));
+
+        const VkPipelineShaderStageCreateInfo vertStage{
+            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage  = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = prepassVert,
+            .pName  = "main",
+        };
+        const std::array<VkPipelineShaderStageCreateInfo, 2> maskedStages{{
+            vertStage,
+            {
+                .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .stage  = VK_SHADER_STAGE_FRAGMENT_BIT,
+                .module = prepassAlphaFrag,
+                .pName  = "main",
+            },
+        }};
+
+        const VkPipelineDepthStencilStateCreateInfo prepassDepth{
+            .sType            = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+            .depthTestEnable  = VK_TRUE,
+            .depthWriteEnable = VK_TRUE,
+            .depthCompareOp   = VK_COMPARE_OP_GREATER,
+        };
+        const VkPipelineColorBlendStateCreateInfo prepassBlend{
+            .sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+            .attachmentCount = 0,
+        };
+        const VkPipelineRenderingCreateInfo prepassRendering{
+            .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+            .colorAttachmentCount    = 0,
+            .depthAttachmentFormat   = VK_FORMAT_D32_SFLOAT,
+            .stencilAttachmentFormat = VK_FORMAT_UNDEFINED,
+        };
+        const std::array<VkDynamicState, 3> prepassDynamicStates = {
+            VK_DYNAMIC_STATE_VIEWPORT,
+            VK_DYNAMIC_STATE_SCISSOR,
+            VK_DYNAMIC_STATE_CULL_MODE,
+        };
+        const VkPipelineDynamicStateCreateInfo prepassDynamicState{
+            .sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+            .dynamicStateCount = static_cast<uint32_t>(prepassDynamicStates.size()),
+            .pDynamicStates    = prepassDynamicStates.data(),
+        };
+
+        VkGraphicsPipelineCreateInfo opaqueInfo = makeGraphicsPipelineCreateInfo(
+            prepassRendering, &vertStage, 1, vertexInput, inputAssembly, viewportState,
+            rasterization, multisample, prepassDepth, prepassBlend, prepassDynamicState,
+            m_pipelineLayout);
+        VkGraphicsPipelineCreateInfo maskedInfo = opaqueInfo;
+        maskedInfo.pStages = maskedStages.data();
+        maskedInfo.stageCount = static_cast<uint32_t>(maskedStages.size());
+
+        const std::array<VkGraphicsPipelineCreateInfo, 2> prepassInfos{ opaqueInfo, maskedInfo };
+        std::array<VkPipeline, 2> prepassPipelines{};
+        VK_CHECK(vkCreateGraphicsPipelines(m_ctx.getDevice(), VK_NULL_HANDLE,
+                                           static_cast<uint32_t>(prepassInfos.size()),
+                                           prepassInfos.data(), nullptr, prepassPipelines.data()));
+        m_depthPrepassPipeline = prepassPipelines[0];
+        m_depthPrepassMaskedPipeline = prepassPipelines[1];
+
+        vkDestroyShaderModule(m_ctx.getDevice(), prepassVert, nullptr);
+        vkDestroyShaderModule(m_ctx.getDevice(), prepassAlphaFrag, nullptr);
+    }
+
     vkDestroyShaderModule(m_ctx.getDevice(), m_vertModule, nullptr);         m_vertModule        = VK_NULL_HANDLE;
     vkDestroyShaderModule(m_ctx.getDevice(), m_fragModule, nullptr);         m_fragModule        = VK_NULL_HANDLE;
     vkDestroyShaderModule(m_ctx.getDevice(), m_normalsFragModule, nullptr);  m_normalsFragModule = VK_NULL_HANDLE;
@@ -854,6 +945,8 @@ void Renderer::destroyPbrGraphicsPipelines()
     if (m_maskedA2cPipeline  != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_maskedA2cPipeline, nullptr);            m_maskedA2cPipeline = VK_NULL_HANDLE; }
     if (m_wireframePipeline  != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_wireframePipeline, nullptr);            m_wireframePipeline = VK_NULL_HANDLE; }
     if (m_normalsPipeline    != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_normalsPipeline, nullptr);              m_normalsPipeline   = VK_NULL_HANDLE; }
+    if (m_depthPrepassPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_depthPrepassPipeline, nullptr);        m_depthPrepassPipeline = VK_NULL_HANDLE; }
+    if (m_depthPrepassMaskedPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(dev, m_depthPrepassMaskedPipeline, nullptr); m_depthPrepassMaskedPipeline = VK_NULL_HANDLE; }
 }
 
 void Renderer::destroyPipeline()
@@ -920,6 +1013,10 @@ Renderer::LightUBO Renderer::buildCurrentLightUBO() const
         m_iblSettings.enabled ? 1u : 0u,
         std::max(m_iblSettings.intensity, 0.0f),
         m_iblPass.prefilteredMaxLod(),
+        (m_aoSettings.enabled && isDepthPrepassActive()) ? 1u : 0u,
+        std::clamp(m_aoSettings.intensity, 0.0f, 1.0f),
+        m_aoSettings.debugView ? 1u : 0u,
+        0.0f,
         0.0f,
     };
 }
@@ -1096,6 +1193,7 @@ void Renderer::applyFrameSubmission(const RenderFramePacket& packet)
     m_showNormals = packet.debug.showNormals;
 
     m_cullingSettings = packet.culling;
+    m_aoSettings = packet.ao;
 }
 
 void Renderer::uploadCurrentFrameCameraState(const CameraData& camera)
@@ -1192,6 +1290,36 @@ void Renderer::uploadClusterMetadataForAllFrames()
     }
 }
 
+bool Renderer::isDepthPrepassActive() const
+{
+    // AO needs prepass depth, so enabling AO implies the prepass.
+    return m_cullingSettings.enableDepthPrepass || m_aoSettings.enabled;
+}
+
+void Renderer::rewriteFrameSceneAoBinding()
+{
+    if (m_frameResources.empty() || !m_gtaoPass.isReady()) {
+        return;
+    }
+    const VkDescriptorImageInfo aoInfo{
+        .sampler     = m_gtaoPass.aoSampler(),
+        .imageView   = m_gtaoPass.aoView(),
+        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
+    for (auto& frame : m_frameResources) {
+        if (frame.sceneDescriptorSet == VK_NULL_HANDLE) continue;
+        const VkWriteDescriptorSet write{
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet          = frame.sceneDescriptorSet,
+            .dstBinding      = shader_interface::scene_binding::kAmbientOcclusion,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo      = &aoInfo,
+        };
+        vkUpdateDescriptorSets(m_ctx.getDevice(), 1, &write, 0, nullptr);
+    }
+}
+
 void Renderer::rewriteFrameSceneClusterBindings()
 {
     if (m_frameResources.empty() ||
@@ -1265,10 +1393,35 @@ void Renderer::createSceneDepthTarget()
     // D32_SFLOAT: 32-bit float depth, no stencil, optimal for reverse-Z precision
     m_sceneDepthTarget.create(ext.width, ext.height, 1,
                               VK_FORMAT_D32_SFLOAT,
-                              VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                              VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                                  VK_IMAGE_USAGE_SAMPLED_BIT,
                               VK_IMAGE_ASPECT_DEPTH_BIT,
                               1,
                               getActiveSceneSampleCount());
+
+    // Single-sample copy of the scene depth for AO. With MSAA it is produced by the
+    // prepass depth resolve; without MSAA the scene depth is sampled directly.
+    if (isMsaaEnabled()) {
+        m_resolvedDepthTarget.create(ext.width, ext.height, 1,
+                                     VK_FORMAT_D32_SFLOAT,
+                                     VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                                         VK_IMAGE_USAGE_SAMPLED_BIT,
+                                     VK_IMAGE_ASPECT_DEPTH_BIT);
+    }
+
+    if (m_depthSampler == VK_NULL_HANDLE) {
+        const VkSamplerCreateInfo samplerCI{
+            .sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            .magFilter    = VK_FILTER_NEAREST,
+            .minFilter    = VK_FILTER_NEAREST,
+            .mipmapMode   = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+            .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .maxLod       = 0.0f,
+        };
+        VK_CHECK(vkCreateSampler(m_ctx.getDevice(), &samplerCI, nullptr, &m_depthSampler));
+    }
 
     spdlog::info("Scene depth target created: {}x{} D32_SFLOAT (reverse-Z, {}x)",
                  ext.width, ext.height,
@@ -1300,6 +1453,7 @@ void Renderer::destroyResizeDependentResources()
     m_msaaHdrTarget.destroy();
     m_resolvedHdrTarget.destroy();
     m_sceneDepthTarget.destroy();
+    m_resolvedDepthTarget.destroy();
 }
 
 void Renderer::recreateResizeDependentResources()
@@ -1314,6 +1468,16 @@ void Renderer::refreshResizeDependentBindings()
     // point at resize-dependent cluster resources.
     rewriteFrameSceneClusterBindings();
     uploadClusterMetadataForAllFrames();
+
+    // AO reads the single-sample depth image; its own targets follow the swapchain size.
+    const VkExtent2D aoExtent = m_swapchain.getExtent();
+    const VkImageView aoDepthView = isMsaaEnabled()
+        ? m_resolvedDepthTarget.getImageView()
+        : m_sceneDepthTarget.getImageView();
+    if (aoDepthView != VK_NULL_HANDLE && m_depthSampler != VK_NULL_HANDLE) {
+        m_gtaoPass.resize(aoExtent.width, aoExtent.height, aoDepthView, m_depthSampler);
+        rewriteFrameSceneAoBinding();
+    }
 
     // TonemapPass owns its descriptor set, but Renderer owns the resolved HDR target it samples.
     if (getResolvedHdrView() != VK_NULL_HANDLE) {
@@ -1378,7 +1542,7 @@ void Renderer::createFrameSceneDescriptorPool()
         },
         {
             .type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = 5 * sceneSetCount,
+            .descriptorCount = 6 * sceneSetCount,
         },
         {
             .type            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -1823,6 +1987,122 @@ bool Renderer::beginFrame()
     return true;
 }
 
+void Renderer::recordDepthPrepass(VkCommandBuffer cmd, const FrameResources& frame)
+{
+    const VkExtent2D ext = m_swapchain.getExtent();
+    const auto& meshes = m_resources.meshes();
+    const auto& materials = m_resources.materials();
+    const bool msaa = isMsaaEnabled();
+
+    // Reverse-Z: clear to 0 (far). The resolve produces the single-sample depth AO reads;
+    // MAX keeps the closest sample, falling back to SAMPLE_ZERO when unsupported.
+    const VkResolveModeFlags supportedResolves =
+        m_ctx.getDeviceFeatures().supportedDepthResolveModes;
+    const VkResolveModeFlagBits resolveMode =
+        (supportedResolves & VK_RESOLVE_MODE_MAX_BIT) ? VK_RESOLVE_MODE_MAX_BIT
+                                                      : VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
+    const bool resolveDepth = msaa && m_resolvedDepthTarget.getImageView() != VK_NULL_HANDLE;
+    if (resolveDepth) {
+        vkutil::transitionImage(cmd, m_resolvedDepthTarget.getImage(),
+            VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+            VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+                VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_ASPECT_DEPTH_BIT);
+    }
+
+    const VkRenderingAttachmentInfo depthAttachment{
+        .sType              = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView          = m_sceneDepthTarget.getImageView(),
+        .imageLayout        = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        .resolveMode        = resolveDepth ? resolveMode : VK_RESOLVE_MODE_NONE,
+        .resolveImageView   = resolveDepth ? m_resolvedDepthTarget.getImageView() : VK_NULL_HANDLE,
+        .resolveImageLayout = resolveDepth ? VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL
+                                           : VK_IMAGE_LAYOUT_UNDEFINED,
+        .loadOp             = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp            = VK_ATTACHMENT_STORE_OP_STORE,
+        .clearValue         = { .depthStencil = { 0.0f, 0 } },
+    };
+    const VkRenderingInfo renderingInfo{
+        .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
+        .renderArea           = { .offset = { 0, 0 }, .extent = ext },
+        .layerCount           = 1,
+        .colorAttachmentCount = 0,
+        .pDepthAttachment     = &depthAttachment,
+    };
+
+    m_gpuTimer.writeTimestamp(cmd, "DepthPrepass_Begin");
+    vkCmdBeginRendering(cmd, &renderingInfo);
+
+    const VkViewport viewport{
+        .x = 0.0f, .y = 0.0f,
+        .width = static_cast<float>(ext.width), .height = static_cast<float>(ext.height),
+        .minDepth = 0.0f, .maxDepth = 1.0f,
+    };
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    const VkRect2D scissor{ .offset = { 0, 0 }, .extent = ext };
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout,
+                            shader_interface::kSceneSet, 1, &frame.sceneDescriptorSet, 0, nullptr);
+
+    const VkDeviceSize vertexOffset = 0;
+    const VkBuffer vertexBuf = m_resources.vertexBuffer().getBuffer();
+    vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuf, &vertexOffset);
+    vkCmdBindIndexBuffer(cmd, m_resources.indexBuffer().getBuffer(), 0, VK_INDEX_TYPE_UINT32);
+
+    VkPipeline boundPipeline = VK_NULL_HANDLE;
+    VkCullModeFlags boundCullMode = VK_CULL_MODE_FRONT_AND_BACK;
+    const auto& draws = m_activeScene.submission.draws;
+    for (const uint32_t drawIndex : m_visibleDrawOrder) {
+        const DrawCommand& draw = draws[drawIndex];
+        if (!draw.mesh.isValid() || draw.mesh.index >= meshes.size()) continue;
+        const bool alphaMasked = isDrawAlphaMasked(draw);
+        // Alpha-to-coverage draws resolve their own coverage in the scene pass, so they
+        // are left out of the prepass and keep writing depth there.
+        if (alphaMasked && isAlphaToCoverageActive()) continue;
+
+        const VkPipeline pipeline = alphaMasked ? m_depthPrepassMaskedPipeline
+                                                : m_depthPrepassPipeline;
+        if (pipeline != boundPipeline) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+            boundPipeline = pipeline;
+        }
+        const bool doubleSided =
+            !draw.material.isValid() || draw.material.index >= materials.size() ||
+            materials[draw.material.index].doubleSided;
+        const VkCullModeFlags cullMode = doubleSided ? VK_CULL_MODE_NONE : VK_CULL_MODE_BACK_BIT;
+        if (cullMode != boundCullMode) {
+            vkCmdSetCullMode(cmd, cullMode);
+            boundCullMode = cullMode;
+        }
+
+        vkCmdPushConstants(cmd, m_pipelineLayout,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           shader_interface::kModelMatrixPcOffset, sizeof(glm::mat4), &draw.transform);
+        if (alphaMasked && draw.material.index < m_materialDescriptorSets.size()) {
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout,
+                                    shader_interface::kMaterialSet, 1,
+                                    &m_materialDescriptorSets[draw.material.index], 0, nullptr);
+            const Material& mat = materials[draw.material.index];
+            const MaterialPushConstants matPC{
+                .baseColorFactor  = mat.baseColorFactor,
+                .metallicFactor   = mat.metallicFactor,
+                .roughnessFactor  = mat.roughnessFactor,
+                .alphaCutoff      = mat.alphaCutoff,
+                .alphaCoverageMode = 0.0f,
+            };
+            vkCmdPushConstants(cmd, m_pipelineLayout,
+                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                               shader_interface::kMaterialPcOffset, sizeof(matPC), &matPC);
+        }
+        vkCmdDrawIndexed(cmd, meshes[draw.mesh.index].indexCount, 1,
+                         meshes[draw.mesh.index].firstIndex, 0, 0);
+    }
+
+    vkCmdEndRendering(cmd);
+    m_gpuTimer.writeTimestamp(cmd, "DepthPrepass_End");
+}
+
 void Renderer::render(RendererOverlay* overlay)
 {
     VkCommandBuffer cmd = m_commandBuffer.getFrameCommandBuffer();
@@ -1935,14 +2215,49 @@ void Renderer::render(RendererOverlay* overlay)
             VK_IMAGE_LAYOUT_UNDEFINED,                          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     }
 
-    // Scene depth transitions from UNDEFINED each frame — LOAD_OP_CLEAR discards previous
-    // contents anyway, so UNDEFINED→DEPTH_ATTACHMENT_OPTIMAL is valid and avoids layout tracking.
+    // Scene depth transitions from UNDEFINED each frame — the first pass to touch it
+    // clears it, so UNDEFINED→DEPTH_ATTACHMENT_OPTIMAL is valid and avoids layout tracking.
     vkutil::transitionImage(cmd, m_sceneDepthTarget.getImage(),
         VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,              0,
         VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
             VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
         VK_IMAGE_LAYOUT_UNDEFINED,                         VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
         VK_IMAGE_ASPECT_DEPTH_BIT);
+
+    // Visibility is shared by the prepass and the scene pass.
+    if (hasSceneGeometry) {
+        buildVisibleDrawOrder();
+    }
+
+    // ── Depth prepass + screen-space AO ──────────────────────────────────────
+    const bool prepassActive = hasSceneGeometry && isDepthPrepassActive();
+    if (prepassActive) {
+        recordDepthPrepass(cmd, frame);
+
+        if (m_aoSettings.enabled && m_gtaoPass.isReady()) {
+            const bool msaaDepth = isMsaaEnabled() &&
+                                   m_resolvedDepthTarget.getImageView() != VK_NULL_HANDLE;
+            Image& aoDepthImage = msaaDepth ? m_resolvedDepthTarget : m_sceneDepthTarget;
+            vkutil::transitionImage(cmd, aoDepthImage.getImage(),
+                VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT, VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_IMAGE_ASPECT_DEPTH_BIT);
+
+            m_gtaoPass.record(cmd, glm::inverse(m_projMatrix),
+                              std::max(m_aoSettings.radius, 0.01f), 1.0f, &m_gpuTimer);
+
+            if (!msaaDepth) {
+                // The scene pass keeps rendering into this image, so hand it back.
+                vkutil::transitionImage(cmd, aoDepthImage.getImage(),
+                    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                    VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+                        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,    VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                    VK_IMAGE_ASPECT_DEPTH_BIT);
+            }
+        }
+    }
 
     // ── Scene pass → HDR offscreen target ────────────────────────────────────
     // Clear to black in linear space (sRGB 0.01 ≈ linear ~0.001; using 0 is visually identical).
@@ -1965,7 +2280,8 @@ void Renderer::render(RendererOverlay* overlay)
         .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
         .imageView   = m_sceneDepthTarget.getImageView(),
         .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-        .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        // With a prepass the depth is already complete: load it and test EQUAL.
+        .loadOp      = prepassActive ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR,
         .storeOp     = VK_ATTACHMENT_STORE_OP_DONT_CARE,  // not sampled after, no need to store
         .clearValue  = { .depthStencil = { 0.0f, 0 } },
     };
@@ -2009,6 +2325,7 @@ void Renderer::render(RendererOverlay* overlay)
     };
     // Dynamic cull mode must be set before the first PBR draw; the sentinel forces it.
     VkCullModeFlags boundCullMode = VK_CULL_MODE_FRONT_AND_BACK;
+    VkCompareOp boundDepthCompare = VK_COMPARE_OP_MAX_ENUM;
 
     // Bind camera UBO descriptor set (set=0, binding=0 — view/projection matrices)
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout,
@@ -2022,7 +2339,6 @@ void Renderer::render(RendererOverlay* overlay)
         vkCmdBindIndexBuffer(cmd, m_resources.indexBuffer().getBuffer(), 0, VK_INDEX_TYPE_UINT32);
 
         // Push normalization model matrix (bytes 0–63): same transform as shadow pass.
-        buildVisibleDrawOrder();
         const auto& draws = m_activeScene.submission.draws;
         for (const uint32_t drawIndex : m_visibleDrawOrder) {
             const DrawCommand& draw = draws[drawIndex];
@@ -2053,6 +2369,17 @@ void Renderer::render(RendererOverlay* overlay)
             if (cullMode != boundCullMode) {
                 vkCmdSetCullMode(cmd, cullMode);
                 boundCullMode = cullMode;
+            }
+
+            // Draws covered by the prepass test EQUAL and write no depth; A2C draws were
+            // skipped there, so they keep the regular GREATER test with depth writes.
+            const bool coveredByPrepass = prepassActive && !drawUsesAlphaCoverage;
+            const VkCompareOp depthCompare = coveredByPrepass ? VK_COMPARE_OP_EQUAL
+                                                              : VK_COMPARE_OP_GREATER;
+            if (depthCompare != boundDepthCompare) {
+                vkCmdSetDepthCompareOp(cmd, depthCompare);
+                vkCmdSetDepthWriteEnable(cmd, coveredByPrepass ? VK_FALSE : VK_TRUE);
+                boundDepthCompare = depthCompare;
             }
 
             vkCmdPushConstants(cmd, m_pipelineLayout,

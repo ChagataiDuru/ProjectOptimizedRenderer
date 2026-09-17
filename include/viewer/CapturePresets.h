@@ -35,6 +35,7 @@ struct CapturePreset {
     DebugViewSettings debug{};
     CullingSettings culling{};
     IblSettings ibl{};
+    AmbientOcclusionSettings ao{};
     AntiAliasingSettings antiAliasing{};
     CaptureCamera camera{};
 

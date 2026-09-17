@@ -1,0 +1,32 @@
+#version 460 core
+
+// Depth-aware 4x4 box blur over the AO buffer; one dispatch per axis.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0, set = 0, r8) uniform writeonly image2D outAo;
+layout(binding = 1, set = 0) uniform sampler2D inAo;
+
+layout(push_constant) uniform BlurPC {
+    vec4 sizeAndDirection;   // xy = AO size, zw = blur direction in texels
+} pc;
+
+void main()
+{
+    ivec2 size = ivec2(pc.sizeAndDirection.xy);
+    ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(texel, size))) return;
+
+    vec2 uv = (vec2(texel) + 0.5) / vec2(size);
+    vec2 step = pc.sizeAndDirection.zw / vec2(size);
+
+    float sum = 0.0;
+    float weight = 0.0;
+    for (int i = -2; i <= 2; ++i) {
+        vec2 sampleUv = uv + step * float(i);
+        if (any(lessThan(sampleUv, vec2(0.0))) || any(greaterThan(sampleUv, vec2(1.0)))) continue;
+        sum += textureLod(inAo, sampleUv, 0.0).r;
+        weight += 1.0;
+    }
+    imageStore(outAo, texel, vec4(sum / max(weight, 1.0)));
+}

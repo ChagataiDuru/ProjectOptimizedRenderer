@@ -38,7 +38,11 @@ layout(binding = 1, set = 0) uniform LightData {
     uint  iblEnabled;        // 0 = flat ambient, 1 = image-based ambient
     float iblIntensity;
     float iblPrefilteredMaxLod;
+    uint  aoEnabled;         // screen-space ambient occlusion (GtaoPass)
+    float aoIntensity;
+    uint  aoDebugView;       // 1 = output the AO term only
     float _pad0;
+    float _pad1;
 } light;
 
 layout(binding = 2, set = 0) uniform ShadowData {
@@ -84,6 +88,7 @@ layout(binding = 8, set = 0) uniform ClusterMetadata {
 layout(binding = 9, set = 0)  uniform sampler2D iblIrradiance;   // diffuse = albedo * sample
 layout(binding = 10, set = 0) uniform sampler2D iblPrefiltered;  // GGX, roughness = lod / maxLod
 layout(binding = 11, set = 0) uniform sampler2D iblBrdfLut;      // (scale, bias) by (NdotV, roughness)
+layout(binding = 12, set = 0) uniform sampler2D ambientOcclusion; // half-res screen-space AO
 
 #include "equirect.glsl"
 
@@ -371,7 +376,7 @@ float computeShadow(vec3 worldPos, out int cascadeIdx) {
 }
 
 // ── Image-based ambient ───────────────────────────────────────────────────────
-vec3 evaluateIbl(vec3 N, vec3 V, vec3 baseColor, float metallic, float roughness)
+vec3 evaluateIbl(vec3 N, vec3 V, vec3 baseColor, float metallic, float roughness, float ao)
 {
     float NdotV = clamp(dot(N, V), 1e-4, 1.0);
     vec3 F0 = mix(vec3(0.04), baseColor, metallic);
@@ -388,7 +393,11 @@ vec3 evaluateIbl(vec3 N, vec3 V, vec3 baseColor, float metallic, float roughness
     vec2 brdf = textureLod(iblBrdfLut, vec2(NdotV, roughness), 0.0).rg;
     vec3 specular = prefiltered * (F0 * brdf.x + brdf.y);
 
-    return diffuse + specular;
+    // Specular occlusion from AO (Lagarde): a fully occluded point must not keep a
+    // mirror-bright environment reflection.
+    float specularOcclusion = clamp(pow(NdotV + ao, roughness * roughness) - 1.0 + ao, 0.0, 1.0);
+
+    return diffuse * ao + specular * specularOcclusion;
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -488,12 +497,18 @@ void main() {
     // ── Ambient ──────────────────────────────────────────────────────────
     // Split-sum image-based lighting from the current sky, scaled by the ambient slider.
     // The flat baseColor * ambient term remains the fallback when IBL is off.
+    float ao = 1.0;
+    if (light.aoEnabled != 0u) {
+        const vec2 aoUv = gl_FragCoord.xy / max(clusterMeta.screenSizeDepth.xy, vec2(1.0));
+        ao = mix(1.0, textureLod(ambientOcclusion, aoUv, 0.0).r, clamp(light.aoIntensity, 0.0, 1.0));
+    }
+
     vec3 ambient;
     if (light.iblEnabled != 0u) {
-        ambient = evaluateIbl(N, V, baseColor, metallic, roughness) *
+        ambient = evaluateIbl(N, V, baseColor, metallic, roughness, ao) *
                   (light.ambientIntensity * light.iblIntensity);
     } else {
-        ambient = baseColor * light.ambientIntensity;
+        ambient = baseColor * light.ambientIntensity * ao;
     }
 
     vec3 color = ambient + Lo;
@@ -524,6 +539,11 @@ void main() {
         vec3 nextOverlay = (cascadeIdx < 3) ? cascadeColors[cascadeIdx + 1] : baseOverlay;
         vec3 overlay = mix(baseOverlay, nextOverlay, blendT);
         color = mix(color, overlay, 0.4);
+    }
+
+    if (light.aoDebugView != 0u) {
+        outColor = vec4(vec3(ao), coverageAlpha);
+        return;
     }
 
     outColor = vec4(color, coverageAlpha);

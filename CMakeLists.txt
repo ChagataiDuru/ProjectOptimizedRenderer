@@ -94,6 +94,7 @@ set(POR_RENDERER_CORE_SOURCES
     src/renderpasses/ShadowPass.cpp
     src/renderpasses/ClusteredLightCullingPass.cpp
     src/renderpasses/IblPass.cpp
+    src/renderpasses/GtaoPass.cpp
     src/resource/VmaImpl.cpp
     src/resource/Buffer.cpp
     src/resource/Image.cpp
@@ -379,6 +380,22 @@ shader_compile_glsl(
     TARGET por_shaders
     SOURCE "${CMAKE_SOURCE_DIR}/shaders/ibl_brdf_lut.comp"
     OUTPUT "ibl_brdf_lut.comp.spv"
+)
+
+shader_compile_glsl(
+    TARGET por_shaders
+    SOURCE "${CMAKE_SOURCE_DIR}/shaders/pbr_prepass_alpha.frag"
+    OUTPUT "pbr_prepass_alpha.frag.spv"
+)
+shader_compile_glsl(
+    TARGET por_shaders
+    SOURCE "${CMAKE_SOURCE_DIR}/shaders/gtao.comp"
+    OUTPUT "gtao.comp.spv"
+)
+shader_compile_glsl(
+    TARGET por_shaders
+    SOURCE "${CMAKE_SOURCE_DIR}/shaders/gtao_blur.comp"
+    OUTPUT "gtao_blur.comp.spv"
 )
 
 add_dependencies(por_viewer por_shaders)

@@ -27,6 +27,8 @@ MUST_DIFFER = [
     ("scene-overview", "ibl-off"),
     ("shadow-interior", "ibl-off-interior"),
     ("shadow-interior", "ibl-panorama-interior"),
+    ("shadow-interior", "ao-off-interior"),
+    ("shadow-interior", "ao-debug-interior"),
     ("scene-overview", "msaa-4x"),
     ("sky-procedural", "sky-off"),
     ("tonemap-reinhard", "tonemap-agx"),
@@ -38,6 +40,8 @@ MUST_MATCH = [
     ("shadow-cull-side-sun", "shadow-cull-side-sun-off"),
     ("scene-overview", "perf-culling-off"),
     ("shadow-interior", "perf-culling-off-interior"),
+    ("perf-prepass-on-noao", "perf-prepass-off-noao"),
+    ("perf-prepass-on-noao-interior", "perf-prepass-off-noao-interior"),
 ]
 
 # Pairs whose difference is reported but not gated (e.g. draw order only affects

@@ -18,6 +18,7 @@
 #include "renderpasses/TonemapPass.h"
 #include "renderpasses/ClusteredLightCullingPass.h"
 #include "renderpasses/IblPass.h"
+#include "renderpasses/GtaoPass.h"
 #include "resource/Buffer.h"
 #include "resource/Image.h"
 #include "resource/Model.h"
@@ -85,6 +86,8 @@ public:
         uint32_t culledDrawCalls    = 0;
         uint32_t iblBakeCount       = 0;
         float    iblBakeGpuMs = 0.0f;       // most recent bake (sticky between bakes)
+        float    prepassGpuMs = 0.0f;
+        float    aoGpuMs = 0.0f;
         float    shadowGpuMs = 0.0f;
         float    blurGpuMs = 0.0f;
         float    clusterGpuMs = 0.0f;
@@ -177,6 +180,10 @@ private:
     void rebuildActiveSceneDrawBounds();
     // Frustum-culls and orders the active draws into m_visibleDrawOrder.
     void buildVisibleDrawOrder();
+    // True when the depth prepass runs this frame (AO requires it).
+    bool isDepthPrepassActive() const;
+    void recordDepthPrepass(VkCommandBuffer cmd, const FrameResources& frame);
+    void rewriteFrameSceneAoBinding();
     void uploadCurrentFrameCameraState(const CameraData& camera);
     void uploadCurrentFrameLightState();
     void uploadActiveScenePointLights();
@@ -249,6 +256,12 @@ private:
     SkyPass                   m_skyPass;
     IblPass                   m_iblPass;
     IblSettings               m_iblSettings;
+    GtaoPass                  m_gtaoPass;
+    AmbientOcclusionSettings  m_aoSettings;
+    Image                     m_resolvedDepthTarget;
+    VkSampler                 m_depthSampler = VK_NULL_HANDLE;
+    VkPipeline                m_depthPrepassPipeline = VK_NULL_HANDLE;
+    VkPipeline                m_depthPrepassMaskedPipeline = VK_NULL_HANDLE;
 
     // Cached from the last submitFrame() so per-frame uploads stay explicit and traceable.
     ShadowSettings  m_shadowSettings;
