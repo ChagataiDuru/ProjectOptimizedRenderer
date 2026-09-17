@@ -51,8 +51,13 @@ instead of restating it.
 | Shader interface validation | Partial | Centralized constants and static asserts exist; reflection/codegen does not. |
 | Capability-driven optional features | Established foundation | `RendererDeviceFeatures` is a centralized detect-once snapshot with a documented baseline-vs-optional policy. |
 | HDR MSAA | Foundation implemented | Explicit scene attachments, resolve, pipeline compatibility, sample-shading controls, masked-material A2C. |
-| Scripted capture / artifact workflow | Done (2026-09) | `--capture` preset matrix plus `docs/workstreams/` briefs and inventory. |
+| Scripted capture / artifact workflow | Done (2026-09) | `--capture` preset matrix (46 presets) with per-preset GPU timings, plus `docs/workstreams/` briefs, inventory and the `tools/compare_captures.py` gate. |
+| Texture mip chains | Done (2026-09) | Full chains generated on upload; distant aliasing down 38–66%. Texture compression (ASTC/BC7) is still **planned**. |
+| Main-pass culling / ordering / depth prepass | Done (2026-09) | Frustum culling against per-draw AABBs, opaque→masked→A2C ordering, sky drawn last, and a depth prepass feeding an EQUAL scene pass. |
+| Image-based lighting | Done (2026-09) | `IblPass` bakes irradiance + GGX prefilter + BRDF LUT from the procedural sky or an HDR panorama; `pbr.frag` evaluates the split sum. No occlusion beyond AO (ART-LGT-006). |
+| Screen-space AO | Done (2026-09) | `GtaoPass` half-resolution horizon AO from prepass depth, with specular occlusion. |
 | SMAA | Not started | Later native spatial comparison or fallback path. |
+| Texture compression | Planned | ASTC/BC7 with an offline (KTX2) step; mip generation already landed. |
 | Perceptual VRS | Not started, groundwork present | Capability query and optional feature gating exist. |
 | C ABI boundary | Drafted, not stable | `include/por/por_renderer.h` compiles as C11/C++20 with a mock backend; resource APIs are not mature. |
 
