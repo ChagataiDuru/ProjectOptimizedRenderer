@@ -9,7 +9,7 @@ is referenced by run directory name rather than by committed file.
 | ID | Subsystem | Symptom | Repro preset | Root cause | Status |
 |---|---|---|---|---|---|
 | ART-SHD-001 | Shadows / CSM | Shadows had no effect anywhere; filter mode, distance, and caster-culling changes produced 0–5 differing pixels | `shadow-hard` vs `shadow-pcf` vs `shadow-distance-short` vs `shadow-cull-off` | `ShadowPass::updateMatrices()` computed cascade-slice reverse-Z NDC with the shadow-distance ladder near/far (`n`, `f`) but unprojected the corners with the camera projection matrix (near 0.01 / far 1000). Cascade 0 landed at view depth ≈[0.01, 1.39] instead of [0.05, 6.51], and the far cascade spanned out toward 1000 units, so `projectToCascade()` rejected the entire scene | **fixed** |
-| ART-SHD-002 | Shadows / CSM | Receiver bias is a fixed shader constant (0.005) applied on top of `vkCmdSetDepthBias()`; no normal-offset bias, so acne/peter-panning cannot be tuned from one place | `shadow-interior-grazing-sun-bias-zero` vs `shadow-pcf` | Two independent bias mechanisms; the shader constant is unreachable from `ShadowSettings`. With the interior framing, zero rasterizer bias darkens only 0.5% of pixels (column bases) and produces no floor acne, so this is a tunability issue, not a visible defect | open — recommendation (checked in `screenshots/interior`) |
+| ART-SHD-002 | Shadows / CSM | Receiver bias is a fixed shader constant (0.005) applied on top of `vkCmdSetDepthBias()`; no normal-offset bias, so acne/peter-panning cannot be tuned from one place | `shadow-interior-grazing-sun-bias-zero` vs `shadow-pcf` | Two independent bias mechanisms; the shader constant is unreachable from `ShadowSettings`. With the interior framing, zero rasterizer bias darkens only 0.1% of pixels and produces no acne on the sunlit floor, so this is a tunability issue, not a visible defect | open — recommendation (checked in `screenshots/cull-fix2`) |
 | ART-SHD-003 | Shadows / CSM | PCF taps pushed outside the cascade were clamped to the border, duplicating edge texels and smearing/streaking cascade boundaries | `shadow-pcf` | `sampleShadowPCF()` used `clamp(sampleUV, 0, 1)` before `texelFetch` | **fixed** |
 | ART-SHD-004 | Shadows / CSM | Shader could divide by zero in `sampleShadowVSM()`; lighting UBO parameters could disagree with the shadow pass actually running | `shadow-vsm` | `Renderer::buildCurrentLightUBO()` used the raw packet `ShadowSettings` while `ShadowPass` sanitized its own copy (`vsmBleedReduction` clamped to 0.95, `pcfSpreadRadius` to ≥0.25). `vsmBleedReduction = 1.0` gives `(pMax - 1) / 0` | **fixed** |
 | ART-SHD-005 | Shadows / CSM | Hard shadow cutoff line at the shadow distance; cascade blend zone can double-darken | `shadow-distance-short`, `cascades-debug` (not observable in the interior framings, which stay inside cascade 0–1) | No fade-to-lit beyond `maxDistance`; the last 20% of each cascade blends two cascades with `smoothstep` | open — recommendation |
@@ -33,6 +33,7 @@ is referenced by run directory name rather than by committed file.
 | ART-INF-002 | Infrastructure | MoltenVK warning: reading the swapchain image after present ("should not be called after already presenting this drawable") | any capture | `Renderer::endFrame()` presents first and then captures the just-presented swapchain image | open — medium severity |
 | ART-INF-003 | Infrastructure | Unused `triangle.vert` / `triangle.frag` still compiled by the shader target | build | Dead since the PBR pipeline replaced the triangle sample | **fixed** |
 | ART-INF-005 | Infrastructure | Every "interior" capture preset was actually outside Sponza, so shadow filters, sun direction, and A2C looked like no-ops | `shadow-interior*` | Offsets were scaled by the bounding-sphere radius (6.23), but Sponza's half-depth is only 3.08, so `z = 0.85 × radius` placed the camera outside the wall. `CaptureCamera::boundsRelative` now scales by `SceneInfo::normalizedHalfExtent`; interior presets use it | **fixed** |
+| ART-SHD-010 | Shadows / CSM | Shadows disappeared or reappeared with sub-degree camera rotations; interiors rendered fully sunlit for many sun directions | `shadow-cull-side-sun` vs `shadow-cull-side-sun-off` (must be byte-identical) | Three faults in shadow-caster culling (`computeShadowCullPlanes()` / `updateMatrices()`): (1) it was given the direction toward the sun, while the plane classification assumes the direction light travels. (2) Silhouette extrusion planes were oriented by the dropped face's normal, which is wrong for some edge/light configurations; in random tests, 183 of 400 cases were non-conservative, and the planes rejected all 103 meshes whenever the sun had a zero X or Z component. (3) Cascades c>0 were culled against their own slice only, but `pbr.frag` also samples them in the last 20% of the previous cascade. Fixed by passing `-lightDir`, orienting each extrusion plane so the frustum centroid is on its inner side (0/400 non-conservative), and starting the cull slice at 0.8 × the previous split. Across a 48-direction × 2-view sweep, culling on and off are now byte-identical (previously the floor was up to 58 levels brighter with culling on), while culling still removes meshes (e.g. 30/92/103 in the interior cascades) | **fixed** |
 | ART-SHD-009 | Shadows / CSM | Shadow edges on the atrium floor show large stair-steps in hard mode | `shadow-interior-grazing-sun-hard` | Texel lookup (`textureSize`/`texelFetch`) is consistent; likely the default shadow quality (1024 px) against distant roof-edge casters. Not investigated further | open — observation |
 | ART-INF-004 | Infrastructure | Docs/naming drift: `Phase N` markers across headers/shaders and a stale archived phase log | — | Progress-step naming leaked into permanent comments and documentation | **fixed** |
 
@@ -67,19 +68,28 @@ difference is localised to shadow-dependent shading rather than a global exposur
 `msaa-4x` / `msaa-4x-a2c` / `msaa-sample-shading` were identical to each other. That is
 what exposed ART-SHD-001 and is the reason ART-VPW-005 stays open rather than rejected.
 
-**Interior validation (`screenshots/interior`, 2026-09-17)** — `tools/compare_captures.py`
-must-differ gate after ART-INF-005, ART-VPW-005, and ART-VPW-006:
+**Interior validation (`screenshots/cull-fix2`, 2026-09-17)** — `tools/compare_captures.py`
+gate after ART-INF-005, ART-VPW-005, ART-VPW-006, and ART-SHD-010:
 
 | Pair | max | mean | changed |
 |---|---|---|---|
-| `shadow-interior` vs `-grazing-sun` | 226 | 14.904 | 30.172% |
-| `-grazing-sun-hard` vs `-pcf` | 110 | 2.866 | 20.316% |
-| `-grazing-sun-pcf` vs `-vsm` | 64 | 1.508 | 20.359% |
-| `-grazing-sun-pcf` vs `-bias-zero` | 86 | 0.089 | 3.238% |
+| `shadow-interior` vs `-grazing-sun` | 205 | 21.221 | 37.418% |
+| `-grazing-sun-hard` vs `-pcf` | 103 | 1.233 | 8.673% |
+| `-grazing-sun-pcf` vs `-vsm` | 86 | 0.604 | 9.082% |
+| `-grazing-sun-pcf` vs `-bias-zero` | 36 | 0.017 | 0.575% |
 | `msaa-4x-interior` vs `-a2c-interior` | 73 | 0.172 | 1.837% |
 | `msaa-4x-interior` vs `msaa-sample-shading-interior` | 104 | 0.889 | 56.918% |
+| `shadow-cull-side-sun` == `-off` (must match) | 0 | 0 | 0% |
 
-Before the framing fix, the same comparisons in `screenshots/final` were 0–2 levels apart.
-ART-VPW-006 intentionally changes every lit preset (about 34% of pixels in exterior views,
-where the sun-facing wall is now lit and interior point-light leaks are gone), so
-`screenshots/final` is no longer a valid baseline. Use `screenshots/interior` instead.
+**Ground truth for the interior shadows.** A throwaway CPU ray caster (numpy
+Möller–Trumbore over all 262k Sponza triangles, normalized like `computeSceneInfo()`)
+checked sun visibility at 288 floor points of the `-grazing-sun` framing. The render agrees
+with it at 274/288 points for hard shadows and 270/288 for PCF (lit median 129 vs shadow
+median 75). The same ray caster showed that the first interior sun direction,
+`(0.6, 0.75, 0.25)`, leaves the whole atrium floor in shadow. Its "sunlit" capture was
+therefore an ART-SHD-010 artifact, so the presets now use `(0.55, 0.82, 0.10)`, which lights
+about 17% of the floor.
+
+The `screenshots/interior` numbers recorded earlier were measured with ART-SHD-010 still
+present, and `screenshots/final` predates ART-VPW-006. Neither is a valid baseline; use
+`screenshots/cull-fix2`.

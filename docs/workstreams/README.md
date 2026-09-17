@@ -57,6 +57,8 @@ python3 tools/compare_captures.py screenshots/<run> screenshots/<baseline>   # p
 
 A byte-identical PNG between two presets that should differ is itself a finding: it means
 a setting is not reaching the shader.
+Conversely, an optimization (caster culling) that changes a must-match pair is a
+finding too: it means the optimization is not conservative.
 
 ## Preset index
 
@@ -64,7 +66,7 @@ a setting is not reaching the shader.
 |---|---|
 | Framing | `scene-overview`, `scene-floor-close`, `scene-wall-close` |
 | Shadow filtering | `shadow-hard`, `shadow-pcf`, `shadow-vsm`, `shadow-bias-zero` |
-| Shadow parameters | `shadow-distance-short`, `shadow-cull-off`, `cascades-debug` |
+| Shadow parameters | `shadow-distance-short`, `shadow-cull-off`, `cascades-debug`, `shadow-cull-side-sun` / `shadow-cull-side-sun-off` (must be byte-identical) |
 | Shadow visibility (inside the atrium) | `shadow-interior`, `shadow-interior-grazing-sun`, `shadow-interior-grazing-sun-hard`, `shadow-interior-grazing-sun-pcf`, `shadow-interior-grazing-sun-vsm`, `shadow-interior-grazing-sun-bias-zero` |
 | Anti-aliasing | `msaa-4x`, `msaa-4x-a2c`, `msaa-sample-shading` (exterior); `msaa-4x-interior`, `msaa-4x-a2c-interior`, `msaa-sample-shading-interior` (masked foliage in view) |
 | Tone mapping | `tonemap-reinhard`, `tonemap-agx`, `tonemap-pbr-neutral`, `tonemap-split` |

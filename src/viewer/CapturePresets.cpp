@@ -22,8 +22,11 @@ void setInteriorCamera(CapturePreset& preset)
     preset.camera.pitchDegrees = -12.0f;
 }
 
-// Sun high enough to clear the open atrium roof but low enough to cast long shadows.
-const glm::vec3 kGrazingSunDirection = glm::normalize(glm::vec3(0.6f, 0.75f, 0.25f));
+// Off-axis sun steep enough to reach the atrium floor through the open roof. Lower suns
+// (e.g. 49 deg elevation) leave the whole floor in shadow, which a CPU ray cast against
+// the scene confirms; this one lights ~17% of the floor and leaves visible shadow edges.
+// The preset ids keep "grazing" for filename stability.
+const glm::vec3 kGrazingSunDirection = glm::normalize(glm::vec3(0.55f, 0.82f, 0.10f));
 
 std::vector<CapturePreset> buildCapturePresets()
 {
@@ -80,18 +83,18 @@ std::vector<CapturePreset> buildCapturePresets()
     setInteriorCamera(presets.back());
 
     presets.push_back(makeBase("shadow-interior-grazing-sun",
-                               "Interior atrium with a low sun (long shadows)"));
+                               "Interior atrium with an off-axis sun (floor shadow edges)"));
     setInteriorCamera(presets.back());
     presets.back().light.direction = kGrazingSunDirection;
 
     presets.push_back(makeBase("shadow-interior-grazing-sun-pcf",
-                               "Low-sun interior with 16-tap PCF"));
+                               "Off-axis-sun interior with 16-tap PCF"));
     setInteriorCamera(presets.back());
     presets.back().light.direction = kGrazingSunDirection;
     presets.back().shadow.filterMode = 1;
 
     presets.push_back(makeBase("shadow-interior-grazing-sun-bias-zero",
-                               "Low-sun interior with PCF and zero depth bias (acne check)"));
+                               "Off-axis-sun interior with PCF and zero depth bias (acne check)"));
     setInteriorCamera(presets.back());
     presets.back().light.direction = kGrazingSunDirection;
     presets.back().shadow.filterMode = 1;
@@ -145,13 +148,13 @@ std::vector<CapturePreset> buildCapturePresets()
 
     // ── Interior comparisons (appended so existing ids keep their order) ─────
     presets.push_back(makeBase("shadow-interior-grazing-sun-hard",
-                               "Low-sun interior with hard single-tap shadows"));
+                               "Off-axis-sun interior with hard single-tap shadows"));
     setInteriorCamera(presets.back());
     presets.back().light.direction = kGrazingSunDirection;
     presets.back().shadow.filterMode = 0;
 
     presets.push_back(makeBase("shadow-interior-grazing-sun-vsm",
-                               "Low-sun interior with VSM shadows"));
+                               "Off-axis-sun interior with VSM shadows"));
     setInteriorCamera(presets.back());
     presets.back().light.direction = kGrazingSunDirection;
     presets.back().shadow.filterMode = 2;
@@ -176,6 +179,20 @@ std::vector<CapturePreset> buildCapturePresets()
     presets.back().antiAliasing.requestedSampleCount = MsaaSampleCount::X4;
     presets.back().antiAliasing.sampleShadingEnabled = true;
     presets.back().antiAliasing.minSampleShading = 0.5f;
+
+    // Caster culling must be conservative: these two must render byte-identical. The
+    // sun azimuth (zero X component) used to make the culling planes reject every mesh.
+    for (const bool culling : { true, false }) {
+        presets.push_back(makeBase(culling ? "shadow-cull-side-sun" : "shadow-cull-side-sun-off",
+                                   culling ? "Atrium view, side sun, caster culling on"
+                                           : "Atrium view, side sun, caster culling off"));
+        presets.back().camera.boundsRelative = true;
+        presets.back().camera.positionOffset = glm::vec3(0.354f, -0.52f, -0.0065f);
+        presets.back().camera.yawDegrees = 88.7f;
+        presets.back().camera.pitchDegrees = -13.0f;
+        presets.back().light.direction = glm::normalize(glm::vec3(0.0f, 0.643f, 0.766f));
+        presets.back().shadow.enableCasterCulling = culling;
+    }
 
     return presets;
 }

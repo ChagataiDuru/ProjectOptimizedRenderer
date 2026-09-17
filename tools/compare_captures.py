@@ -6,7 +6,8 @@ Usage:
     python3 tools/compare_captures.py <run-dir> <other-dir>   # per-preset diff between runs
 
 A preset pair that should differ but renders byte-identical means a setting is not
-reaching the shader, so the gate exits non-zero when any must-differ pair is identical.
+reaching the shader; a must-match pair that differs means an optimization changed the
+image. The gate exits non-zero on either.
 """
 import sys
 from pathlib import Path
@@ -26,6 +27,11 @@ MUST_DIFFER = [
     ("sky-procedural", "sky-off"),
     ("tonemap-reinhard", "tonemap-agx"),
     ("scene-overview", "cascades-debug"),
+]
+
+# Optimizations that must not change the image.
+MUST_MATCH = [
+    ("shadow-cull-side-sun", "shadow-cull-side-sun-off"),
 ]
 
 
@@ -51,6 +57,17 @@ def gate(run: Path) -> int:
         mx, mean, changed = diff(a, b)
         status = "" if mx > 0 else "  IDENTICAL"
         failures += mx == 0
+        print(f"{label:<76} {mx:>4} {mean:>8.4f} {changed:>9.3f}{status}")
+    for left, right in MUST_MATCH:
+        a, b = run / f"{left}.png", run / f"{right}.png"
+        label = f"{left} == {right}"
+        if not (a.exists() and b.exists()):
+            print(f"{label:<76} MISSING")
+            failures += 1
+            continue
+        mx, mean, changed = diff(a, b)
+        status = "" if mx == 0 else "  DIFFERS"
+        failures += mx != 0
         print(f"{label:<76} {mx:>4} {mean:>8.4f} {changed:>9.3f}{status}")
     print("gate:", "FAIL" if failures else "PASS")
     return 1 if failures else 0

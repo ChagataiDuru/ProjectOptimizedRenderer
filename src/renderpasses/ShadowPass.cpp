@@ -107,11 +107,28 @@ constexpr std::array<std::pair<int, int>, 12> kFrustumEdges{{
     {3, 4}, {3, 5},
 }};
 
+// lightDir is the direction light travels (from the sun toward the scene). Frustum
+// planes whose inward normal points along it are dropped, because casters between the
+// sun and the frustum lie on their outside.
 std::vector<ShadowPass::CullingPlane> computeShadowCullPlanes(
     const glm::mat4& cascadeVP,
     const glm::vec3& lightDir)
 {
     const auto frustum = extractFrustumPlanes(cascadeVP);
+
+    // Frustum centroid (NO depth range): every extrusion plane passes through a frustum
+    // edge and bounds the swept volume, so the centroid must lie on its inner side.
+    const glm::mat4 invVP = glm::inverse(cascadeVP);
+    glm::vec3 centroid(0.0f);
+    for (float x : { -1.0f, 1.0f }) {
+        for (float y : { -1.0f, 1.0f }) {
+            for (float z : { -1.0f, 1.0f }) {
+                const glm::vec4 w = invVP * glm::vec4(x, y, z, 1.0f);
+                centroid += glm::vec3(w) / w.w;
+            }
+        }
+    }
+    centroid /= 8.0f;
 
     std::array<bool, 6> isFrontFacing{};
     for (int i = 0; i < 6; ++i) {
@@ -163,8 +180,9 @@ std::vector<ShadowPass::CullingPlane> computeShadowCullPlanes(
             q[c1] = (a00 * b1 - a10 * b0) / det;
         }
 
-        const int frontFace = isFrontFacing[fA] ? fA : fB;
-        if (glm::dot(planeNormal, frustum[frontFace].normal) < 0.0f) {
+        // Orienting by either adjacent face normal is wrong for some edge/light
+        // configurations and culled every caster (ART-SHD-010); the centroid is not.
+        if (glm::dot(planeNormal, centroid - q) < 0.0f) {
             planeNormal = -planeNormal;
         }
         planes.push_back({ planeNormal, -glm::dot(planeNormal, q) });
@@ -884,9 +902,14 @@ void ShadowPass::updateMatrices(uint32_t frameIndex)
         if (m_settings.enableCasterCulling) {
             const float tanHalfFov = 1.0f / std::abs(m_projMatrix[1][1]);
             const float aspect = std::abs(m_projMatrix[1][1]) / std::abs(m_projMatrix[0][0]);
-            glm::mat4 stdProj = glm::perspectiveRH_NO(2.0f * std::atan(tanHalfFov), aspect, cNear, cFar);
+            // pbr.frag also samples this cascade in the last 20% of the previous one
+            // (cascade blending), so its caster volume must start there.
+            const float cullNear = (c > 0) ? 0.8f * cNear : cNear;
+            glm::mat4 stdProj = glm::perspectiveRH_NO(2.0f * std::atan(tanHalfFov), aspect, cullNear, cFar);
             stdProj[1][1] *= -1.0f;
-            m_shadowCullPlanes[c] = computeShadowCullPlanes(stdProj * m_viewMatrix, lightDir);
+            // lightDir points toward the sun; the culling volume is extruded along the
+            // direction light travels, so pass the opposite vector (ART-SHD-010).
+            m_shadowCullPlanes[c] = computeShadowCullPlanes(stdProj * m_viewMatrix, -lightDir);
         } else {
             m_shadowCullPlanes[c].clear();
         }
@@ -1011,6 +1034,7 @@ void ShadowPass::record(VkCommandBuffer cmd,
                 bounds != nullptr &&
                 !m_shadowCullPlanes[c].empty() &&
                 !aabbSurvivesCulling(bounds->worldMin, bounds->worldMax, m_shadowCullPlanes[c])) {
+                        bounds->worldMin.x, bounds->worldMin.y, bounds->worldMin.z,
                 ++culled;
                 continue;
             }
