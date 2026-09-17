@@ -1034,7 +1034,6 @@ void ShadowPass::record(VkCommandBuffer cmd,
                 bounds != nullptr &&
                 !m_shadowCullPlanes[c].empty() &&
                 !aabbSurvivesCulling(bounds->worldMin, bounds->worldMax, m_shadowCullPlanes[c])) {
-                        bounds->worldMin.x, bounds->worldMin.y, bounds->worldMin.z,
                 ++culled;
                 continue;
             }
