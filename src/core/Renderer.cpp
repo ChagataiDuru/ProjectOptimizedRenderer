@@ -689,11 +689,15 @@ void Renderer::createPbrGraphicsPipelines()
         .scissorCount  = 1,
     };
 
+    // glTF front faces are CCW. The camera projection flips Y, which keeps them CCW in
+    // framebuffer space, so gl_FrontFacing is only correct with COUNTER_CLOCKWISE here
+    // (pbr.frag negates N for back faces of double-sided materials).
+    // Cull mode is dynamic: set per draw from Material::doubleSided (ART-VPW-008).
     VkPipelineRasterizationStateCreateInfo rasterization{
         .sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
         .polygonMode = VK_POLYGON_MODE_FILL,
-        .cullMode    = VK_CULL_MODE_NONE,
-        .frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE, // see createPbrPipeline()
+        .cullMode    = VK_CULL_MODE_BACK_BIT,
+        .frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE,
         .lineWidth   = 1.0f,
     };
 
@@ -728,9 +732,10 @@ void Renderer::createPbrGraphicsPipelines()
         .pAttachments    = &blendAttachment,
     };
 
-    const std::array<VkDynamicState, 2> dynamicStates = {
+    const std::array<VkDynamicState, 3> dynamicStates = {
         VK_DYNAMIC_STATE_VIEWPORT,
         VK_DYNAMIC_STATE_SCISSOR,
+        VK_DYNAMIC_STATE_CULL_MODE,
     };
     const VkPipelineDynamicStateCreateInfo dynamicState{
         .sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
@@ -1864,6 +1869,8 @@ void Renderer::render(RendererOverlay* overlay)
             boundScenePipeline = pipeline;
         }
     };
+    // Dynamic cull mode must be set before the first PBR draw; the sentinel forces it.
+    VkCullModeFlags boundCullMode = VK_CULL_MODE_FRONT_AND_BACK;
 
     // Bind camera UBO descriptor set (set=0, binding=0 — view/projection matrices)
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout,
@@ -1893,6 +1900,19 @@ void Renderer::render(RendererOverlay* overlay)
             const bool drawUsesAlphaCoverage =
                 alphaMasked && drawPipeline == m_maskedA2cPipeline;
             bindScenePipeline(drawPipeline);
+
+            // Single-sided materials cull back faces; debug views show every face.
+            const bool doubleSided =
+                !draw.material.isValid() ||
+                draw.material.index >= materials.size() ||
+                materials[draw.material.index].doubleSided;
+            const VkCullModeFlags cullMode = (doubleSided || m_showNormals || m_wireframe)
+                ? VK_CULL_MODE_NONE
+                : VK_CULL_MODE_BACK_BIT;
+            if (cullMode != boundCullMode) {
+                vkCmdSetCullMode(cmd, cullMode);
+                boundCullMode = cullMode;
+            }
 
             vkCmdPushConstants(cmd, m_pipelineLayout,
                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
